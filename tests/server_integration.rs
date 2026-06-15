@@ -185,3 +185,90 @@ async fn mute_target_missing_returns_obs_unavailable_without_obs() {
     assert!(!ok);
     assert_eq!(code.as_deref(), Some("OBS_UNAVAILABLE"));
 }
+
+#[tokio::test]
+async fn socket_file_exists_while_server_runs() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("server.sock");
+
+    let hub = Arc::new(BroadcastHub::new());
+    let state = StateStore::new(Arc::clone(&hub));
+    let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let mut cfg = Config::default();
+    cfg.connection.password_env = String::new();
+    let config = Arc::new(Mutex::new(cfg));
+    let registry = ClientRegistry::new();
+    let (reconnect_tx, _reconnect_rx) = mpsc::channel::<()>(4);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+
+    let executor = CommandExecutor::new(
+        state,
+        obs_handle,
+        Arc::clone(&hub),
+        config,
+        None,
+        socket_path.clone(),
+        registry,
+        reconnect_tx,
+        shutdown_tx.clone(),
+    );
+
+    let server = IpcServer::bind(&socket_path, hub).unwrap();
+    tokio::spawn(executor.run(cmd_rx));
+    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        socket_path.exists(),
+        "socket file should exist while server is running"
+    );
+
+    // Signal shutdown
+    let _ = shutdown_tx.send(true);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn server_handles_multiple_sequential_clients() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("server.sock");
+
+    let hub = Arc::new(BroadcastHub::new());
+    let state = StateStore::new(Arc::clone(&hub));
+    let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let mut cfg = Config::default();
+    cfg.connection.password_env = String::new();
+    let config = Arc::new(Mutex::new(cfg));
+    let registry = ClientRegistry::new();
+    let (reconnect_tx, _reconnect_rx) = mpsc::channel::<()>(4);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+
+    let executor = CommandExecutor::new(
+        state,
+        obs_handle,
+        Arc::clone(&hub),
+        config,
+        None,
+        socket_path.clone(),
+        registry,
+        reconnect_tx,
+        shutdown_tx.clone(),
+    );
+
+    let server = IpcServer::bind(&socket_path, hub).unwrap();
+    tokio::spawn(executor.run(cmd_rx));
+    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Connect multiple clients sequentially and verify each gets a valid response.
+    for i in 0..3 {
+        let mut client = IpcClient::connect(&socket_path).await.unwrap();
+        let resp = client.send_command(cmd("ping", Value::Null)).await.unwrap();
+        let (ok, result, _) = extract_response(resp);
+        assert!(ok, "client {i} ping failed");
+        assert_eq!(result.unwrap()["message"], "pong");
+    }
+}

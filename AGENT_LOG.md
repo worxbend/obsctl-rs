@@ -43,3 +43,16 @@
 2026-06-16T00:00:00Z iteration 7 added: tests/support/fake_obs_server.rs (full obs-websocket 5.x fake server with auth/events/response overrides), tests/obs_client_integration.rs (12 integration tests)
 2026-06-16T00:00:00Z iteration 7 tests=109 passed (61 unit + 16 CLI + 6 IPC + 12 OBS client + 8 server + 6 TUI) validation_status=0
 2026-06-16T00:00:00Z iteration 7 committed checkpoint bb1c37e
+2026-06-15T21:53:52Z iteration 7 no changes to commit
+2026-06-15T21:53:52Z iteration 7 completed validation_status=0
+2026-06-15T21:53:52Z iteration 8 started remaining=15030s
+2026-06-16T00:00:00Z iteration 8 implemented Phase 9 (Hardening — security redaction, race tests, README)
+2026-06-16T00:00:00Z iteration 8 added: ConnectionConfig custom Debug redacting plaintext password; ObsConnectionParams custom Debug redacting resolved password
+2026-06-16T00:00:00Z iteration 8 added: obs/connection.rs unit tests (4): redaction, None display, env/plaintext resolution
+2026-06-16T00:00:00Z iteration 8 added: config/schema.rs unit tests (2): connection_config_debug_redacts_password, connection_config_debug_shows_none
+2026-06-16T00:00:00Z iteration 8 added: ObsClient #[derive(Debug)]; FakeObsHandle.disconnect_all() via broadcast channel; handle_connection select! on disconnect
+2026-06-16T00:00:00Z iteration 8 added: obs_client_integration.rs tests (2): requests_fail_when_server_drops_connection, auth_string_not_exposed_in_error_messages
+2026-06-16T00:00:00Z iteration 8 added: server_integration.rs tests (2): socket_file_exists_while_server_runs, server_handles_multiple_sequential_clients
+2026-06-16T00:00:00Z iteration 8 added: README.md (quick start, architecture, config, CLI commands, TUI keys, alias resolution, exit codes, dev workflow)
+2026-06-16T00:00:00Z iteration 8 verified: cargo build --release succeeds
+2026-06-16T00:00:00Z iteration 8 tests=119 passed (67 unit + 16 CLI + 6 IPC + 14 OBS client + 10 server + 6 TUI) validation_status=0

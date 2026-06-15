@@ -47,7 +47,7 @@ struct ObsClientRequest {
 
 /// Handle to a connected and identified OBS WebSocket session.
 /// Cheap to clone; all clones share the same underlying connection.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ObsClient {
     sender: mpsc::Sender<ObsClientRequest>,
 }

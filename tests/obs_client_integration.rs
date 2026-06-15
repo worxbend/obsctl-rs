@@ -263,6 +263,61 @@ fn multiple_requests_are_correlated_correctly() {
     });
 }
 
+// ── reconnect / disconnect race tests ─────────────────────────────────────────
+
+#[test]
+fn requests_fail_when_server_drops_connection() {
+    rt().block_on(async {
+        let server = spawn_fake_obs(false, None).await;
+        let (client, _, _, _) = connect_to_fake(server.addr, None).await;
+
+        // Force-close all active connections while keeping the listener alive.
+        server.disconnect_all();
+
+        // Allow a moment for the TCP close to propagate.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Subsequent requests must fail, not hang forever.
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.request(requests::get_scene_list()),
+        )
+        .await;
+
+        match result {
+            Ok(Err(_)) => {} // expected: request fails with OBS_UNAVAILABLE or similar
+            Ok(Ok(_)) => panic!("request should have failed after server dropped the connection"),
+            Err(_) => panic!("request timed out — pending request map may not clean up on close"),
+        }
+        server.shutdown();
+    });
+}
+
+#[test]
+fn auth_string_not_exposed_in_error_messages() {
+    rt().block_on(async {
+        let server = spawn_fake_obs(true, Some("correct_pw")).await;
+
+        let url = format!("ws://{}", server.addr);
+        let ws_stream = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("ws connect")
+            .0;
+        let (sink, stream) = futures_util::StreamExt::split(ws_stream);
+        let (ev_tx, _ev_rx) = mpsc::channel::<obsctl_rs::obs::client::ObsEvent>(8);
+
+        let result = obsctl_rs::obs::client::handshake(sink, stream, Some("wrong_pw"), ev_tx).await;
+        assert!(result.is_err());
+        // The error message must not contain the wrong password
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            !err_str.contains("wrong_pw"),
+            "error message must not contain password: {err_str}"
+        );
+        server.shutdown();
+    });
+}
+
 #[test]
 fn connection_params_from_config_resolves_password_env() {
     use obsctl_rs::config::model::ConnectionConfig;

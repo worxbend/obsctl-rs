@@ -44,7 +44,7 @@ pub struct ServerConfig {
     pub start_embedded_if_missing: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectionConfig {
     pub host: String,
     pub port: u16,
@@ -52,6 +52,19 @@ pub struct ConnectionConfig {
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ConnectionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("password_env", &self.password_env)
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Default for ConnectionConfig {

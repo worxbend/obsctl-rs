@@ -189,6 +189,29 @@ mod tests {
     }
 
     #[test]
+    fn connection_config_debug_redacts_password() {
+        use crate::config::model::ConnectionConfig;
+        let cfg = ConnectionConfig {
+            password: Some("supersecret".to_string()),
+            ..ConnectionConfig::default()
+        };
+        let debug = format!("{cfg:?}");
+        assert!(
+            !debug.contains("supersecret"),
+            "debug must not leak password: {debug}"
+        );
+        assert!(debug.contains("<redacted>"), "debug should show <redacted>");
+    }
+
+    #[test]
+    fn connection_config_debug_shows_none_when_no_password() {
+        use crate::config::model::ConnectionConfig;
+        let cfg = ConnectionConfig::default();
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("None"), "no password should show None");
+    }
+
+    #[test]
     fn duplicate_audio_alias_rejected() {
         let mut c = valid_config();
         c.audio.inputs = vec![

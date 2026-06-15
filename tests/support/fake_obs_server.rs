@@ -11,7 +11,7 @@ use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -62,6 +62,8 @@ pub struct FakeObsHandle {
     /// Receives captured requests for assertion.
     pub requests: mpsc::Receiver<(String, Value)>,
     shutdown: oneshot::Sender<()>,
+    /// Broadcast to disconnect all active connection handlers.
+    disconnect_tx: broadcast::Sender<()>,
 }
 
 impl FakeObsHandle {
@@ -83,8 +85,14 @@ impl FakeObsHandle {
         self.state.lock().await.pending_events.push(msg);
     }
 
-    /// Shut down the fake server.
+    /// Close all active WebSocket connections without stopping the accept loop.
+    pub fn disconnect_all(&self) {
+        let _ = self.disconnect_tx.send(());
+    }
+
+    /// Shut down the fake server (closes the listener and all connections).
     pub fn shutdown(self) {
+        let _ = self.disconnect_tx.send(());
         let _ = self.shutdown.send(());
     }
 }
@@ -102,9 +110,11 @@ pub async fn spawn_fake_obs(require_auth: bool, password: Option<&str>) -> FakeO
 
     let (req_tx, req_rx) = mpsc::channel::<(String, Value)>(64);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+    let (disconnect_tx, _) = broadcast::channel::<()>(8);
 
     let state_clone = state.clone();
     let password = password.map(|p| p.to_string());
+    let disconnect_tx_clone = disconnect_tx.clone();
 
     tokio::spawn(async move {
         loop {
@@ -117,7 +127,8 @@ pub async fn spawn_fake_obs(require_auth: bool, password: Option<&str>) -> FakeO
                             let tx = req_tx.clone();
                             let pw = password.clone();
                             let auth = require_auth;
-                            tokio::spawn(handle_connection(stream, s, tx, auth, pw));
+                            let disc_rx = disconnect_tx_clone.subscribe();
+                            tokio::spawn(handle_connection(stream, s, tx, auth, pw, disc_rx));
                         }
                         Err(_) => break,
                     }
@@ -131,6 +142,7 @@ pub async fn spawn_fake_obs(require_auth: bool, password: Option<&str>) -> FakeO
         state,
         requests: req_rx,
         shutdown: shutdown_tx,
+        disconnect_tx,
     }
 }
 
@@ -140,6 +152,7 @@ async fn handle_connection(
     req_tx: mpsc::Sender<(String, Value)>,
     require_auth: bool,
     password: Option<String>,
+    mut disconnect_rx: broadcast::Receiver<()>,
 ) {
     let ws_stream = match accept_async(stream).await {
         Ok(s) => s,
@@ -243,83 +256,95 @@ async fn handle_connection(
     }
 
     // --- Handle requests ---
-    while let Some(Ok(msg)) = source.next().await {
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Binary(b) => String::from_utf8(b).unwrap_or_default(),
-            Message::Close(_) => break,
-            _ => continue,
-        };
+    loop {
+        tokio::select! {
+            _ = disconnect_rx.recv() => {
+                let _ = sink.send(Message::Close(None)).await;
+                break;
+            }
+            msg = source.next() => {
+                let msg = match msg {
+                    Some(Ok(m)) => m,
+                    _ => break,
+                };
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Binary(b) => String::from_utf8(b).unwrap_or_default(),
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
 
-        let request: Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+                let request: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
 
-        if request.get("op").and_then(|v| v.as_u64()) != Some(OPCODE_REQUEST as u64) {
-            continue;
-        }
-
-        let d = match request.get("d") {
-            Some(d) => d,
-            None => continue,
-        };
-
-        let request_type = d
-            .get("requestType")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let request_id = d
-            .get("requestId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let request_data = d.get("requestData").cloned().unwrap_or(Value::Null);
-
-        // Record the request
-        let _ = req_tx.send((request_type.clone(), request_data)).await;
-
-        // Build response
-        let prepared = state.lock().await.responses.get(&request_type).cloned();
-
-        let response = if let Some(p) = prepared {
-            json!({
-                "op": OPCODE_REQUEST_RESPONSE,
-                "d": {
-                    "requestType": request_type,
-                    "requestId": request_id,
-                    "requestStatus": {
-                        "result": p.ok,
-                        "code": if p.ok { 100u32 } else { 400u32 },
-                        "comment": p.comment,
-                    },
-                    "responseData": p.data,
+                if request.get("op").and_then(|v| v.as_u64()) != Some(OPCODE_REQUEST as u64) {
+                    continue;
                 }
-            })
-        } else {
-            // Default: success with empty data for known types
-            let default_data = default_response(&request_type);
-            json!({
-                "op": OPCODE_REQUEST_RESPONSE,
-                "d": {
-                    "requestType": request_type,
-                    "requestId": request_id,
-                    "requestStatus": {
-                        "result": true,
-                        "code": 100,
-                    },
-                    "responseData": default_data,
-                }
-            })
-        };
 
-        if sink
-            .send(Message::Text(response.to_string()))
-            .await
-            .is_err()
-        {
-            break;
+                let d = match request.get("d") {
+                    Some(d) => d,
+                    None => continue,
+                };
+
+                let request_type = d
+                    .get("requestType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let request_id = d
+                    .get("requestId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let request_data = d.get("requestData").cloned().unwrap_or(Value::Null);
+
+                // Record the request
+                let _ = req_tx.send((request_type.clone(), request_data)).await;
+
+                // Build response
+                let prepared = state.lock().await.responses.get(&request_type).cloned();
+
+                let response = if let Some(p) = prepared {
+                    json!({
+                        "op": OPCODE_REQUEST_RESPONSE,
+                        "d": {
+                            "requestType": request_type,
+                            "requestId": request_id,
+                            "requestStatus": {
+                                "result": p.ok,
+                                "code": if p.ok { 100u32 } else { 400u32 },
+                                "comment": p.comment,
+                            },
+                            "responseData": p.data,
+                        }
+                    })
+                } else {
+                    // Default: success with empty data for known types
+                    let default_data = default_response(&request_type);
+                    json!({
+                        "op": OPCODE_REQUEST_RESPONSE,
+                        "d": {
+                            "requestType": request_type,
+                            "requestId": request_id,
+                            "requestStatus": {
+                                "result": true,
+                                "code": 100,
+                            },
+                            "responseData": default_data,
+                        }
+                    })
+                };
+
+                if sink
+                    .send(Message::Text(response.to_string()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
         }
     }
 }
