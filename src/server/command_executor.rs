@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
-use crate::config::model::Config;
+use crate::config::{dump as dump_config_mod, model::Config};
 use crate::domain::{
     aliases::{AliasEntry, resolve, resolve_audio},
     errors::ObsctlError,
@@ -24,6 +24,7 @@ pub struct CommandExecutor {
     obs: Arc<Mutex<Option<ObsClient>>>,
     hub: Arc<BroadcastHub>,
     config: Arc<Mutex<Config>>,
+    config_path: Option<PathBuf>,
     socket_path: PathBuf,
     registry: ClientRegistry,
     started_at: Instant,
@@ -38,6 +39,7 @@ impl CommandExecutor {
         obs: Arc<Mutex<Option<ObsClient>>>,
         hub: Arc<BroadcastHub>,
         config: Arc<Mutex<Config>>,
+        config_path: Option<PathBuf>,
         socket_path: PathBuf,
         registry: ClientRegistry,
         reconnect_tx: mpsc::Sender<()>,
@@ -48,6 +50,7 @@ impl CommandExecutor {
             obs,
             hub,
             config,
+            config_path,
             socket_path,
             registry,
             started_at: Instant::now(),
@@ -83,9 +86,7 @@ impl CommandExecutor {
             "reload_config" => self.cmd_reload_config().await,
             "reconnect_obs" => self.cmd_reconnect_obs().await,
             "shutdown_server" => self.cmd_shutdown_server().await,
-            "dump_config" => Err(ObsctlError::ObsRequestFailed(
-                "dump_config not yet implemented in this build".to_string(),
-            )),
+            "dump_config" => self.cmd_dump_config().await,
             other => Err(ObsctlError::CommandParseError(format!(
                 "unknown command: {other}"
             ))),
@@ -258,6 +259,76 @@ impl CommandExecutor {
             .request(requests::set_input_volume(&obs_name, vol_mul))
             .await?;
         Ok(json!({ "message": format!("volume set to {percent}%: {obs_name}") }))
+    }
+
+    async fn cmd_dump_config(&self) -> crate::domain::result::Result<Value> {
+        let client = self.require_obs().await?;
+
+        // Fetch scene and input lists from OBS.
+        let scene_resp = client
+            .request(crate::obs::requests::get_scene_list())
+            .await?;
+        let scenes: Vec<String> = scene_resp
+            .get("scenes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.get("sceneName").and_then(|n| n.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let input_resp = client
+            .request(crate::obs::requests::get_input_list())
+            .await?;
+        let inputs: Vec<String> = input_resp
+            .get("inputs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.get("inputName").and_then(|n| n.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let obs_resources = dump_config_mod::ObsResources { scenes, inputs };
+
+        let config_guard = self.config.lock().await;
+        let current_config = config_guard.clone();
+        drop(config_guard);
+
+        let merged = dump_config_mod::merge(&current_config, &obs_resources)?;
+
+        if let Some(path) = &self.config_path {
+            let backup = dump_config_mod::write_backup(path)?;
+            dump_config_mod::write_atomic(&merged, path)?;
+            info!(
+                "Config dumped to {} (backup: {})",
+                path.display(),
+                backup.display()
+            );
+
+            // Reload config in memory.
+            match crate::config::loader::load(path) {
+                Ok(new_cfg) => {
+                    let mut guard = self.config.lock().await;
+                    *guard = new_cfg;
+                }
+                Err(e) => warn!("Failed to reload config after dump: {e}"),
+            }
+        } else {
+            warn!("dump-config: no config_path configured, skipping write");
+        }
+
+        let scene_count = merged.scenes.len();
+        let input_count = merged.audio.inputs.len();
+        Ok(json!({
+            "message": format!("config dumped: {scene_count} scenes, {input_count} inputs"),
+            "scenes": scene_count,
+            "inputs": input_count,
+        }))
     }
 
     async fn cmd_validate_config(&self) -> crate::domain::result::Result<Value> {

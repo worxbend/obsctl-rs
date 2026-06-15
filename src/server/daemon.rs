@@ -87,6 +87,7 @@ pub async fn run(options: ServerOptions) -> i32 {
         Arc::clone(&obs_handle),
         Arc::clone(&hub),
         Arc::clone(&config_shared),
+        Some(config_path.clone()),
         socket_path.clone(),
         registry.clone(),
         reconnect_tx.clone(),

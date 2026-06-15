@@ -38,6 +38,7 @@ async fn start_test_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>) {
         obs_handle,
         Arc::clone(&hub),
         config,
+        None, // no config_path in tests
         socket_path.clone(),
         registry,
         reconnect_tx,

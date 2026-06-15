@@ -29,3 +29,10 @@
 2026-06-16T00:00:00Z iteration 5 cli/router.rs run_tui now launches real TUI; crossterm event-stream feature added
 2026-06-16T00:00:00Z iteration 5 tests=79 passed (42 unit + 16 CLI + 6 IPC + 8 server + 6 TUI + 1 obs placeholder) validation_status=0
 2026-06-16T00:00:00Z iteration 5 committed checkpoint b948485
+2026-06-15T21:44:38Z iteration 5 no changes to commit
+2026-06-15T21:44:38Z iteration 5 completed validation_status=0
+2026-06-15T21:44:38Z iteration 6 started remaining=15585s
+2026-06-16T00:00:00Z iteration 6 implemented Phase 8 (Dump Config + Service Management)
+2026-06-16T00:00:00Z iteration 6 added: config/dump.rs (merge/stale/backup/atomic-write + 10 unit tests), service/installer.rs (ServiceInstaller + FakeRunner + 8 unit tests), runtime/logger.rs (init_server/init_cli + file appender)
+2026-06-16T00:00:00Z iteration 6 wired: dump_config command in server/command_executor.rs now fully implemented; config_path plumbed from daemon.rs
+2026-06-16T00:00:00Z iteration 6 tests=98 passed (61 unit + 16 CLI + 6 IPC + 8 server + 6 TUI + 1 obs placeholder) validation_status=0
