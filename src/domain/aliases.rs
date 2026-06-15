@@ -63,6 +63,14 @@ pub fn resolve<'a>(target: &str, entries: &'a [AliasEntry]) -> Result<&'a AliasE
     }
 }
 
+/// Resolve an audio input target, returning `AudioInputNotFound` instead of `SceneNotFound`.
+pub fn resolve_audio<'a>(target: &str, entries: &'a [AliasEntry]) -> Result<&'a AliasEntry> {
+    resolve(target, entries).map_err(|e| match e {
+        ObsctlError::SceneNotFound(t) => ObsctlError::AudioInputNotFound(t),
+        other => other,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
