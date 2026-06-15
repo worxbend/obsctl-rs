@@ -102,11 +102,54 @@ mod tests {
     }
 
     #[test]
+    fn case_insensitive_alias_match() {
+        let entries = vec![entry("Main Scene", Some("MainCam"), None)];
+        assert_eq!(resolve("maincam", &entries).unwrap().name, "Main Scene");
+    }
+
+    #[test]
+    fn case_insensitive_obs_name_match() {
+        let entries = vec![entry("Main Scene", None, None)];
+        assert_eq!(resolve("main scene", &entries).unwrap().name, "Main Scene");
+    }
+
+    #[test]
     fn not_found() {
         let entries = vec![entry("Main Scene", None, None)];
         assert!(matches!(
             resolve("Other", &entries),
             Err(ObsctlError::SceneNotFound(_))
         ));
+    }
+
+    #[test]
+    fn ambiguous_alias_fails() {
+        // Neither alias matches exactly (case-sensitive), but both match case-insensitively.
+        let entries = vec![
+            entry("Scene A", Some("CAM"), None),
+            entry("Scene B", Some("Cam"), None),
+        ];
+        assert!(matches!(
+            resolve("cam", &entries),
+            Err(ObsctlError::AliasAmbiguous(_))
+        ));
+    }
+
+    #[test]
+    fn audio_not_found_returns_audio_error() {
+        let entries: Vec<AliasEntry> = vec![];
+        assert!(matches!(
+            resolve_audio("Mic", &entries),
+            Err(ObsctlError::AudioInputNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn shortcut_takes_priority_over_alias() {
+        let entries = vec![
+            entry("By Shortcut", None, Some("x")),
+            entry("By Alias", Some("x"), None),
+        ];
+        assert_eq!(resolve("x", &entries).unwrap().name, "By Shortcut");
     }
 }

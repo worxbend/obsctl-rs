@@ -56,3 +56,16 @@
 2026-06-16T00:00:00Z iteration 8 added: README.md (quick start, architecture, config, CLI commands, TUI keys, alias resolution, exit codes, dev workflow)
 2026-06-16T00:00:00Z iteration 8 verified: cargo build --release succeeds
 2026-06-16T00:00:00Z iteration 8 tests=119 passed (67 unit + 16 CLI + 6 IPC + 14 OBS client + 10 server + 6 TUI) validation_status=0
+2026-06-15T22:02:29Z iteration 8 no changes to commit
+2026-06-15T22:02:29Z iteration 8 completed validation_status=0
+2026-06-15T22:02:29Z iteration 9 started remaining=14514s
+2026-06-16T00:00:00Z iteration 9 implemented checklist compliance gaps
+2026-06-16T00:00:00Z iteration 9 added: Config #[serde(deny_unknown_fields)] — rejects unknown top-level keys as required
+2026-06-16T00:00:00Z iteration 9 added: ConnectionConfig.reconnect legacy field + loader.rs migrate_legacy_reconnect() for backward compat
+2026-06-16T00:00:00Z iteration 9 added: config/schema.rs tests (5): max_delay<initial, multiplier<1.0, missing_password_env, blank_socket_path, duplicate shortcuts (scene+audio)
+2026-06-16T00:00:00Z iteration 9 added: config/schema.rs loader_tests (2): rejects_unknown_top_level_key, legacy_connection_reconnect_is_migrated
+2026-06-16T00:00:00Z iteration 9 added: domain/aliases.rs tests (5): case_insensitive_alias, case_insensitive_obs_name, ambiguous_alias_fails, audio_not_found, shortcut_priority
+2026-06-16T00:00:00Z iteration 9 added: domain/errors.rs tests (6): exit code mapping (2,3,4,5,6), error_messages_do_not_leak_secrets
+2026-06-16T00:00:00Z iteration 9 added: domain/parser.rs tests (5): escaped_quote, set-scene_alias, volume_alias, boundaries, wrong_arg_count, all_zero_arg_commands
+2026-06-16T00:00:00Z iteration 9 tests=144 passed (92 unit + 16 CLI + 6 IPC + 14 OBS client + 10 server + 6 TUI) validation_status=0
+2026-06-16T00:00:00Z iteration 9 verified: cargo fmt --check, cargo clippy -D warnings, cargo build --release all pass

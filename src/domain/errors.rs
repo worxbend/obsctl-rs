@@ -79,3 +79,69 @@ impl ObsctlError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_errors_map_to_exit_2() {
+        assert_eq!(
+            ObsctlError::ConfigNotFound("/path".to_string()).exit_code(),
+            2
+        );
+        assert_eq!(ObsctlError::ConfigInvalid("bad".to_string()).exit_code(), 2);
+    }
+
+    #[test]
+    fn server_errors_map_to_exit_3() {
+        assert_eq!(
+            ObsctlError::ServerUnavailable {
+                socket_path: "/s".to_string(),
+                message: "refused".to_string()
+            }
+            .exit_code(),
+            3
+        );
+        assert_eq!(
+            ObsctlError::IpcConnectionFailed("x".to_string()).exit_code(),
+            3
+        );
+        assert_eq!(ObsctlError::AuthenticationFailed.exit_code(), 3);
+    }
+
+    #[test]
+    fn obs_errors_map_to_exit_4() {
+        assert_eq!(ObsctlError::ObsUnavailable.exit_code(), 4);
+        assert_eq!(ObsctlError::RequestTimeout.exit_code(), 4);
+        assert_eq!(ObsctlError::SceneNotFound("x".to_string()).exit_code(), 4);
+        assert_eq!(
+            ObsctlError::AudioInputNotFound("x".to_string()).exit_code(),
+            4
+        );
+    }
+
+    #[test]
+    fn parse_error_maps_to_exit_5() {
+        assert_eq!(
+            ObsctlError::CommandParseError("bad".to_string()).exit_code(),
+            5
+        );
+    }
+
+    #[test]
+    fn ipc_protocol_error_maps_to_exit_6() {
+        assert_eq!(
+            ObsctlError::IpcProtocolError("bad frame".to_string()).exit_code(),
+            6
+        );
+    }
+
+    #[test]
+    fn error_messages_do_not_leak_secrets() {
+        let err = ObsctlError::AuthenticationFailed;
+        let msg = err.to_string();
+        assert!(!msg.contains("password"), "error must not mention password");
+        assert!(!msg.contains("secret"), "error must not mention secret");
+    }
+}

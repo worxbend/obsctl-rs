@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
     #[serde(default)]
@@ -52,6 +53,9 @@ pub struct ConnectionConfig {
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub password: Option<String>,
+    /// Legacy field: `connection.reconnect` — migrated to top-level `reconnect` on load.
+    #[serde(default, skip_serializing)]
+    pub reconnect: Option<ReconnectConfig>,
 }
 
 impl std::fmt::Debug for ConnectionConfig {
@@ -76,6 +80,7 @@ impl Default for ConnectionConfig {
             connect_timeout_ms: 3000,
             request_timeout_ms: 2500,
             password: None,
+            reconnect: None,
         }
     }
 }

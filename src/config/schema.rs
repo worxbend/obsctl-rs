@@ -228,4 +228,117 @@ mod tests {
         ];
         assert!(validate(&c).is_err());
     }
+
+    #[test]
+    fn rejects_max_delay_less_than_initial() {
+        let mut c = valid_config();
+        c.reconnect.initial_delay_ms = 5000;
+        c.reconnect.max_delay_ms = 100;
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn rejects_multiplier_less_than_one() {
+        let mut c = valid_config();
+        c.reconnect.multiplier = 0.5;
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_password_env_var() {
+        let mut c = Config::default();
+        // Use a very unlikely env var name that definitely won't be set
+        c.connection.password_env = "OBSCTL_SCHEMA_TEST_NONEXISTENT_VAR_F7D3C2A1B0".to_string();
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn rejects_blank_socket_path_when_set() {
+        let mut c = valid_config();
+        c.server.socket_path = Some(String::new());
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn duplicate_scene_shortcut_rejected() {
+        let mut c = valid_config();
+        c.scenes = vec![
+            SceneConfig {
+                name: "A".to_string(),
+                shortcut: Some("s".to_string()),
+                ..Default::default()
+            },
+            SceneConfig {
+                name: "B".to_string(),
+                shortcut: Some("s".to_string()),
+                ..Default::default()
+            },
+        ];
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn duplicate_audio_shortcut_rejected() {
+        let mut c = valid_config();
+        c.audio.inputs = vec![
+            AudioInputConfig {
+                name: "Mic A".to_string(),
+                shortcut: Some("m".to_string()),
+                ..Default::default()
+            },
+            AudioInputConfig {
+                name: "Mic B".to_string(),
+                shortcut: Some("m".to_string()),
+                ..Default::default()
+            },
+        ];
+        assert!(validate(&c).is_err());
+    }
+}
+
+#[cfg(test)]
+mod loader_tests {
+    use crate::config::loader;
+    use tempfile::TempDir;
+
+    #[test]
+    fn rejects_unknown_top_level_key() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(
+            &path,
+            "version: 1\nconnection:\n  host: 127.0.0.1\nunknown_field: true\n",
+        )
+        .unwrap();
+        let result = loader::load(&path);
+        assert!(result.is_err(), "unknown top-level key should be rejected");
+    }
+
+    #[test]
+    fn legacy_connection_reconnect_is_migrated() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yml");
+        let yaml = r#"
+version: 1
+connection:
+  host: "127.0.0.1"
+  port: 4455
+  password_env: ""
+  connect_timeout_ms: 3000
+  request_timeout_ms: 2500
+  reconnect:
+    enabled: true
+    endless: false
+    initial_delay_ms: 1000
+    max_delay_ms: 5000
+    multiplier: 2.0
+    jitter_ms: 100
+"#;
+        std::fs::write(&path, yaml).unwrap();
+        let config = loader::load(&path).expect("should load with legacy reconnect");
+        assert!(!config.reconnect.endless);
+        assert_eq!(config.reconnect.initial_delay_ms, 1000);
+        assert_eq!(config.reconnect.max_delay_ms, 5000);
+        assert!((config.reconnect.multiplier - 2.0).abs() < 1e-9);
+    }
 }

@@ -207,4 +207,72 @@ mod tests {
         assert!(parse("").is_err());
         assert!(parse("/").is_err());
     }
+
+    #[test]
+    fn parse_escaped_quote_in_name() {
+        // A quoted argument with an escaped inner quote
+        let result = parse(r#"scene "Main \"Live\" Cam""#).unwrap();
+        assert_eq!(
+            result,
+            Command::SetScene {
+                target: r#"Main "Live" Cam"#.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_set_scene_alias() {
+        // set-scene is an alias for scene
+        assert_eq!(
+            parse("set-scene main").unwrap(),
+            Command::SetScene {
+                target: "main".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_volume_alias() {
+        // volume is an alias for vol
+        assert_eq!(
+            parse("volume mic 50").unwrap(),
+            Command::SetVolume {
+                target: "mic".to_string(),
+                percent: 50
+            }
+        );
+    }
+
+    #[test]
+    fn parse_volume_boundaries() {
+        assert!(parse("vol mic 0").is_ok());
+        assert!(parse("vol mic 100").is_ok());
+        assert!(parse("vol mic 101").is_err());
+    }
+
+    #[test]
+    fn parse_wrong_arg_count_fails() {
+        assert!(parse("scene").is_err());
+        assert!(parse("scene a b").is_err());
+        assert!(parse("mute").is_err());
+        assert!(parse("vol mic").is_err()); // missing percent
+        assert!(parse("help extra_arg").is_err());
+    }
+
+    #[test]
+    fn parse_all_zero_arg_commands() {
+        for cmd in &[
+            "dump-config",
+            "reload-config",
+            "server-status",
+            "obs-status",
+            "validate-config",
+            "reconnect",
+            "connect",
+            "disconnect",
+            "shutdown-server",
+        ] {
+            assert!(parse(cmd).is_ok(), "command '{cmd}' should parse ok");
+        }
+    }
 }

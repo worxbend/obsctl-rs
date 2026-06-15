@@ -13,7 +13,17 @@ pub fn load(path: &Path) -> Result<Config> {
             ObsctlError::Io(e)
         }
     })?;
-    serde_yaml::from_str(&content).map_err(|e| ObsctlError::ConfigInvalid(e.to_string()))
+    let mut config: Config =
+        serde_yaml::from_str(&content).map_err(|e| ObsctlError::ConfigInvalid(e.to_string()))?;
+    migrate_legacy_reconnect(&mut config);
+    Ok(config)
+}
+
+/// Migrate the legacy `connection.reconnect` field to the canonical top-level `reconnect`.
+fn migrate_legacy_reconnect(config: &mut Config) {
+    if let Some(legacy) = config.connection.reconnect.take() {
+        config.reconnect = legacy;
+    }
 }
 
 pub fn load_or_default(path: &Path) -> Result<Config> {

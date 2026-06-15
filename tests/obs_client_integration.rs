@@ -331,6 +331,7 @@ fn connection_params_from_config_resolves_password_env() {
         password_env: "TEST_OBS_PW_RESOLVE".to_string(),
         connect_timeout_ms: 3000,
         request_timeout_ms: 2500,
+        reconnect: None,
     };
     let params = ObsConnectionParams::from_config(&cfg);
     assert_eq!(params.password.as_deref(), Some("mypassword"));
