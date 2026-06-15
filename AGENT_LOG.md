@@ -24,3 +24,8 @@
 2026-06-15T21:37:11Z iteration 4 no changes to commit
 2026-06-15T21:37:11Z iteration 4 completed validation_status=0
 2026-06-15T21:37:11Z iteration 5 started remaining=16031s
+2026-06-16T00:00:00Z iteration 5 implemented Phase 7 (Ratatui TUI)
+2026-06-16T00:00:00Z iteration 5 added: tui/app.rs (main loop, EventStream, dual-conn model), tui/session.rs, tui/event_applier.rs, tui/input.rs, tui/layout.rs, tui/widgets/{header,connection,scenes,scene_map,audio,logs,command_palette}.rs
+2026-06-16T00:00:00Z iteration 5 cli/router.rs run_tui now launches real TUI; crossterm event-stream feature added
+2026-06-16T00:00:00Z iteration 5 tests=79 passed (42 unit + 16 CLI + 6 IPC + 8 server + 6 TUI + 1 obs placeholder) validation_status=0
+2026-06-16T00:00:00Z iteration 5 committed checkpoint b948485
