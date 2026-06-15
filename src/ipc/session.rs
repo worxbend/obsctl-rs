@@ -24,7 +24,11 @@ impl BroadcastHub {
         let (state_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (events_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (logs_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
-        Self { state_tx, events_tx, logs_tx }
+        Self {
+            state_tx,
+            events_tx,
+            logs_tx,
+        }
     }
 
     pub fn publish(&self, topic: &str, msg: ServerMessage) {

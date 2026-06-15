@@ -11,7 +11,11 @@ use tokio::sync::{mpsc, watch};
 
 async fn start_test_server(
     socket_path: &std::path::Path,
-) -> (Arc<BroadcastHub>, mpsc::Receiver<CommandDispatch>, watch::Sender<bool>) {
+) -> (
+    Arc<BroadcastHub>,
+    mpsc::Receiver<CommandDispatch>,
+    watch::Sender<bool>,
+) {
     let hub = Arc::new(BroadcastHub::new());
     let (cmd_tx, cmd_rx) = mpsc::channel::<CommandDispatch>(64);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -46,7 +50,10 @@ async fn command_round_trip() {
 
     let mut client = IpcClient::connect(&socket_path).await.unwrap();
     let resp = client
-        .send_command(CommandPayload { name: "ping".to_string(), args: serde_json::Value::Null })
+        .send_command(CommandPayload {
+            name: "ping".to_string(),
+            args: serde_json::Value::Null,
+        })
         .await
         .unwrap();
 

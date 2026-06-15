@@ -10,8 +10,8 @@ use tracing::{debug, error, warn};
 use crate::ipc::{
     codec::{decode, encode},
     protocol::{
-        is_valid_topic, ClientMessage, CommandPayload, ErrorPayload, ServerMessage, TOPIC_EVENTS,
-        TOPIC_LOGS, TOPIC_STATE,
+        ClientMessage, CommandPayload, ErrorPayload, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS,
+        TOPIC_STATE, is_valid_topic,
     },
     session::{BroadcastHub, CommandDispatch, SessionSubscriptions},
 };
@@ -159,11 +159,19 @@ async fn handle_line(
             let id_clone = id.clone();
             let (reply_tx, reply_rx) = oneshot::channel();
             if command_tx
-                .send(CommandDispatch { id, payload: command, reply: reply_tx })
+                .send(CommandDispatch {
+                    id,
+                    payload: command,
+                    reply: reply_tx,
+                })
                 .await
                 .is_err()
             {
-                send_encoded(&err_response(id_clone, "SERVER_ERROR", "command handler unavailable"), &write_tx).await;
+                send_encoded(
+                    &err_response(id_clone, "SERVER_ERROR", "command handler unavailable"),
+                    &write_tx,
+                )
+                .await;
                 return;
             }
             tokio::spawn(async move {
@@ -178,12 +186,21 @@ async fn handle_line(
         ClientMessage::Subscribe { id, topics } => {
             let invalid: Vec<&String> = topics.iter().filter(|t| !is_valid_topic(t)).collect();
             if !invalid.is_empty() {
-                let names = invalid.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
-                send_encoded(&err_response(id, "INVALID_TOPIC", &format!("unknown topics: {names}")), write_tx).await;
+                let names = invalid
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                send_encoded(
+                    &err_response(id, "INVALID_TOPIC", &format!("unknown topics: {names}")),
+                    write_tx,
+                )
+                .await;
                 return;
             }
 
-            let needs_initial_state = topics.iter().any(|t| t == TOPIC_STATE) && !subs.is_state_subscribed();
+            let needs_initial_state =
+                topics.iter().any(|t| t == TOPIC_STATE) && !subs.is_state_subscribed();
             for t in &topics {
                 subs.insert(t.clone());
             }
@@ -240,7 +257,11 @@ mod tests {
 
     pub async fn start_test_server(
         socket_path: &Path,
-    ) -> (Arc<BroadcastHub>, mpsc::Receiver<CommandDispatch>, watch::Sender<bool>) {
+    ) -> (
+        Arc<BroadcastHub>,
+        mpsc::Receiver<CommandDispatch>,
+        watch::Sender<bool>,
+    ) {
         let hub = Arc::new(BroadcastHub::new());
         let (cmd_tx, cmd_rx) = mpsc::channel::<CommandDispatch>(64);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);

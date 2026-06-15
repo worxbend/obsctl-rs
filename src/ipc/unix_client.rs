@@ -34,13 +34,19 @@ impl IpcClient {
             .await
             .map_err(|e| ObsctlError::IpcConnectionFailed(e.to_string()))?;
         let (reader, writer) = stream.into_split();
-        Ok(Self { reader: BufReader::new(reader), writer })
+        Ok(Self {
+            reader: BufReader::new(reader),
+            writer,
+        })
     }
 
     /// Send a command and wait for the correlated response.
     pub async fn send_command(&mut self, payload: CommandPayload) -> Result<ServerMessage> {
         let id = next_request_id();
-        let msg = ClientMessage::Command { id: id.clone(), command: payload };
+        let msg = ClientMessage::Command {
+            id: id.clone(),
+            command: payload,
+        };
         let encoded = encode(&msg)?;
         self.writer
             .write_all(encoded.as_bytes())
@@ -56,10 +62,14 @@ impl IpcClient {
                 .await
                 .map_err(ObsctlError::Io)?;
             if n == 0 {
-                return Err(ObsctlError::IpcProtocolError("connection closed".to_string()));
+                return Err(ObsctlError::IpcProtocolError(
+                    "connection closed".to_string(),
+                ));
             }
             if let Ok(msg @ ServerMessage::Response { .. }) = decode::<ServerMessage>(line.trim())
-                && let ServerMessage::Response { id: ref resp_id, .. } = msg
+                && let ServerMessage::Response {
+                    id: ref resp_id, ..
+                } = msg
                 && resp_id == &id
             {
                 return Ok(msg);
@@ -94,7 +104,12 @@ impl IpcClient {
                 ));
             }
             match decode::<ServerMessage>(line.trim()) {
-                Ok(ServerMessage::Response { id: resp_id, ok, error, .. }) if resp_id == id => {
+                Ok(ServerMessage::Response {
+                    id: resp_id,
+                    ok,
+                    error,
+                    ..
+                }) if resp_id == id => {
                     if ok {
                         return Ok(());
                     } else {
@@ -121,7 +136,9 @@ impl IpcClient {
                 .await
                 .map_err(ObsctlError::Io)?;
             if n == 0 {
-                return Err(ObsctlError::IpcProtocolError("connection closed".to_string()));
+                return Err(ObsctlError::IpcProtocolError(
+                    "connection closed".to_string(),
+                ));
             }
             if let Ok(msg @ ServerMessage::Event { .. }) = decode::<ServerMessage>(line.trim()) {
                 return Ok(msg);

@@ -2,7 +2,7 @@ use tokio::sync::mpsc;
 
 use crate::config::model::ConnectionConfig;
 use crate::domain::{errors::ObsctlError, result::Result};
-use crate::obs::client::{handshake, ObsClient, ObsEvent};
+use crate::obs::client::{ObsClient, ObsEvent, handshake};
 
 /// Derived connection parameters, with password resolved from env if needed.
 pub struct ObsConnectionParams {

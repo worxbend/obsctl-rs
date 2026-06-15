@@ -12,11 +12,19 @@ fn next_id() -> String {
 }
 
 pub fn get_version() -> RequestData {
-    RequestData { request_type: "GetVersion".to_string(), request_id: next_id(), request_data: None }
+    RequestData {
+        request_type: "GetVersion".to_string(),
+        request_id: next_id(),
+        request_data: None,
+    }
 }
 
 pub fn get_scene_list() -> RequestData {
-    RequestData { request_type: "GetSceneList".to_string(), request_id: next_id(), request_data: None }
+    RequestData {
+        request_type: "GetSceneList".to_string(),
+        request_id: next_id(),
+        request_data: None,
+    }
 }
 
 pub fn get_current_program_scene() -> RequestData {
@@ -36,7 +44,11 @@ pub fn set_current_program_scene(scene_name: &str) -> RequestData {
 }
 
 pub fn get_input_list() -> RequestData {
-    RequestData { request_type: "GetInputList".to_string(), request_id: next_id(), request_data: None }
+    RequestData {
+        request_type: "GetInputList".to_string(),
+        request_id: next_id(),
+        request_data: None,
+    }
 }
 
 pub fn get_input_mute(input_name: &str) -> RequestData {

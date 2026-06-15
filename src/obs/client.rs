@@ -8,20 +8,36 @@ use tracing::{debug, warn};
 
 use crate::domain::{errors::ObsctlError, result::Result};
 use crate::obs::protocol::{
-    ObsMessage, RequestData, RequestResponseData, OPCODE_EVENT, OPCODE_IDENTIFY, OPCODE_REQUEST,
-    OPCODE_REQUEST_RESPONSE,
+    OPCODE_EVENT, OPCODE_IDENTIFY, OPCODE_REQUEST, OPCODE_REQUEST_RESPONSE, ObsMessage,
+    RequestData, RequestResponseData,
 };
 
 /// Events emitted by the OBS client to its supervisor.
 #[derive(Debug)]
 pub enum ObsEvent {
-    CurrentProgramSceneChanged { scene_name: String },
+    CurrentProgramSceneChanged {
+        scene_name: String,
+    },
     SceneListChanged,
-    InputCreated { input_name: String },
-    InputRemoved { input_name: String },
-    InputMuteStateChanged { input_name: String, muted: bool },
-    InputVolumeChanged { input_name: String, volume_mul: f64, volume_db: f64 },
-    Other { event_type: String, data: Value },
+    InputCreated {
+        input_name: String,
+    },
+    InputRemoved {
+        input_name: String,
+    },
+    InputMuteStateChanged {
+        input_name: String,
+        muted: bool,
+    },
+    InputVolumeChanged {
+        input_name: String,
+        volume_mul: f64,
+        volume_db: f64,
+    },
+    Other {
+        event_type: String,
+        data: Value,
+    },
 }
 
 struct ObsClientRequest {
@@ -41,7 +57,10 @@ impl ObsClient {
     pub async fn request(&self, req: RequestData) -> Result<Value> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
-            .send(ObsClientRequest { request: req, reply: reply_tx })
+            .send(ObsClientRequest {
+                request: req,
+                reply: reply_tx,
+            })
             .await
             .map_err(|_| ObsctlError::ObsUnavailable)?;
         reply_rx.await.map_err(|_| ObsctlError::ObsUnavailable)?
@@ -141,13 +160,17 @@ pub(crate) async fn read_ws_message(stream: &mut WsStream) -> Result<ObsMessage>
                     .map_err(|e| ObsctlError::ConnectionFailed(format!("parse obs message: {e}")));
             }
             Ok(Message::Close(_)) => {
-                return Err(ObsctlError::ConnectionFailed("WebSocket closed during handshake".to_string()));
+                return Err(ObsctlError::ConnectionFailed(
+                    "WebSocket closed during handshake".to_string(),
+                ));
             }
             Ok(_) => {}
             Err(e) => return Err(ObsctlError::ConnectionFailed(e.to_string())),
         }
     }
-    Err(ObsctlError::ConnectionFailed("WebSocket stream ended".to_string()))
+    Err(ObsctlError::ConnectionFailed(
+        "WebSocket stream ended".to_string(),
+    ))
 }
 
 async fn run_client_task(
@@ -303,7 +326,10 @@ async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            muted: event_data.get("inputMuted").and_then(|v| v.as_bool()).unwrap_or(false),
+            muted: event_data
+                .get("inputMuted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         },
         "InputVolumeChanged" => ObsEvent::InputVolumeChanged {
             input_name: event_data
@@ -311,13 +337,19 @@ async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            volume_mul: event_data.get("inputVolumeMul").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            volume_mul: event_data
+                .get("inputVolumeMul")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
             volume_db: event_data
                 .get("inputVolumeDb")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(f64::NEG_INFINITY),
         },
-        _ => ObsEvent::Other { event_type, data: event_data },
+        _ => ObsEvent::Other {
+            event_type,
+            data: event_data,
+        },
     };
 
     let _ = event_tx.send(event).await;
