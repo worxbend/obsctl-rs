@@ -123,12 +123,24 @@ fn run_server(config_path: Option<PathBuf>, headless: bool) -> i32 {
 
 fn run_tui(config_path: Option<PathBuf>) -> i32 {
     let socket_path = resolve_socket_path(config_path.as_ref());
-    println!(
-        "TUI not yet implemented. Daemon socket: {}",
-        socket_path.display()
-    );
-    println!("Start the server with: obsctl server --headless");
-    0
+    let refresh_ms = config_path
+        .as_ref()
+        .and_then(|p| crate::config::loader::load_or_default(p).ok())
+        .map(|c| c.ui.refresh_interval_ms)
+        .unwrap_or(250);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    match rt.block_on(crate::tui::app::run(&socket_path, refresh_ms)) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("tui error: {e}");
+            1
+        }
+    }
 }
 
 // ── Service commands ──────────────────────────────────────────────────────────
