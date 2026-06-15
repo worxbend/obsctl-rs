@@ -1,0 +1,20 @@
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Help,
+    Quit,
+    DumpConfig,
+    ReloadConfig,
+    Status,
+    ServerStatus,
+    ObsStatus,
+    ValidateConfig,
+    Reconnect,
+    Connect,
+    Disconnect,
+    ShutdownServer,
+    SetScene { target: String },
+    Mute { target: String },
+    Unmute { target: String },
+    ToggleMute { target: String },
+    SetVolume { target: String, percent: u8 },
+}
