@@ -69,3 +69,11 @@
 2026-06-16T00:00:00Z iteration 9 added: domain/parser.rs tests (5): escaped_quote, set-scene_alias, volume_alias, boundaries, wrong_arg_count, all_zero_arg_commands
 2026-06-16T00:00:00Z iteration 9 tests=144 passed (92 unit + 16 CLI + 6 IPC + 14 OBS client + 10 server + 6 TUI) validation_status=0
 2026-06-16T00:00:00Z iteration 9 verified: cargo fmt --check, cargo clippy -D warnings, cargo build --release all pass
+2026-06-15T22:08:38Z iteration 9 no changes to commit
+2026-06-15T22:08:38Z iteration 9 completed validation_status=0
+2026-06-15T22:08:38Z iteration 10 started remaining=14144s
+2026-06-16T00:00:00Z iteration 10 added Ratatui TestBackend widget rendering tests (Phase 7 acceptance criteria)
+2026-06-16T00:00:00Z iteration 10 added: tests/tui_widget_rendering.rs (19 tests) — header/connection/scenes/audio/logs/command_palette across connected, disconnected, empty, error, long-name, small-terminal states
+2026-06-16T00:00:00Z iteration 10 added: obs_client_integration.rs new_connection_succeeds_after_previous_drops — reconnect after OBS disconnect
+2026-06-16T00:00:00Z iteration 10 tests=164 passed (92 unit + 16 CLI + 6 IPC + 15 OBS client + 10 server + 6 TUI + 19 TUI-widget) validation_status=0
+2026-06-16T00:00:00Z iteration 10 verified: cargo fmt --check, cargo clippy -D warnings all pass

@@ -318,6 +318,42 @@ fn auth_string_not_exposed_in_error_messages() {
     });
 }
 
+// ── reconnect after disconnect ────────────────────────────────────────────────
+
+#[test]
+fn new_connection_succeeds_after_previous_drops() {
+    rt().block_on(async {
+        let server = spawn_fake_obs(false, None).await;
+
+        // First connection
+        let (client1, _, _, _) = connect_to_fake(server.addr, None).await;
+
+        // Disconnect all active connections.
+        server.disconnect_all();
+
+        // Allow the close to propagate.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // First client should be stale — requests return an error.
+        let stale = tokio::time::timeout(
+            Duration::from_secs(2),
+            client1.request(requests::get_scene_list()),
+        )
+        .await;
+        assert!(
+            matches!(stale, Ok(Err(_)) | Err(_)),
+            "stale client should error: {stale:?}"
+        );
+
+        // A new connection to the same server (listener still running) must succeed.
+        let (client2, _, _, _) = connect_to_fake(server.addr, None).await;
+        let r = client2.request(requests::get_scene_list()).await;
+        assert!(r.is_ok(), "new client request after reconnect: {r:?}");
+
+        server.shutdown();
+    });
+}
+
 #[test]
 fn connection_params_from_config_resolves_password_env() {
     use obsctl_rs::config::model::ConnectionConfig;
