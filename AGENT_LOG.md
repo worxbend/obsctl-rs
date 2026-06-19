@@ -393,3 +393,106 @@ A  SCORES.jsonl
  M tests/server_integration.rs
  M tests/support/fake_obs_server.rs
 ?? plan.md
+2026-06-19T16:53:01Z orchestrator finished iterations_run=15 iterations_attempted=15 iterations_completed_successfully=0 had_nonfatal_failures=true nonfatal_failure_count=15 last_nonfatal_exit_code=1 last_nonfatal_failure_reason=planner_failed loop_exit_code=0 process_exit_code=0 fatal=false terminal_reason=iterations_complete_with_failures final_checkpoint_behavior=telemetry_only
+2026-06-19T18:20:11Z orchestrator started provider=codex budget=18000s iterations=15 max_workers=4
+2026-06-19T18:20:11Z iteration 1 started remaining=18000s
+2026-06-19T18:20:11Z iteration 1 preplanner effective budgets untracked_scan_max_bytes=536870912 untracked_scan_max_count=10000 snapshot_copy_max_bytes=536870912 snapshot_copy_max_count=10000 snapshot_copy_max_file_bytes=134217728
+2026-06-19T18:20:11Z iteration 1 disposable preplanner repo created path=/tmp/agent-loop-preplanner-repo-vgmuf7n3/repo copied_entries=81
+2026-06-19T18:20:11Z iteration 1 ideator phase started count=3
+2026-06-19T18:20:11Z iteration 1 ideator phase concurrency workers=3
+2026-06-19T18:20:11Z iteration 1 ideator 1 role="the pragmatist" started
+2026-06-19T18:20:11Z iteration 1 ideator 2 role="the architect" started
+2026-06-19T18:20:11Z iteration 1 ideator 3 role="the contrarian" started
+2026-06-19T18:20:20Z iteration 1 ideator 2 role="the architect" completed status=0
+2026-06-19T18:20:20Z iteration 1 ideator 3 role="the contrarian" completed status=0
+2026-06-19T18:20:21Z iteration 1 ideator 1 role="the pragmatist" completed status=0
+2026-06-19T18:20:21Z iteration 1 ideator phase completed approaches=3
+2026-06-19T18:20:21Z iteration 1 selector started approaches=3
+2026-06-19T18:20:33Z iteration 1 selector completed status=0
+2026-06-19T18:20:33Z iteration 1 disposable preplanner repo cleanup path=/tmp/agent-loop-preplanner-repo-vgmuf7n3/repo
+2026-06-19T18:20:33Z iteration 1 selector rejected alternative role="the architect" approach="Contract-First Vertical Spine: define the shared typed contracts early, then grow one narrow end-to-end daemon-to-client path before expanding feature breadth." reason="Not rejected in substance; selected as part of the synthesis, but tightened with the contrarian/pragmatist emphasis on keeping the first spine minimal and executable."
+2026-06-19T18:20:33Z iteration 1 selector rejected alternative role="the contrarian" approach="Contract-First Vertical Spike: define the stable CLI, config, IPC, error, and state contracts early, then build one end-to-end thin path through daemon, IPC client, fake OBS, an..." reason="Not selected as-is because its spike language could encourage too much cross-layer placeholder work; the synthesis keeps the vertical proof but frames it as a durable spine."
+2026-06-19T18:20:33Z iteration 1 selector rejected alternative role="the pragmatist" approach="Contract-First Vertical Spine: establish the daemon/client boundary, typed config/domain/protocol contracts, and one thin end-to-end control path before expanding breadth." reason="Not rejected in substance; selected as part of the synthesis, with added emphasis that planning must remain strategic and avoid prematurely modeling every future feature."
+2026-06-19T18:20:33Z iteration 1 selector alternatives persisted count=3
+2026-06-19T18:20:33Z iteration 1 selector structured alternatives persisted count=3
+2026-06-19T18:20:33Z iteration 1 planner started
+2026-06-19T18:21:53Z iteration 1 plan: 5 task(s) in 4 phase(s). This iteration finishes the previously failed typed LogEvent slice. Phase 1 stabilizes the shared contract first. Phase 2 can split because server publishing and TUI rendering consume that contract through different file sets. Phase 3 proves the contract across IPC, and Phase 4 validates the whole vertical path without expanding into unrelated backlog.
+2026-06-19T18:21:53Z iteration 1 phase 1 started parallel=False tasks=1
+2026-06-19T18:24:25Z iteration 1 task t1 ('Define typed IPC log event contract') status=0
+2026-06-19T18:24:25Z iteration 1 phase 2 started parallel=True tasks=2
+2026-06-19T18:27:23Z iteration 1 task t3 ('Render typed log events in TUI model') status=0
+2026-06-19T18:29:38Z iteration 1 task t2 ('Wire typed log events into server publishing') status=0
+2026-06-19T18:29:38Z iteration 1 phase 3 started parallel=False tasks=1
+2026-06-19T18:30:58Z iteration 1 task t4 ('Add end-to-end log subscription coverage') status=0
+2026-06-19T18:30:58Z iteration 1 phase 4 started parallel=False tasks=1
+2026-06-19T18:31:46Z iteration 1 task t5 ('Run hygiene and fix regressions') status=0
+2026-06-19T18:31:46Z iteration 1 reviewer started
+
+## Reviewer Summary - 2026-06-19
+
+Iteration: typed IPC log event slice plus adjacent hardening work.
+
+What was done:
+- Added typed IPC `LogLevel` and `LogEvent` with RFC3339 timestamps and message redaction.
+- Added `BroadcastHub::publish_log` and routed log events only to `logs` subscribers.
+- Published selected daemon, supervisor, shutdown, dump, and reload lifecycle events as typed logs.
+- Updated TUI model and logs widget to store/render structured log entries by severity.
+- Added IPC, server, TUI session, widget, and OBS request-timeout coverage.
+- Removed the global `#![allow(...)]` suppression from `src/lib.rs`.
+- Wired `reload_config` to load and validate config from disk, update in-memory config, merge snapshot metadata, and rebroadcast state.
+- Added OBS request timeout support using `connection.request_timeout_ms`.
+- Added a first-pass CLI `--json` output flag.
+
+What was found:
+- Verification passes: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with 181 tests.
+- Typed log events are implemented correctly for explicit publishers, but this is not yet a complete server log stream because ordinary `tracing` records are not bridged to IPC.
+- CLI proxy `CONFIG_INVALID` errors currently map to exit code `1`, violating the project contract that config errors exit `2`.
+- Server maps `RequestTimeout` to IPC code `OBS_UNAVAILABLE`, while CLI code also recognizes `REQUEST_TIMEOUT`; the timeout/error taxonomy is inconsistent.
+- `--json` output is not yet a stable scripting envelope and still emits human text for local server-unavailable failures.
+- OBS supervisor still lacks passive disconnect detection; stale client handles can remain until another command observes failure.
+- Test fake IPC helpers rely on sleeps for readiness and lack deterministic shutdown.
+- An untracked lowercase `plan.md` exists beside canonical `PLAN.md` and should be cleaned up or intentionally documented.
+
+Top improvement proposals:
+- P0: Fix CLI proxy exit-code mapping and add coverage for IPC `CONFIG_INVALID`.
+- P0: Normalize IPC/CLI error taxonomy for request timeouts and OBS unavailability.
+- P0: Define a stable JSON envelope for `--json`, including server-unavailable failures.
+- P1: Add explicit OBS client disconnect signaling into `ObsSupervisor`.
+- P1: Bridge `tracing` records into bounded typed IPC log events with redaction.
+- P1: Reuse reload semantics after dump-config and prove rebroadcasted aliases/shortcuts.
+- P2: Replace sleep-based fake IPC readiness with explicit readiness/shutdown handles.
+2026-06-19T18:35:16Z iteration 1 reviewer completed status=0
+2026-06-19T18:35:16Z iteration 1 memory updated
+2026-06-19T18:35:16Z iteration 1 completed validation_status=0
+2026-06-19T18:35:16Z iteration 1 checkpoint started
+2026-06-19T18:35:16Z iteration 1 checkpoint status before commit:
+M  AGENT_LOG.md
+M  ALTERNATIVES.jsonl
+A  MEMORY.md
+M  PLAN.md
+M  SCORES.jsonl
+A  plan.md
+M  src/cli/args.rs
+M  src/cli/client_commands.rs
+M  src/cli/router.rs
+M  src/config/dump.rs
+M  src/ipc/protocol.rs
+M  src/ipc/session.rs
+M  src/ipc/unix_server.rs
+M  src/lib.rs
+M  src/obs/client.rs
+M  src/obs/connection.rs
+M  src/runtime/logger.rs
+M  src/server/command_executor.rs
+M  src/server/daemon.rs
+M  src/server/obs_supervisor.rs
+M  src/tui/event_applier.rs
+M  src/tui/model.rs
+M  src/tui/widgets/logs.rs
+M  tests/cli_integration.rs
+M  tests/ipc_integration.rs
+M  tests/obs_client_integration.rs
+M  tests/server_integration.rs
+M  tests/support/fake_obs_server.rs
+M  tests/tui_session.rs
+M  tests/tui_widget_rendering.rs

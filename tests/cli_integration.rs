@@ -1,9 +1,17 @@
 // CLI integration tests.
 
+use std::sync::Arc;
+
 use assert_cmd::Command;
+use obsctl_rs::ipc::{
+    protocol::ServerMessage,
+    session::{BroadcastHub, CommandDispatch},
+    unix_server::IpcServer,
+};
 use predicates::prelude::PredicateBooleanExt as _;
 use predicates::str::contains;
 use tempfile::TempDir;
+use tokio::sync::{mpsc, watch};
 
 fn obsctl() -> Command {
     Command::cargo_bin("obsctl").unwrap()
@@ -241,4 +249,92 @@ fn volume_alias_works() {
         .assert()
         .failure()
         .code(3);
+}
+
+// ── --json flag ───────────────────────────────────────────────────────────────
+
+/// Starts a fake IPC server in a background thread that responds to every
+/// command with a fixed success payload. Returns the TempDir (must be kept
+/// alive) and the socket path written into a config file in that dir.
+fn start_fake_ipc_server_with_config(response: serde_json::Value) -> (TempDir, std::path::PathBuf) {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("fake.sock");
+    let config_path = dir.path().join("config.yml");
+
+    let yaml = format!(
+        "version: 1\nserver:\n  socket_path: {}\n",
+        socket_path.display()
+    );
+    std::fs::write(&config_path, yaml).unwrap();
+
+    let socket_path_bg = socket_path.clone();
+    let response_bg = response.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let hub = Arc::new(BroadcastHub::new());
+            let (cmd_tx, mut cmd_rx) = mpsc::channel::<CommandDispatch>(64);
+            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+            let server = IpcServer::bind(&socket_path_bg, Arc::clone(&hub)).unwrap();
+            tokio::spawn(async move { server.run(cmd_tx, shutdown_rx).await });
+            while let Some(dispatch) = cmd_rx.recv().await {
+                let msg = ServerMessage::Response {
+                    id: dispatch.id.clone(),
+                    ok: true,
+                    result: Some(response_bg.clone()),
+                    error: None,
+                };
+                let _ = dispatch.reply.send(msg);
+            }
+        });
+    });
+
+    // Give the server time to bind.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+
+    (dir, config_path)
+}
+
+#[test]
+fn json_flag_emits_valid_json_for_obs_status() {
+    let response = serde_json::json!({
+        "connected": false,
+        "obs_studio_version": null,
+        "message": "obs status ok"
+    });
+    let (_dir, config_path) = start_fake_ipc_server_with_config(response.clone());
+
+    let output = obsctl()
+        .args([
+            "--json",
+            "--config",
+            config_path.to_str().unwrap(),
+            "obs-status",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout_str = String::from_utf8(output).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout_str.trim()).expect("stdout should be valid JSON");
+    assert_eq!(parsed["connected"], false);
+    assert_eq!(parsed["message"], "obs status ok");
+}
+
+#[test]
+fn default_mode_emits_human_readable_for_obs_status() {
+    let response = serde_json::json!({ "message": "obs is fine" });
+    let (_dir, config_path) = start_fake_ipc_server_with_config(response);
+
+    obsctl()
+        .args(["--config", config_path.to_str().unwrap(), "obs-status"])
+        .assert()
+        .success()
+        .stdout(contains("obs is fine").and(predicates::str::is_match(r"^[^\{]").unwrap()));
 }

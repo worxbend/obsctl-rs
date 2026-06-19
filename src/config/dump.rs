@@ -229,7 +229,7 @@ mod tests {
     use crate::config::model::{AudioInputConfig, Config, SceneConfig};
 
     fn base_config() -> Config {
-        use crate::config::model::{AudioConfig, KeymapConfig, UiConfig};
+        use crate::config::model::AudioConfig;
         Config {
             scenes: vec![
                 SceneConfig {

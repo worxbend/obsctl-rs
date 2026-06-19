@@ -3,9 +3,10 @@
 // across connected, disconnected, empty, and error states.
 
 use obsctl_rs::{
+    ipc::protocol::LogLevel,
     obs::state::{AudioState, ObsSnapshot, SceneState},
     tui::{
-        model::{CommandPaletteState, TuiModel},
+        model::{CommandPaletteState, TuiLogEntry, TuiModel},
         widgets,
     },
 };
@@ -78,13 +79,22 @@ fn snap_disconnected_with_error() -> ObsSnapshot {
     }
 }
 
+fn log_entry(level: LogLevel, message: &str) -> TuiLogEntry {
+    TuiLogEntry {
+        level,
+        message: message.into(),
+        target: Some("obsctl_rs::server".into()),
+        timestamp: OffsetDateTime::UNIX_EPOCH,
+    }
+}
+
 fn model_connected() -> TuiModel {
     TuiModel {
         snapshot: Some(snap_connected()),
         server_status: None,
         logs: vec![
-            "INFO server started".into(),
-            "WARN reconnect attempt".into(),
+            log_entry(LogLevel::Info, "server started"),
+            log_entry(LogLevel::Warn, "reconnect attempt"),
         ],
         command_palette: CommandPaletteState::default(),
         last_result: None,
@@ -327,6 +337,8 @@ fn logs_renders_recent_entries() {
     .unwrap();
     let out = buf_string(&t);
     assert!(out.contains("Logs"), "should show Logs title");
+    assert!(out.contains("INFO"), "should show level label");
+    assert!(out.contains("server started"), "should show log message");
 }
 
 #[test]

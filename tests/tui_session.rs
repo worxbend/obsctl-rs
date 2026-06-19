@@ -1,7 +1,7 @@
 // TUI model and event applier tests.
 
 use obsctl_rs::{
-    ipc::protocol::ServerMessage,
+    ipc::protocol::{LogEvent, LogLevel, ServerMessage, TOPIC_LOGS},
     obs::state::{AudioState, ObsSnapshot, SceneState},
     tui::{event_applier::apply_server_message, model::TuiModel},
 };
@@ -26,6 +26,15 @@ fn make_snapshot(connected: bool) -> ObsSnapshot {
         }],
         last_error: None,
         updated_at: OffsetDateTime::now_utc(),
+    }
+}
+
+fn make_log(level: LogLevel, message: impl Into<String>) -> LogEvent {
+    LogEvent {
+        level,
+        message: message.into(),
+        target: Some("obsctl_rs::server".into()),
+        timestamp: OffsetDateTime::UNIX_EPOCH,
     }
 }
 
@@ -55,15 +64,15 @@ fn state_event_updates_model_snapshot() {
 fn log_event_appends_to_logs() {
     let mut model = TuiModel::default();
 
-    let msg = ServerMessage::Event {
-        topic: "logs".into(),
-        data: serde_json::json!({ "message": "something happened" }),
-    };
+    let msg = ServerMessage::log_event(make_log(LogLevel::Warn, "something happened"));
 
     apply_server_message(&mut model, msg);
 
     assert_eq!(model.logs.len(), 1);
-    assert_eq!(model.logs[0], "something happened");
+    assert_eq!(model.logs[0].level, LogLevel::Warn);
+    assert_eq!(model.logs[0].message, "something happened");
+    assert_eq!(model.logs[0].target.as_deref(), Some("obsctl_rs::server"));
+    assert_eq!(model.logs[0].timestamp, OffsetDateTime::UNIX_EPOCH);
 }
 
 #[test]
@@ -71,15 +80,26 @@ fn log_event_caps_at_200_entries() {
     let mut model = TuiModel::default();
 
     for i in 0..210 {
-        let msg = ServerMessage::Event {
-            topic: "logs".into(),
-            data: serde_json::json!({ "message": format!("line {i}") }),
-        };
+        let msg = ServerMessage::log_event(make_log(LogLevel::Info, format!("line {i}")));
         apply_server_message(&mut model, msg);
     }
 
     assert_eq!(model.logs.len(), 200);
-    assert_eq!(model.logs[0], "line 10");
+    assert_eq!(model.logs[0].message, "line 10");
+}
+
+#[test]
+fn malformed_log_event_is_ignored() {
+    let mut model = TuiModel::default();
+
+    let msg = ServerMessage::Event {
+        topic: TOPIC_LOGS.into(),
+        data: serde_json::json!({ "message": "missing level and timestamp" }),
+    };
+
+    apply_server_message(&mut model, msg);
+
+    assert!(model.logs.is_empty());
 }
 
 #[test]

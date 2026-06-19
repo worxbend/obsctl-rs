@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use tokio::sync::{broadcast, oneshot};
 
-use crate::ipc::protocol::{CommandPayload, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE};
+use crate::ipc::protocol::{
+    CommandPayload, LogEvent, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE,
+};
 
 pub const BROADCAST_CAPACITY: usize = 64;
 
@@ -40,6 +42,10 @@ impl BroadcastHub {
         };
     }
 
+    pub fn publish_log(&self, event: LogEvent) {
+        self.publish(TOPIC_LOGS, ServerMessage::log_event(event));
+    }
+
     pub fn subscribe_state(&self) -> broadcast::Receiver<ServerMessage> {
         self.state_tx.subscribe()
     }
@@ -75,5 +81,43 @@ impl SessionSubscriptions {
 
     pub fn is_state_subscribed(&self) -> bool {
         self.0.contains(TOPIC_STATE)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ipc::protocol::{LogEvent, LogLevel, TOPIC_LOGS};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn publish_log_sends_typed_log_event_on_logs_topic() {
+        let hub = BroadcastHub::new();
+        let mut logs_rx = hub.subscribe_logs();
+
+        hub.publish_log(LogEvent::new(LogLevel::Warn, "OBS unavailable"));
+
+        let msg = logs_rx.recv().await.unwrap();
+        match msg {
+            ServerMessage::Event { topic, data } => {
+                assert_eq!(topic, TOPIC_LOGS);
+                let event: LogEvent = serde_json::from_value(data).unwrap();
+                assert_eq!(event.level, LogLevel::Warn);
+                assert_eq!(event.message, "OBS unavailable");
+            }
+            other => panic!("expected log event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_log_does_not_reach_non_log_subscribers() {
+        let hub = BroadcastHub::new();
+        let mut state_rx = hub.subscribe_state();
+        let mut events_rx = hub.subscribe_events();
+
+        hub.publish_log(LogEvent::new(LogLevel::Info, "daemon listening"));
+
+        assert!(state_rx.try_recv().is_err());
+        assert!(events_rx.try_recv().is_err());
     }
 }

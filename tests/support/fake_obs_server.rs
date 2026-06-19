@@ -28,6 +28,8 @@ pub struct PreparedResponse {
     pub ok: bool,
     pub data: Value,
     pub comment: Option<String>,
+    /// When true the server silently discards the request without sending any reply.
+    pub no_reply: bool,
 }
 
 impl PreparedResponse {
@@ -36,6 +38,7 @@ impl PreparedResponse {
             ok: true,
             data,
             comment: None,
+            no_reply: false,
         }
     }
 
@@ -44,6 +47,17 @@ impl PreparedResponse {
             ok: false,
             data: Value::Null,
             comment: Some(comment.to_string()),
+            no_reply: false,
+        }
+    }
+
+    /// The server receives the request but never sends a response, simulating a stalled OBS.
+    pub fn no_reply() -> Self {
+        Self {
+            ok: false,
+            data: Value::Null,
+            comment: None,
+            no_reply: true,
         }
     }
 }
@@ -305,6 +319,11 @@ async fn handle_connection(
 
                 // Build response
                 let prepared = state.lock().await.responses.get(&request_type).cloned();
+
+                // If the prepared response says no_reply, drop the request silently.
+                if prepared.as_ref().is_some_and(|p| p.no_reply) {
+                    continue;
+                }
 
                 let response = if let Some(p) = prepared {
                     json!({

@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, mpsc, watch};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::model::Config;
+use crate::ipc::{
+    protocol::{LogEvent, LogLevel},
+    session::BroadcastHub,
+};
 use crate::obs::{
     client::{ObsClient, ObsEvent},
     connection::{ObsConnectionParams, connect},
@@ -18,6 +22,7 @@ pub struct ObsSupervisor {
     obs_handle: Arc<Mutex<Option<ObsClient>>>,
     reconnect_rx: mpsc::Receiver<()>,
     shutdown: watch::Receiver<bool>,
+    hub: Arc<BroadcastHub>,
 }
 
 impl ObsSupervisor {
@@ -27,6 +32,7 @@ impl ObsSupervisor {
         obs_handle: Arc<Mutex<Option<ObsClient>>>,
         reconnect_rx: mpsc::Receiver<()>,
         shutdown: watch::Receiver<bool>,
+        hub: Arc<BroadcastHub>,
     ) -> Self {
         Self {
             config,
@@ -34,6 +40,7 @@ impl ObsSupervisor {
             obs_handle,
             reconnect_rx,
             shutdown,
+            hub,
         }
     }
 
@@ -52,6 +59,10 @@ impl ObsSupervisor {
             match self.attempt_connect(&params).await {
                 Ok((client, obs_version, ws_version)) => {
                     info!("OBS connected: studio={obs_version} ws={ws_version}");
+                    self.publish_log(
+                        LogLevel::Info,
+                        format!("OBS connected: studio={obs_version} ws={ws_version}"),
+                    );
                     policy.reset();
 
                     let fetch_result = self
@@ -59,6 +70,7 @@ impl ObsSupervisor {
                         .await;
                     if fetch_result.is_err() {
                         warn!("Initial snapshot fetch failed");
+                        self.publish_log(LogLevel::Warn, "Initial OBS snapshot fetch failed");
                     }
 
                     *self.obs_handle.lock().await = Some(client);
@@ -69,24 +81,25 @@ impl ObsSupervisor {
 
                     match reason {
                         DisconnectReason::Shutdown => {
+                            self.publish_log(LogLevel::Info, "OBS disconnected during shutdown");
                             self.state.mark_disconnected(None).await;
                             break;
                         }
                         DisconnectReason::ReconnectRequested => {
+                            self.publish_log(
+                                LogLevel::Warn,
+                                "OBS disconnected: reconnect requested",
+                            );
                             self.state
                                 .mark_disconnected(Some("reconnect requested".to_string()))
                                 .await;
                             continue;
                         }
-                        DisconnectReason::ObsGone => {
-                            self.state
-                                .mark_disconnected(Some("OBS disconnected".to_string()))
-                                .await;
-                        }
                     }
                 }
                 Err(e) => {
                     warn!("OBS connection failed: {e}");
+                    self.publish_log(LogLevel::Warn, format!("OBS unavailable: {e}"));
                     self.state.mark_disconnected(Some(e.to_string())).await;
                 }
             }
@@ -94,11 +107,19 @@ impl ObsSupervisor {
             // Reconnect delay loop
             if !policy.enabled() {
                 info!("Reconnect disabled; supervisor stopping");
+                self.publish_log(
+                    LogLevel::Info,
+                    "OBS reconnect disabled; supervisor stopping",
+                );
                 break;
             }
             loop {
                 let Some(delay) = policy.next_delay() else {
                     info!("Reconnect exhausted; supervisor stopping");
+                    self.publish_log(
+                        LogLevel::Warn,
+                        "OBS reconnect exhausted; supervisor stopping",
+                    );
                     return;
                 };
                 info!("Reconnecting in {delay:?}");
@@ -106,6 +127,7 @@ impl ObsSupervisor {
                     _ = tokio::time::sleep(delay) => break,
                     _ = self.reconnect_rx.recv() => {
                         info!("Reconnect requested immediately");
+                        self.publish_log(LogLevel::Info, "OBS reconnect requested immediately");
                         break;
                     }
                     _ = self.shutdown.changed() => {
@@ -221,10 +243,15 @@ impl ObsSupervisor {
             }
         }
     }
+
+    fn publish_log(&self, level: LogLevel, message: impl AsRef<str>) {
+        self.hub.publish_log(
+            LogEvent::new(level, message).with_target("obsctl_rs::server::obs_supervisor"),
+        );
+    }
 }
 
 enum DisconnectReason {
     Shutdown,
     ReconnectRequested,
-    ObsGone,
 }

@@ -9,6 +9,7 @@ pub struct ObsConnectionParams {
     pub url: String,
     pub password: Option<String>,
     pub connect_timeout_ms: u64,
+    pub request_timeout_ms: u64,
 }
 
 impl std::fmt::Debug for ObsConnectionParams {
@@ -17,6 +18,7 @@ impl std::fmt::Debug for ObsConnectionParams {
             .field("url", &self.url)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("request_timeout_ms", &self.request_timeout_ms)
             .finish()
     }
 }
@@ -34,6 +36,7 @@ impl ObsConnectionParams {
             url: format!("ws://{}:{}", config.host, config.port),
             password,
             connect_timeout_ms: config.connect_timeout_ms,
+            request_timeout_ms: config.request_timeout_ms,
         }
     }
 }
@@ -53,7 +56,14 @@ pub async fn connect(
     .map_err(|e| ObsctlError::ConnectionFailed(e.to_string()))?;
 
     let (sink, stream) = futures_util::StreamExt::split(ws_stream);
-    handshake(sink, stream, params.password.as_deref(), event_tx).await
+    handshake(
+        sink,
+        stream,
+        params.password.as_deref(),
+        event_tx,
+        params.request_timeout_ms,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -66,6 +76,7 @@ mod tests {
             url: "ws://127.0.0.1:4455".to_string(),
             password: Some("mysecret".to_string()),
             connect_timeout_ms: 3000,
+            request_timeout_ms: 2500,
         };
         let debug = format!("{params:?}");
         assert!(
@@ -81,6 +92,7 @@ mod tests {
             url: "ws://127.0.0.1:4455".to_string(),
             password: None,
             connect_timeout_ms: 3000,
+            request_timeout_ms: 2500,
         };
         let debug = format!("{params:?}");
         assert!(debug.contains("None"));

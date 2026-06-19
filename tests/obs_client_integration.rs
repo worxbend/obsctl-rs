@@ -35,6 +35,19 @@ async fn connect_to_fake(
     String,
     mpsc::Receiver<ObsEvent>,
 ) {
+    connect_to_fake_with_timeout(addr, password, 2500).await
+}
+
+async fn connect_to_fake_with_timeout(
+    addr: std::net::SocketAddr,
+    password: Option<&str>,
+    request_timeout_ms: u64,
+) -> (
+    obsctl_rs::obs::client::ObsClient,
+    String,
+    String,
+    mpsc::Receiver<ObsEvent>,
+) {
     let url = format!("ws://{addr}");
     let ws_stream = tokio_tungstenite::connect_async(&url)
         .await
@@ -42,7 +55,7 @@ async fn connect_to_fake(
         .0;
     let (sink, stream) = futures_util::StreamExt::split(ws_stream);
     let (ev_tx, ev_rx) = mpsc::channel(32);
-    let (client, studio_ver, ws_ver) = handshake(sink, stream, password, ev_tx)
+    let (client, studio_ver, ws_ver) = handshake(sink, stream, password, ev_tx, request_timeout_ms)
         .await
         .expect("handshake");
     (client, studio_ver, ws_ver, ev_rx)
@@ -85,7 +98,7 @@ fn authenticated_handshake_fails_with_wrong_password() {
             .0;
         let (sink, stream) = futures_util::StreamExt::split(ws_stream);
         let (ev_tx, _ev_rx) = mpsc::channel::<ObsEvent>(8);
-        let result = handshake(sink, stream, Some("wrong"), ev_tx).await;
+        let result = handshake(sink, stream, Some("wrong"), ev_tx, 2500).await;
         assert!(result.is_err(), "expected error for wrong password");
         server.shutdown();
     });
@@ -306,7 +319,8 @@ fn auth_string_not_exposed_in_error_messages() {
         let (sink, stream) = futures_util::StreamExt::split(ws_stream);
         let (ev_tx, _ev_rx) = mpsc::channel::<obsctl_rs::obs::client::ObsEvent>(8);
 
-        let result = obsctl_rs::obs::client::handshake(sink, stream, Some("wrong_pw"), ev_tx).await;
+        let result =
+            obsctl_rs::obs::client::handshake(sink, stream, Some("wrong_pw"), ev_tx, 2500).await;
         assert!(result.is_err());
         // The error message must not contain the wrong password
         let err_str = result.unwrap_err().to_string();
@@ -349,6 +363,47 @@ fn new_connection_succeeds_after_previous_drops() {
         let (client2, _, _, _) = connect_to_fake(server.addr, None).await;
         let r = client2.request(requests::get_scene_list()).await;
         assert!(r.is_ok(), "new client request after reconnect: {r:?}");
+
+        server.shutdown();
+    });
+}
+
+// ── request timeout ───────────────────────────────────────────────────────────
+
+#[test]
+fn request_timeout_fires_when_server_does_not_reply() {
+    rt().block_on(async {
+        // Use a very short timeout so the test completes quickly.
+        const TIMEOUT_MS: u64 = 100;
+
+        let server = spawn_fake_obs(false, None).await;
+        // Tell the server to silently discard GetSceneList without replying.
+        server
+            .set_response("GetSceneList", PreparedResponse::no_reply())
+            .await;
+
+        let (client, _, _, _) = connect_to_fake_with_timeout(server.addr, None, TIMEOUT_MS).await;
+
+        let start = std::time::Instant::now();
+        let result = client.request(requests::get_scene_list()).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(
+                result,
+                Err(obsctl_rs::domain::errors::ObsctlError::RequestTimeout)
+            ),
+            "expected RequestTimeout, got: {result:?}"
+        );
+        // Should fire close to the configured timeout (within a generous 200ms window).
+        assert!(
+            elapsed >= Duration::from_millis(TIMEOUT_MS),
+            "timeout fired too early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(TIMEOUT_MS + 200),
+            "timeout fired too late: {elapsed:?}"
+        );
 
         server.shutdown();
     });

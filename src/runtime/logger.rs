@@ -1,7 +1,6 @@
 // Tracing subscriber setup with optional file appender.
 use std::path::PathBuf;
 
-use tracing::Level;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 pub fn default_log_path() -> Option<PathBuf> {

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use obsctl_rs::ipc::{
-    protocol::{CommandPayload, ServerMessage, TOPIC_STATE},
+    protocol::{CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_LOGS, TOPIC_STATE},
     session::{BroadcastHub, CommandDispatch},
     unix_client::IpcClient,
     unix_server::IpcServer,
@@ -23,6 +23,52 @@ async fn start_test_server(
     let tx = cmd_tx.clone();
     tokio::spawn(async move { server.run(tx, shutdown_rx).await });
     (hub, cmd_rx, shutdown_tx)
+}
+
+#[tokio::test]
+async fn logs_subscriber_receives_typed_log_event_json() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("logs.sock");
+    let (hub, _cmd_rx, _shutdown) = start_test_server(&socket_path).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let mut client = IpcClient::connect(&socket_path).await.unwrap();
+    client.subscribe(&[TOPIC_LOGS]).await.unwrap();
+
+    hub.publish_log(LogEvent::new(LogLevel::Error, "OBS unavailable"));
+
+    let event = client.next_event().await.unwrap();
+    match event {
+        ServerMessage::Event { topic, data } => {
+            assert_eq!(topic, TOPIC_LOGS);
+            let log_event: LogEvent = serde_json::from_value(data).unwrap();
+            assert_eq!(log_event.level, LogLevel::Error);
+            assert_eq!(log_event.message, "OBS unavailable");
+        }
+        other => panic!("expected Event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn state_subscriber_does_not_receive_log_events() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("non_logs.sock");
+    let (hub, _cmd_rx, _shutdown) = start_test_server(&socket_path).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let mut client = IpcClient::connect(&socket_path).await.unwrap();
+    client.subscribe(&[TOPIC_STATE]).await.unwrap();
+
+    hub.publish_log(LogEvent::new(LogLevel::Warn, "OBS unavailable"));
+
+    let received =
+        tokio::time::timeout(std::time::Duration::from_millis(50), client.next_event()).await;
+    assert!(
+        received.is_err(),
+        "state subscriber should not receive logs"
+    );
 }
 
 fn echo_handler(mut cmd_rx: mpsc::Receiver<CommandDispatch>) {

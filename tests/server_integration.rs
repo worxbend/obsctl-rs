@@ -8,16 +8,59 @@ use tokio::sync::{Mutex, mpsc, watch};
 use obsctl_rs::{
     config::model::Config,
     ipc::{
-        protocol::{CommandPayload, ServerMessage},
+        protocol::{CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_LOGS},
         session::BroadcastHub,
         unix_client::IpcClient,
         unix_server::IpcServer,
     },
-    obs::client::ObsClient,
+    obs::{
+        client::ObsClient,
+        state::{ObsSnapshot, SceneState},
+    },
     server::{
         client_registry::ClientRegistry, command_executor::CommandExecutor, state_store::StateStore,
     },
 };
+
+async fn start_test_server_with_config(
+    dir: &TempDir,
+    config_path: &std::path::Path,
+) -> (IpcClient, StateStore, watch::Sender<bool>) {
+    let socket_path = dir.path().join("server_cfg.sock");
+
+    let hub = Arc::new(BroadcastHub::new());
+    let state = StateStore::new(Arc::clone(&hub));
+    let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let mut cfg = Config::default();
+    cfg.connection.password_env = String::new();
+    let config = Arc::new(Mutex::new(cfg));
+    let registry = ClientRegistry::new();
+    let (reconnect_tx, _reconnect_rx) = mpsc::channel::<()>(4);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+
+    let state_clone = state.clone();
+    let executor = CommandExecutor::new(
+        state,
+        obs_handle,
+        config,
+        Some(config_path.to_path_buf()),
+        socket_path.clone(),
+        registry,
+        reconnect_tx,
+        shutdown_tx.clone(),
+        Arc::clone(&hub),
+    );
+
+    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
+    tokio::spawn(executor.run(cmd_rx));
+    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let client = IpcClient::connect(&socket_path).await.unwrap();
+    (client, state_clone, shutdown_tx)
+}
 
 async fn start_test_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>) {
     let socket_path = dir.path().join("server.sock");
@@ -36,16 +79,16 @@ async fn start_test_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>) {
     let executor = CommandExecutor::new(
         state,
         obs_handle,
-        Arc::clone(&hub),
         config,
         None, // no config_path in tests
         socket_path.clone(),
         registry,
         reconnect_tx,
         shutdown_tx.clone(),
+        Arc::clone(&hub),
     );
 
-    let server = IpcServer::bind(&socket_path, hub).unwrap();
+    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
     tokio::spawn(executor.run(cmd_rx));
     tokio::spawn(server.run(cmd_tx, shutdown_rx));
 
@@ -205,16 +248,16 @@ async fn socket_file_exists_while_server_runs() {
     let executor = CommandExecutor::new(
         state,
         obs_handle,
-        Arc::clone(&hub),
         config,
         None,
         socket_path.clone(),
         registry,
         reconnect_tx,
         shutdown_tx.clone(),
+        Arc::clone(&hub),
     );
 
-    let server = IpcServer::bind(&socket_path, hub).unwrap();
+    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
     tokio::spawn(executor.run(cmd_rx));
     tokio::spawn(server.run(cmd_tx, shutdown_rx));
 
@@ -248,16 +291,16 @@ async fn server_handles_multiple_sequential_clients() {
     let executor = CommandExecutor::new(
         state,
         obs_handle,
-        Arc::clone(&hub),
         config,
         None,
         socket_path.clone(),
         registry,
         reconnect_tx,
         shutdown_tx.clone(),
+        Arc::clone(&hub),
     );
 
-    let server = IpcServer::bind(&socket_path, hub).unwrap();
+    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
     tokio::spawn(executor.run(cmd_rx));
     tokio::spawn(server.run(cmd_tx, shutdown_rx));
 
@@ -271,4 +314,155 @@ async fn server_handles_multiple_sequential_clients() {
         assert!(ok, "client {i} ping failed");
         assert_eq!(result.unwrap()["message"], "pong");
     }
+}
+
+const VALID_TEST_CONFIG_YAML: &str = r#"version: 1
+server:
+  socket_path: ~
+  pid_file: ~
+  allow_remote_shutdown: false
+  start_embedded_if_missing: true
+connection:
+  host: "127.0.0.1"
+  port: 4455
+  password_env: ""
+  connect_timeout_ms: 3000
+  request_timeout_ms: 2500
+reconnect:
+  enabled: true
+  endless: true
+  initial_delay_ms: 500
+  max_delay_ms: 10000
+  multiplier: 1.8
+  jitter_ms: 250
+ui:
+  refresh_interval_ms: 250
+  command_palette_prefix: "/"
+  show_icons: true
+  theme: "default"
+scenes: []
+audio:
+  inputs: []
+keymap:
+  quit: ["q", "ctrl+c"]
+  command_palette: ["/", ":"]
+  reload_config: ["r"]
+  dump_config: ["D"]
+"#;
+
+#[tokio::test]
+async fn reload_config_updates_scene_aliases_in_snapshot() {
+    let dir = TempDir::new().unwrap();
+    let config_path = dir.path().join("config.yml");
+    std::fs::write(&config_path, VALID_TEST_CONFIG_YAML).unwrap();
+
+    let (mut client, state, _shutdown) = start_test_server_with_config(&dir, &config_path).await;
+
+    // Pre-seed the state as if OBS had reported a scene list.
+    state
+        .replace(ObsSnapshot {
+            scenes: vec![SceneState {
+                name: "Main Scene".to_string(),
+                ..SceneState::default()
+            }],
+            ..ObsSnapshot::default()
+        })
+        .await;
+
+    // Write an updated config that assigns an alias to the existing scene.
+    let updated_yaml = VALID_TEST_CONFIG_YAML.replace(
+        "scenes: []",
+        "scenes:\n  - name: \"Main Scene\"\n    alias: \"main\"",
+    );
+    std::fs::write(&config_path, updated_yaml).unwrap();
+
+    let resp = client
+        .send_command(cmd("reload_config", Value::Null))
+        .await
+        .unwrap();
+    let (ok, result, _) = extract_response(resp);
+    assert!(ok, "reload_config should succeed with valid config");
+    assert_eq!(result.unwrap()["message"], "config reloaded");
+
+    // The snapshot should now reflect the alias from the reloaded config.
+    let resp = client
+        .send_command(cmd("get_snapshot", Value::Null))
+        .await
+        .unwrap();
+    let (ok, result, _) = extract_response(resp);
+    assert!(ok);
+    let data = result.unwrap();
+    let scenes = data["scenes"].as_array().expect("scenes array");
+    assert_eq!(scenes.len(), 1, "scene count should be unchanged");
+    assert_eq!(scenes[0]["name"], "Main Scene");
+    assert_eq!(
+        scenes[0]["alias"], "main",
+        "alias should reflect reloaded config"
+    );
+}
+
+#[tokio::test]
+async fn reload_config_publishes_typed_log_event() {
+    let dir = TempDir::new().unwrap();
+    let config_path = dir.path().join("config.yml");
+    let socket_path = dir.path().join("server_cfg.sock");
+    std::fs::write(&config_path, VALID_TEST_CONFIG_YAML).unwrap();
+
+    let (mut command_client, _state, _shutdown) =
+        start_test_server_with_config(&dir, &config_path).await;
+    let mut logs_client = IpcClient::connect(&socket_path).await.unwrap();
+    logs_client.subscribe(&[TOPIC_LOGS]).await.unwrap();
+
+    let resp = command_client
+        .send_command(cmd("reload_config", Value::Null))
+        .await
+        .unwrap();
+    let (ok, result, _) = extract_response(resp);
+    assert!(ok, "reload_config should succeed with valid config");
+    assert_eq!(result.unwrap()["message"], "config reloaded");
+
+    let event = logs_client.next_event().await.unwrap();
+    match event {
+        ServerMessage::Event { topic, data } => {
+            assert_eq!(topic, TOPIC_LOGS);
+            let log_event: LogEvent = serde_json::from_value(data).unwrap();
+            assert_eq!(log_event.level, LogLevel::Info);
+            assert_eq!(log_event.message, "Config reloaded");
+            assert_eq!(
+                log_event.target.as_deref(),
+                Some("obsctl_rs::server::command_executor")
+            );
+        }
+        other => panic!("expected log event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn reload_config_returns_config_invalid_for_bad_file() {
+    let dir = TempDir::new().unwrap();
+    let config_path = dir.path().join("config.yml");
+    std::fs::write(&config_path, VALID_TEST_CONFIG_YAML).unwrap();
+
+    let (mut client, _state, _shutdown) = start_test_server_with_config(&dir, &config_path).await;
+
+    // Overwrite with a config that will fail schema validation.
+    std::fs::write(&config_path, "version: 99\n").unwrap();
+
+    let resp = client
+        .send_command(cmd("reload_config", Value::Null))
+        .await
+        .unwrap();
+    let (ok, _, code) = extract_response(resp);
+    assert!(!ok, "reload_config should fail for invalid config");
+    assert_eq!(
+        code.as_deref(),
+        Some("CONFIG_INVALID"),
+        "error code should be CONFIG_INVALID"
+    );
+
+    // Server should remain usable with the previous config still active.
+    let resp = client.send_command(cmd("ping", Value::Null)).await.unwrap();
+    let (ok, result, _) = extract_response(resp);
+    assert!(ok, "server should still respond after failed reload");
+    assert_eq!(result.unwrap()["message"], "pong");
 }

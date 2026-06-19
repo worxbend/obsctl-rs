@@ -26,7 +26,7 @@ pub fn run(cli: Cli) -> i32 {
         Some(Commands::ValidateConfig) => run_validate_config(config_path),
         Some(Commands::Server { headless }) => run_server(config_path, headless),
         Some(Commands::Service { action }) => run_service(action),
-        cmd => run_proxy(config_path, cmd.unwrap()),
+        cmd => run_proxy(config_path, cmd.unwrap(), cli.json),
     }
 }
 
@@ -238,9 +238,12 @@ fn service_ctl(runner: &dyn CommandRunner, verb: &str) -> i32 {
 
 // ── Proxy commands ────────────────────────────────────────────────────────────
 
-fn run_proxy(config_path: Option<PathBuf>, cmd: Commands) -> i32 {
+fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> i32 {
     let socket_path = resolve_socket_path(config_path.as_ref());
-    let ctx = ProxyCtx { socket_path };
+    let ctx = ProxyCtx {
+        socket_path,
+        json_output,
+    };
 
     match cmd {
         Commands::Status => ctx.status(),

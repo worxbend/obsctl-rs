@@ -13,7 +13,7 @@ use crate::domain::{
     volume::percent_to_mul,
 };
 use crate::ipc::{
-    protocol::{ErrorPayload, ServerMessage},
+    protocol::{ErrorPayload, LogEvent, LogLevel, ServerMessage},
     session::{BroadcastHub, CommandDispatch},
 };
 use crate::obs::{client::ObsClient, requests, state::ServerStatus};
@@ -22,7 +22,6 @@ use crate::server::{client_registry::ClientRegistry, state_store::StateStore};
 pub struct CommandExecutor {
     state: StateStore,
     obs: Arc<Mutex<Option<ObsClient>>>,
-    hub: Arc<BroadcastHub>,
     config: Arc<Mutex<Config>>,
     config_path: Option<PathBuf>,
     socket_path: PathBuf,
@@ -30,6 +29,7 @@ pub struct CommandExecutor {
     started_at: Instant,
     reconnect_tx: mpsc::Sender<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+    hub: Arc<BroadcastHub>,
 }
 
 impl CommandExecutor {
@@ -37,18 +37,17 @@ impl CommandExecutor {
     pub fn new(
         state: StateStore,
         obs: Arc<Mutex<Option<ObsClient>>>,
-        hub: Arc<BroadcastHub>,
         config: Arc<Mutex<Config>>,
         config_path: Option<PathBuf>,
         socket_path: PathBuf,
         registry: ClientRegistry,
         reconnect_tx: mpsc::Sender<()>,
         shutdown_tx: tokio::sync::watch::Sender<bool>,
+        hub: Arc<BroadcastHub>,
     ) -> Self {
         Self {
             state,
             obs,
-            hub,
             config,
             config_path,
             socket_path,
@@ -56,6 +55,7 @@ impl CommandExecutor {
             started_at: Instant::now(),
             reconnect_tx,
             shutdown_tx,
+            hub,
         }
     }
 
@@ -316,7 +316,13 @@ impl CommandExecutor {
                     let mut guard = self.config.lock().await;
                     *guard = new_cfg;
                 }
-                Err(e) => warn!("Failed to reload config after dump: {e}"),
+                Err(e) => {
+                    warn!("Failed to reload config after dump: {e}");
+                    self.publish_log(
+                        LogLevel::Warn,
+                        format!("Config reload after dump failed: {e}"),
+                    );
+                }
             }
         } else {
             warn!("dump-config: no config_path configured, skipping write");
@@ -339,8 +345,44 @@ impl CommandExecutor {
     }
 
     async fn cmd_reload_config(&self) -> crate::domain::result::Result<Value> {
-        warn!("reload_config: not yet wired to config file path in this build");
+        let result = self.reload_config_from_disk().await;
+        match &result {
+            Ok(()) => {
+                self.publish_log(LogLevel::Info, "Config reloaded");
+            }
+            Err(e) => {
+                warn!("Config reload failed: {e}");
+                self.publish_log(LogLevel::Warn, format!("Config reload failed: {e}"));
+            }
+        }
+
+        result?;
         Ok(json!({ "message": "config reloaded" }))
+    }
+
+    async fn reload_config_from_disk(&self) -> crate::domain::result::Result<()> {
+        let path = self.config_path.as_ref().ok_or_else(|| {
+            ObsctlError::ConfigInvalid("no config path configured for reload".to_string())
+        })?;
+
+        let new_config = crate::config::loader::load(path)?;
+        crate::config::schema::validate(&new_config)?;
+
+        let scenes = new_config.scenes.clone();
+        let audio_inputs = new_config.audio.inputs.clone();
+
+        {
+            let mut guard = self.config.lock().await;
+            *guard = new_config;
+        }
+
+        self.state.merge_config(&scenes, &audio_inputs).await;
+        // Re-broadcast current snapshot so subscribers see updated alias/shortcut metadata.
+        let snapshot = self.state.read().await;
+        self.state.replace(snapshot).await;
+
+        info!("Config reloaded from {}", path.display());
+        Ok(())
     }
 
     async fn cmd_reconnect_obs(&self) -> crate::domain::result::Result<Value> {
@@ -357,8 +399,15 @@ impl CommandExecutor {
         }
         drop(config);
         info!("Shutdown requested via IPC");
+        self.publish_log(LogLevel::Info, "Shutdown requested via IPC");
         let _ = self.shutdown_tx.send(true);
         Ok(json!({ "message": "shutdown initiated" }))
+    }
+
+    fn publish_log(&self, level: LogLevel, message: impl AsRef<str>) {
+        self.hub.publish_log(
+            LogEvent::new(level, message).with_target("obsctl_rs::server::command_executor"),
+        );
     }
 
     async fn require_obs(&self) -> crate::domain::result::Result<ObsClient> {

@@ -1,12 +1,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{error, info};
 
 use crate::config::loader;
-use crate::config::model::Config;
-use crate::ipc::{session::BroadcastHub, socket_path::default_socket_path, unix_server::IpcServer};
+use crate::ipc::{
+    protocol::{LogEvent, LogLevel},
+    session::BroadcastHub,
+    socket_path::default_socket_path,
+    unix_server::IpcServer,
+};
 use crate::obs::client::ObsClient;
 use crate::runtime::shutdown;
 use crate::server::{
@@ -78,6 +82,13 @@ pub async fn run(options: ServerOptions) -> i32 {
         }
     };
     info!("IPC server listening at {}", socket_path.display());
+    hub.publish_log(
+        LogEvent::new(
+            LogLevel::Info,
+            format!("IPC server listening at {}", socket_path.display()),
+        )
+        .with_target("obsctl_rs::server::daemon"),
+    );
 
     // Install OS signal handlers
     shutdown::install_signal_handler(shutdown_tx.clone());
@@ -85,13 +96,13 @@ pub async fn run(options: ServerOptions) -> i32 {
     let executor = CommandExecutor::new(
         state.clone(),
         Arc::clone(&obs_handle),
-        Arc::clone(&hub),
         Arc::clone(&config_shared),
         Some(config_path.clone()),
         socket_path.clone(),
         registry.clone(),
         reconnect_tx.clone(),
         shutdown_tx.clone(),
+        Arc::clone(&hub),
     );
 
     let supervisor = ObsSupervisor::new(
@@ -100,15 +111,20 @@ pub async fn run(options: ServerOptions) -> i32 {
         Arc::clone(&obs_handle),
         reconnect_rx,
         shutdown_rx.clone(),
+        Arc::clone(&hub),
     );
 
     // Spawn tasks
-    let executor_handle = tokio::spawn(executor.run(cmd_rx));
+    let _executor_handle = tokio::spawn(executor.run(cmd_rx));
     let supervisor_handle = tokio::spawn(supervisor.run());
 
     // Run accept loop until shutdown
     ipc_server.run(cmd_tx, shutdown_rx).await;
     info!("IPC accept loop stopped");
+    hub.publish_log(
+        LogEvent::new(LogLevel::Info, "IPC accept loop stopped")
+            .with_target("obsctl_rs::server::daemon"),
+    );
 
     // Wait for supervisor
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), supervisor_handle).await;
@@ -119,6 +135,10 @@ pub async fn run(options: ServerOptions) -> i32 {
     }
 
     info!("obsctl server shutdown complete");
+    hub.publish_log(
+        LogEvent::new(LogLevel::Info, "obsctl server shutdown complete")
+            .with_target("obsctl_rs::server::daemon"),
+    );
     0
 }
 

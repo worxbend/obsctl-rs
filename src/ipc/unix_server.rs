@@ -253,27 +253,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::sync::watch;
-
-    pub async fn start_test_server(
-        socket_path: &Path,
-    ) -> (
-        Arc<BroadcastHub>,
-        mpsc::Receiver<CommandDispatch>,
-        watch::Sender<bool>,
-    ) {
-        let hub = Arc::new(BroadcastHub::new());
-        let (cmd_tx, cmd_rx) = mpsc::channel::<CommandDispatch>(64);
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let server = IpcServer::bind(socket_path, Arc::clone(&hub)).unwrap();
-        let cmd_tx_clone = cmd_tx.clone();
-        tokio::spawn(async move {
-            server.run(cmd_tx_clone, shutdown_rx).await;
-        });
-
-        (hub, cmd_rx, shutdown_tx)
-    }
 
     #[tokio::test]
     async fn bind_and_accept() {

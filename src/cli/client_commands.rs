@@ -22,6 +22,7 @@ Or install the service:
 
 pub struct ProxyCtx {
     pub socket_path: PathBuf,
+    pub json_output: bool,
 }
 
 impl ProxyCtx {
@@ -49,7 +50,10 @@ impl ProxyCtx {
                 ok, result, error, ..
             }) => {
                 if ok {
-                    if let Some(v) = result {
+                    if self.json_output {
+                        let v = result.unwrap_or(serde_json::Value::Null);
+                        println!("{}", serde_json::to_string(&v).unwrap_or_default());
+                    } else if let Some(v) = result {
                         if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
                             println!("{msg}");
                         } else {
@@ -59,9 +63,18 @@ impl ProxyCtx {
                     0
                 } else {
                     let (code, msg) = error
-                        .map(|e| (e.code, e.message))
+                        .as_ref()
+                        .map(|e| (e.code.clone(), e.message.clone()))
                         .unwrap_or_else(|| ("ERROR".into(), "unknown error".into()));
-                    eprintln!("error [{code}]: {msg}");
+                    if self.json_output {
+                        let err_val = error
+                            .as_ref()
+                            .and_then(|e| serde_json::to_value(e).ok())
+                            .unwrap_or(serde_json::Value::Null);
+                        println!("{}", serde_json::to_string(&err_val).unwrap_or_default());
+                    } else {
+                        eprintln!("error [{code}]: {msg}");
+                    }
                     map_error_code(&code)
                 }
             }
@@ -92,14 +105,27 @@ impl ProxyCtx {
             }) => {
                 if ok {
                     if let Some(v) = result {
-                        print_status_json(&v);
+                        if self.json_output {
+                            println!("{}", serde_json::to_string(&v).unwrap_or_default());
+                        } else {
+                            print_status_json(&v);
+                        }
                     }
                     0
                 } else {
                     let (code, msg) = error
-                        .map(|e| (e.code, e.message))
+                        .as_ref()
+                        .map(|e| (e.code.clone(), e.message.clone()))
                         .unwrap_or_else(|| ("ERROR".into(), "unknown error".into()));
-                    eprintln!("error [{code}]: {msg}");
+                    if self.json_output {
+                        let err_val = error
+                            .as_ref()
+                            .and_then(|e| serde_json::to_value(e).ok())
+                            .unwrap_or(serde_json::Value::Null);
+                        println!("{}", serde_json::to_string(&err_val).unwrap_or_default());
+                    } else {
+                        eprintln!("error [{code}]: {msg}");
+                    }
                     map_error_code(&code)
                 }
             }

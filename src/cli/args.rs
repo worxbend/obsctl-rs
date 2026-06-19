@@ -22,6 +22,13 @@ pub struct Cli {
     )]
     pub force: bool,
 
+    #[arg(
+        long,
+        global = true,
+        help = "Output raw JSON instead of human-readable text"
+    )]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

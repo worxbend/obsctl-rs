@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
-use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, warn};
 
 use crate::domain::{errors::ObsctlError, result::Result};
@@ -50,11 +51,16 @@ struct ObsClientRequest {
 #[derive(Clone, Debug)]
 pub struct ObsClient {
     sender: mpsc::Sender<ObsClientRequest>,
+    /// Channel to signal the client task to remove a timed-out pending entry.
+    cancel_tx: mpsc::Sender<String>,
+    request_timeout_ms: u64,
 }
 
 impl ObsClient {
     /// Send a request and wait for the response data.
+    /// Returns `ObsctlError::RequestTimeout` if no response arrives within the configured timeout.
     pub async fn request(&self, req: RequestData) -> Result<Value> {
+        let request_id = req.request_id.clone();
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
             .send(ObsClientRequest {
@@ -63,7 +69,16 @@ impl ObsClient {
             })
             .await
             .map_err(|_| ObsctlError::ObsUnavailable)?;
-        reply_rx.await.map_err(|_| ObsctlError::ObsUnavailable)?
+
+        match tokio::time::timeout(Duration::from_millis(self.request_timeout_ms), reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(ObsctlError::ObsUnavailable),
+            Err(_timeout) => {
+                // Notify the client task to remove the stale pending entry.
+                let _ = self.cancel_tx.send(request_id).await;
+                Err(ObsctlError::RequestTimeout)
+            }
+        }
     }
 }
 
@@ -82,6 +97,7 @@ pub async fn handshake(
     mut stream: WsStream,
     password: Option<&str>,
     event_tx: mpsc::Sender<ObsEvent>,
+    request_timeout_ms: u64,
 ) -> Result<(ObsClient, String, String)> {
     use crate::obs::protocol::{HelloData, IdentifyData, OPCODE_HELLO, OPCODE_IDENTIFIED};
 
@@ -131,11 +147,16 @@ pub async fn handshake(
         return Err(ObsctlError::AuthenticationFailed);
     }
 
-    // Spawn the client task
+    // Spawn the client task with a cancel channel for timeout cleanup.
     let (req_tx, req_rx) = mpsc::channel::<ObsClientRequest>(64);
-    tokio::spawn(run_client_task(sink, stream, req_rx, event_tx));
+    let (cancel_tx, cancel_rx) = mpsc::channel::<String>(64);
+    tokio::spawn(run_client_task(sink, stream, req_rx, cancel_rx, event_tx));
 
-    let client = ObsClient { sender: req_tx };
+    let client = ObsClient {
+        sender: req_tx,
+        cancel_tx,
+        request_timeout_ms,
+    };
 
     // Fetch OBS version to return metadata
     let version_data = client.request(crate::obs::requests::get_version()).await?;
@@ -177,6 +198,7 @@ async fn run_client_task(
     mut sink: WsSink,
     mut stream: WsStream,
     mut req_rx: mpsc::Receiver<ObsClientRequest>,
+    mut cancel_rx: mpsc::Receiver<String>,
     event_tx: mpsc::Sender<ObsEvent>,
 ) {
     let mut pending: HashMap<String, oneshot::Sender<Result<Value>>> = HashMap::new();
@@ -203,26 +225,32 @@ async fn run_client_task(
                 };
 
                 if sink.send(Message::Text(text)).await.is_err() {
-                    let _ = reply.send(Err(ObsctlError::ObsUnavailable));
+                    let _ = reply.send(Err(ObsctlError::ConnectionFailed("WebSocket send failed".to_string())));
                     for (_, s) in pending.drain() {
-                        let _ = s.send(Err(ObsctlError::ObsUnavailable));
+                        let _ = s.send(Err(ObsctlError::ConnectionFailed("WebSocket closed".to_string())));
                     }
                     break;
                 }
                 pending.insert(id, reply);
             }
 
+            maybe_cancel = cancel_rx.recv() => {
+                if let Some(id) = maybe_cancel {
+                    pending.remove(&id);
+                }
+            }
+
             maybe_msg = stream.next() => {
                 match maybe_msg {
                     None => {
                         for (_, s) in pending.drain() {
-                            let _ = s.send(Err(ObsctlError::ObsUnavailable));
+                            let _ = s.send(Err(ObsctlError::ConnectionFailed("WebSocket closed".to_string())));
                         }
                         break;
                     }
-                    Some(Err(_)) => {
+                    Some(Err(e)) => {
                         for (_, s) in pending.drain() {
-                            let _ = s.send(Err(ObsctlError::ObsUnavailable));
+                            let _ = s.send(Err(ObsctlError::ConnectionFailed(e.to_string())));
                         }
                         break;
                     }
