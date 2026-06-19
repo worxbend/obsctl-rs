@@ -47,6 +47,9 @@ pub enum ObsctlError {
     #[error("command parse error: {0}")]
     CommandParseError(String),
 
+    #[error("remote shutdown is not enabled in config")]
+    ShutdownDisabled,
+
     #[error("dump config failed: {0}")]
     DumpConfigFailed(String),
 
@@ -73,6 +76,7 @@ impl ObsctlError {
             Self::CommandParseError(_) => 5,
             Self::IpcProtocolError(_) => 6,
             Self::AliasAmbiguous(_)
+            | Self::ShutdownDisabled
             | Self::DumpConfigFailed(_)
             | Self::ServiceInstallFailed(_)
             | Self::Io(_) => 1,
@@ -135,6 +139,11 @@ mod tests {
             ObsctlError::IpcProtocolError("bad frame".to_string()).exit_code(),
             6
         );
+    }
+
+    #[test]
+    fn shutdown_disabled_maps_to_generic_exit_1() {
+        assert_eq!(ObsctlError::ShutdownDisabled.exit_code(), 1);
     }
 
     #[test]

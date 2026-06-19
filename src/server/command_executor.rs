@@ -13,7 +13,7 @@ use crate::domain::{
     volume::percent_to_mul,
 };
 use crate::ipc::{
-    protocol::{ErrorPayload, LogEvent, LogLevel, ServerMessage},
+    protocol::{ErrorPayload, LogEvent, LogLevel, ServerMessage, public_error_code},
     session::{BroadcastHub, CommandDispatch},
 };
 use crate::obs::{client::ObsClient, requests, state::ServerStatus};
@@ -100,15 +100,12 @@ impl CommandExecutor {
                 error: None,
             },
             Err(e) => {
-                let code = error_code(&e);
+                let code = public_error_code(&e);
                 ServerMessage::Response {
                     id,
                     ok: false,
                     result: None,
-                    error: Some(ErrorPayload {
-                        code,
-                        message: e.to_string(),
-                    }),
+                    error: Some(ErrorPayload::new(code, e.to_string())),
                 }
             }
         }
@@ -393,9 +390,7 @@ impl CommandExecutor {
     async fn cmd_shutdown_server(&self) -> crate::domain::result::Result<Value> {
         let config = self.config.lock().await;
         if !config.server.allow_remote_shutdown {
-            return Err(ObsctlError::ObsRequestFailed(
-                "SHUTDOWN_DISABLED: remote shutdown is not enabled in config".to_string(),
-            ));
+            return Err(ObsctlError::ShutdownDisabled);
         }
         drop(config);
         info!("Shutdown requested via IPC");
@@ -424,18 +419,4 @@ fn required_string(args: &Value, key: &str) -> crate::domain::result::Result<Str
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| ObsctlError::CommandParseError(format!("missing {key}")))
-}
-
-fn error_code(e: &ObsctlError) -> String {
-    match e {
-        ObsctlError::ObsUnavailable | ObsctlError::RequestTimeout => "OBS_UNAVAILABLE",
-        ObsctlError::SceneNotFound(_) => "SCENE_NOT_FOUND",
-        ObsctlError::AudioInputNotFound(_) => "AUDIO_INPUT_NOT_FOUND",
-        ObsctlError::AliasAmbiguous(_) => "ALIAS_AMBIGUOUS",
-        ObsctlError::ObsRequestFailed(_) => "OBS_REQUEST_FAILED",
-        ObsctlError::CommandParseError(_) => "COMMAND_PARSE_ERROR",
-        ObsctlError::ConfigInvalid(_) => "CONFIG_INVALID",
-        _ => "SERVER_ERROR",
-    }
-    .to_string()
 }

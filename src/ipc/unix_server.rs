@@ -10,8 +10,8 @@ use tracing::{debug, error, warn};
 use crate::ipc::{
     codec::{decode, encode},
     protocol::{
-        ClientMessage, CommandPayload, ErrorPayload, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS,
-        TOPIC_STATE, is_valid_topic,
+        ClientMessage, CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage, TOPIC_EVENTS,
+        TOPIC_LOGS, TOPIC_STATE, is_valid_topic,
     },
     session::{BroadcastHub, CommandDispatch, SessionSubscriptions},
 };
@@ -168,7 +168,11 @@ async fn handle_line(
                 .is_err()
             {
                 send_encoded(
-                    &err_response(id_clone, "SERVER_ERROR", "command handler unavailable"),
+                    &err_response(
+                        id_clone,
+                        PublicErrorCode::ServerError,
+                        "command handler unavailable",
+                    ),
                     &write_tx,
                 )
                 .await;
@@ -177,7 +181,11 @@ async fn handle_line(
             tokio::spawn(async move {
                 let response = match reply_rx.await {
                     Ok(r) => r,
-                    Err(_) => err_response(id_clone, "SERVER_ERROR", "command handler dropped"),
+                    Err(_) => err_response(
+                        id_clone,
+                        PublicErrorCode::ServerError,
+                        "command handler dropped",
+                    ),
                 };
                 send_encoded(&response, &write_tx).await;
             });
@@ -192,7 +200,11 @@ async fn handle_line(
                     .collect::<Vec<_>>()
                     .join(", ");
                 send_encoded(
-                    &err_response(id, "INVALID_TOPIC", &format!("unknown topics: {names}")),
+                    &err_response(
+                        id,
+                        PublicErrorCode::IpcProtocolError,
+                        &format!("unknown topics: {names}"),
+                    ),
                     write_tx,
                 )
                 .await;
@@ -236,15 +248,12 @@ async fn handle_line(
     }
 }
 
-fn err_response(id: String, code: &str, message: &str) -> ServerMessage {
+fn err_response(id: String, code: PublicErrorCode, message: &str) -> ServerMessage {
     ServerMessage::Response {
         id,
         ok: false,
         result: None,
-        error: Some(ErrorPayload {
-            code: code.to_string(),
-            message: message.to_string(),
-        }),
+        error: Some(ErrorPayload::new(code, message)),
     }
 }
 

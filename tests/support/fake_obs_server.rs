@@ -30,6 +30,8 @@ pub struct PreparedResponse {
     pub comment: Option<String>,
     /// When true the server silently discards the request without sending any reply.
     pub no_reply: bool,
+    /// Delay before sending the response, used to simulate a late OBS reply.
+    pub delay: Option<std::time::Duration>,
 }
 
 impl PreparedResponse {
@@ -39,6 +41,7 @@ impl PreparedResponse {
             data,
             comment: None,
             no_reply: false,
+            delay: None,
         }
     }
 
@@ -48,6 +51,7 @@ impl PreparedResponse {
             data: Value::Null,
             comment: Some(comment.to_string()),
             no_reply: false,
+            delay: None,
         }
     }
 
@@ -58,7 +62,14 @@ impl PreparedResponse {
             data: Value::Null,
             comment: None,
             no_reply: true,
+            delay: None,
         }
+    }
+
+    /// The server receives the request and sends this response only after `delay`.
+    pub fn delayed(mut self, delay: std::time::Duration) -> Self {
+        self.delay = Some(delay);
+        self
     }
 }
 
@@ -326,6 +337,10 @@ async fn handle_connection(
                 }
 
                 let response = if let Some(p) = prepared {
+                    if let Some(delay) = p.delay {
+                        tokio::time::sleep(delay).await;
+                    }
+
                     json!({
                         "op": OPCODE_REQUEST_RESPONSE,
                         "d": {

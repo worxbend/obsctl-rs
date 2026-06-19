@@ -1,6 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+mod support {
+    #[allow(dead_code)]
+    pub mod fake_obs_server;
+}
+
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, mpsc, watch};
@@ -8,19 +13,24 @@ use tokio::sync::{Mutex, mpsc, watch};
 use obsctl_rs::{
     config::model::Config,
     ipc::{
-        protocol::{CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_LOGS},
+        protocol::{
+            CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_LOGS,
+            exit_code_for_public_error_code,
+        },
         session::BroadcastHub,
         unix_client::IpcClient,
         unix_server::IpcServer,
     },
     obs::{
         client::ObsClient,
+        connection::{ObsConnectionParams, connect},
         state::{ObsSnapshot, SceneState},
     },
     server::{
         client_registry::ClientRegistry, command_executor::CommandExecutor, state_store::StateStore,
     },
 };
+use support::fake_obs_server::{PreparedResponse, spawn_fake_obs};
 
 async fn start_test_server_with_config(
     dir: &TempDir,
@@ -81,6 +91,46 @@ async fn start_test_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>) {
         obs_handle,
         config,
         None, // no config_path in tests
+        socket_path.clone(),
+        registry,
+        reconnect_tx,
+        shutdown_tx.clone(),
+        Arc::clone(&hub),
+    );
+
+    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
+    tokio::spawn(executor.run(cmd_rx));
+    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let client = IpcClient::connect(&socket_path).await.unwrap();
+    (client, shutdown_tx)
+}
+
+async fn start_test_server_with_obs_client(
+    dir: &TempDir,
+    cfg: Config,
+    obs_client: ObsClient,
+    snapshot: ObsSnapshot,
+) -> (IpcClient, watch::Sender<bool>) {
+    let socket_path = dir.path().join("server_obs.sock");
+
+    let hub = Arc::new(BroadcastHub::new());
+    let state = StateStore::new(Arc::clone(&hub));
+    state.replace(snapshot).await;
+    let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(Some(obs_client)));
+    let config = Arc::new(Mutex::new(cfg));
+    let registry = ClientRegistry::new();
+    let (reconnect_tx, _reconnect_rx) = mpsc::channel::<()>(4);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+
+    let executor = CommandExecutor::new(
+        state,
+        obs_handle,
+        config,
+        None,
         socket_path.clone(),
         registry,
         reconnect_tx,
@@ -168,6 +218,77 @@ async fn set_scene_returns_obs_unavailable_when_disconnected() {
     let (ok, _, code) = extract_response(resp);
     assert!(!ok, "set_scene should fail without OBS");
     assert_eq!(code.as_deref(), Some("OBS_UNAVAILABLE"));
+}
+
+#[tokio::test]
+async fn obs_command_timeout_returns_request_timeout_ipc_code_and_exit_4() {
+    const TIMEOUT_MS: u64 = 75;
+    let late_response_delay = Duration::from_millis(TIMEOUT_MS + 150);
+
+    let fake_obs = spawn_fake_obs(false, None).await;
+    fake_obs
+        .set_response(
+            "SetCurrentProgramScene",
+            PreparedResponse::success(Value::Null).delayed(late_response_delay),
+        )
+        .await;
+
+    let mut cfg = Config::default();
+    cfg.connection.host = "127.0.0.1".to_string();
+    cfg.connection.port = fake_obs.addr.port();
+    cfg.connection.password_env = String::new();
+    cfg.connection.request_timeout_ms = TIMEOUT_MS;
+    let params = ObsConnectionParams::from_config(&cfg.connection);
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let (obs_client, _, _) = connect(&params, event_tx).await.unwrap();
+
+    let snapshot = ObsSnapshot {
+        connected: true,
+        current_scene: Some("Main".to_string()),
+        scenes: vec![SceneState {
+            name: "Main".to_string(),
+            active: true,
+            ..SceneState::default()
+        }],
+        ..ObsSnapshot::default()
+    };
+    let dir = TempDir::new().unwrap();
+    let (mut client, _shutdown) =
+        start_test_server_with_obs_client(&dir, cfg, obs_client, snapshot).await;
+
+    let resp = client
+        .send_command(cmd("set_scene", serde_json::json!({ "target": "Main" })))
+        .await
+        .unwrap();
+    let (code, message) = match resp {
+        ServerMessage::Response {
+            ok: false,
+            error: Some(error),
+            ..
+        } => (error.code, error.message),
+        other => panic!("expected timeout error response, got {other:?}"),
+    };
+    assert_eq!(code, "REQUEST_TIMEOUT");
+    assert_eq!(exit_code_for_public_error_code(&code), 4);
+    assert_eq!(message, "request timed out");
+
+    tokio::time::sleep(late_response_delay + Duration::from_millis(50)).await;
+    fake_obs
+        .set_response(
+            "SetCurrentProgramScene",
+            PreparedResponse::success(Value::Null),
+        )
+        .await;
+
+    let resp = client
+        .send_command(cmd("set_scene", serde_json::json!({ "target": "Main" })))
+        .await
+        .unwrap();
+    let (ok, result, code) = extract_response(resp);
+    assert!(ok, "subsequent command should succeed: {code:?}");
+    assert_eq!(result.unwrap()["message"], "scene set: Main");
+
+    fake_obs.shutdown();
 }
 
 #[tokio::test]

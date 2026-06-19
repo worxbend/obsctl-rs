@@ -93,6 +93,11 @@ keymap:
 
 ## CLI Commands
 
+Global options:
+
+- `--config PATH` or `OBSCTL_CONFIG=/path/to/config.yml` selects the config file.
+- `--json` makes proxy command output a stable machine-readable JSON envelope.
+
 ### Local (no daemon required)
 
 | Command | Description |
@@ -179,18 +184,140 @@ Ambiguous matches fail without sending any OBS request.
 | 5 | Command parse error |
 | 6 | IPC error |
 
-## Daemon Unavailable
+## Observable CLI Contract
 
-If the daemon is not running, proxy commands print:
+`obsctl` is daemon-first in normal use. Proxy commands connect to the local Unix socket, send one IPC command to the already-running daemon, wait for the correlated response, print the result, and exit. They do not connect directly to OBS and they do not auto-start the daemon.
 
+Proxy commands include `status`, `server-status`, `obs-status`, `scene`, `mute`, `unmute`, `toggle-mute`, `vol`, `volume`, `dump-config`, `reload-config`, `reconnect`, and `shutdown-server`.
+
+Without `--json`, command output is concise and human-readable. Successful command results are printed to stdout. Diagnostics and errors are printed to stderr.
+
+With `--json`, stdout is the machine-readable contract and stderr is not used for human diagnostics. All proxy command outcomes use this envelope:
+
+```json
+{
+  "ok": true,
+  "result": {
+    "message": "scene set: Main"
+  },
+  "error": null,
+  "exit_code": 0
+}
 ```
-obsctl server is not running.
+
+On failure, `ok` is `false`, `result` is `null`, and `error` contains a public IPC error code plus a secret-safe message:
+
+```json
+{
+  "ok": false,
+  "result": null,
+  "error": {
+    "code": "OBS_UNAVAILABLE",
+    "message": "OBS is unavailable"
+  },
+  "exit_code": 4
+}
+```
+
+Config errors returned by the daemon keep the same envelope and exit with code `2`:
+
+```json
+{
+  "ok": false,
+  "result": null,
+  "error": {
+    "code": "CONFIG_INVALID",
+    "message": "config invalid: invalid field"
+  },
+  "exit_code": 2
+}
+```
+
+If no IPC response exists because the daemon is not reachable, `--json` still prints only the failure envelope to stdout:
+
+```json
+{
+  "ok": false,
+  "result": null,
+  "error": {
+    "code": "SERVER_UNAVAILABLE",
+    "message": "obsctl server is not running.\nStart it with:\n  obsctl server --headless\nOr install the service:\n  obsctl service install\n  systemctl --user enable --now obsctl.service"
+  },
+  "exit_code": 3
+}
+```
+
+In non-JSON mode, the same local server-unavailable case prints a human diagnostic to stderr:
+
+```text
+server unavailable at <socket-path>: obsctl server is not running.
 Start it with:
   obsctl server --headless
-Or install service:
+Or install the service:
   obsctl service install
   systemctl --user enable --now obsctl.service
 ```
+
+## IPC Error Codes
+
+IPC error responses use this shape:
+
+```json
+{
+  "id": "req-000001",
+  "type": "response",
+  "ok": false,
+  "error": {
+    "code": "REQUEST_TIMEOUT",
+    "message": "request timed out"
+  }
+}
+```
+
+Public error codes are stable and map to CLI exit codes as follows:
+
+| Code | Meaning | CLI exit |
+|------|---------|----------|
+| `CONFIG_INVALID` | Config file is missing, invalid, or failed validation | 2 |
+| `SERVER_UNAVAILABLE` | Local daemon/socket connection failed before a valid command response | 3 |
+| `OBS_UNAVAILABLE` | Daemon is reachable, but OBS is not currently connected or usable | 4 |
+| `REQUEST_TIMEOUT` | An OBS request exceeded `connection.request_timeout_ms` | 4 |
+| `OBS_REQUEST_FAILED` | OBS returned a request failure or the daemon could not process the OBS response | 4 |
+| `SCENE_NOT_FOUND` | Scene target could not be resolved | 4 |
+| `AUDIO_INPUT_NOT_FOUND` | Audio input target could not be resolved | 4 |
+| `ALIAS_AMBIGUOUS` | Target matched more than one configured alias/name | 1 |
+| `COMMAND_PARSE_ERROR` | Command name or arguments are invalid | 5 |
+| `IPC_PROTOCOL_ERROR` | IPC frame or response shape is invalid for the protocol | 6 |
+| `SHUTDOWN_DISABLED` | Remote daemon shutdown is disabled in config | 1 |
+| `SERVER_ERROR` | Generic daemon-side failure | 1 |
+
+`REQUEST_TIMEOUT` and `OBS_UNAVAILABLE` are intentionally distinct. `OBS_UNAVAILABLE` means the daemon cannot currently make OBS requests because OBS is disconnected, authentication failed, or the OBS connection is otherwise unavailable. `REQUEST_TIMEOUT` means a request was attempted against OBS, but no matching response arrived before `connection.request_timeout_ms`.
+
+Error messages are intended to be actionable and secret-safe. They must not include OBS passwords, authentication strings, bearer tokens, or resolved secret environment-variable values.
+
+## IPC Protocol
+
+Transport is newline-delimited JSON over a Unix domain socket.
+
+Command request:
+
+```json
+{"id":"req-000001","type":"command","command":{"name":"set_scene","target":"Main"}}
+```
+
+Success response:
+
+```json
+{"id":"req-000001","type":"response","ok":true,"result":{"message":"scene set: Main"}}
+```
+
+Pushed event:
+
+```json
+{"type":"event","topic":"state","data":{"connected":true}}
+```
+
+Supported event topics are `state`, `events`, and `logs`.
 
 ## Logging
 

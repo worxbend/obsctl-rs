@@ -496,3 +496,84 @@ M  tests/server_integration.rs
 M  tests/support/fake_obs_server.rs
 M  tests/tui_session.rs
 M  tests/tui_widget_rendering.rs
+2026-06-19T18:35:16Z iteration 2 started remaining=17095s
+2026-06-19T18:35:16Z iteration 2 preplanner effective budgets untracked_scan_max_bytes=536870912 untracked_scan_max_count=10000 snapshot_copy_max_bytes=536870912 snapshot_copy_max_count=10000 snapshot_copy_max_file_bytes=134217728
+2026-06-19T18:35:16Z iteration 2 disposable preplanner repo created path=/tmp/agent-loop-preplanner-repo-g0hdscsm/repo copied_entries=82
+2026-06-19T18:35:16Z iteration 2 ideator phase started count=3
+2026-06-19T18:35:16Z iteration 2 ideator phase concurrency workers=3
+2026-06-19T18:35:16Z iteration 2 ideator 1 role="the pragmatist" started
+2026-06-19T18:35:16Z iteration 2 ideator 2 role="the architect" started
+2026-06-19T18:35:16Z iteration 2 ideator 3 role="the contrarian" started
+2026-06-19T18:35:24Z iteration 2 ideator 3 role="the contrarian" completed status=0
+2026-06-19T18:35:25Z iteration 2 ideator 1 role="the pragmatist" completed status=0
+2026-06-19T18:35:25Z iteration 2 ideator 2 role="the architect" completed status=0
+2026-06-19T18:35:25Z iteration 2 ideator phase completed approaches=3
+2026-06-19T18:35:25Z iteration 2 selector started approaches=3
+2026-06-19T18:35:35Z iteration 2 selector completed status=0
+2026-06-19T18:35:35Z iteration 2 disposable preplanner repo cleanup path=/tmp/agent-loop-preplanner-repo-g0hdscsm/repo
+2026-06-19T18:35:35Z iteration 2 selector rejected alternative role="the contrarian" approach="Contract Inversion Pass: treat CLI/IPC behavior as the product API and force server internals to conform, instead of starting with daemon robustness or feature breadth." reason="Strong framing, but too narrowly positioned as an inversion pass; selected strategy keeps the contract-first focus while making room for runtime robustness only where it directly affects observable behavior."
+2026-06-19T18:35:35Z iteration 2 selector rejected alternative role="the pragmatist" approach="Contract-First Stabilization: freeze the observable CLI/IPC contracts before expanding runtime behavior, using one narrow vertical slice per contract surface and treating tests/..." reason="Substantially aligned, but its one-vertical-slice phrasing edges toward implementation planning; selected strategy keeps this at the compatibility-boundary level requested here."
+2026-06-19T18:35:35Z iteration 2 selector rejected alternative role="the architect" approach="Contract Ratchet: treat the next planner as a contract stabilizer that tightens externally visible CLI/IPC semantics first, then only advances runtime robustness where those con..." reason="Closest to selected as-is, but the final strategy merges its API-steward framing with the pragmatist's emphasis that tests and docs are part of the contract."
+2026-06-19T18:35:35Z iteration 2 selector alternatives persisted count=3
+2026-06-19T18:35:35Z iteration 2 selector structured alternatives persisted count=3
+2026-06-19T18:35:35Z iteration 2 planner started
+2026-06-19T18:36:32Z iteration 2 plan: 4 task(s) in 3 phase(s). This iteration ratchets the externally visible contract first: shared error taxonomy and exit mapping become the base dependency, then CLI JSON behavior and timeout taxonomy tests can proceed in parallel because they touch separate implementation/test files. Documentation follows after behavior is fixed so it records the final observable semantics rather than driving divergent implementations.
+2026-06-19T18:36:32Z iteration 2 phase 1 started parallel=False tasks=1
+2026-06-19T18:41:01Z iteration 2 task t1 ('Centralize Public Error Contract') status=0
+2026-06-19T18:41:01Z iteration 2 phase 2 started parallel=True tasks=2
+2026-06-19T18:44:25Z iteration 2 task t3 ('Cover REQUEST_TIMEOUT Taxonomy') status=0
+2026-06-19T18:45:04Z iteration 2 task t2 ('Stabilize CLI --json Envelope') status=0
+2026-06-19T18:45:04Z iteration 2 phase 3 started parallel=False tasks=1
+2026-06-19T18:46:44Z iteration 2 task t4 ('Document Observable CLI and IPC Contract') status=0
+2026-06-19T18:46:44Z iteration 2 reviewer started
+
+## Reviewer Summary - 2026-06-19 - Iteration 2
+
+Iteration: public CLI/IPC error contract, proxy `--json` envelope, request-timeout taxonomy, and README contract documentation.
+
+What was done:
+- Added `PublicErrorCode` as the shared public IPC error-code taxonomy with CLI exit-code mapping.
+- Switched server command errors to use the public code mapper, including distinct `REQUEST_TIMEOUT` responses.
+- Added `ObsctlError::ShutdownDisabled` and mapped disabled remote shutdown to `SHUTDOWN_DISABLED`.
+- Stabilized proxy `--json` output as a single `{ok,result,error,exit_code}` envelope for success, daemon errors, protocol errors, and local server-unavailable failures.
+- Added CLI integration coverage for status, obs-status, scene/mute/volume successes, daemon errors, `CONFIG_INVALID` exit code `2`, and local server-unavailable JSON.
+- Added server/OBS coverage proving request timeout surfaces as `REQUEST_TIMEOUT` and late OBS responses do not poison later requests.
+- Documented the observable CLI contract, IPC error codes, exit codes, and timeout semantics in README.
+
+What was found:
+- Verification passes: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with 192 tests.
+- The iteration completed its requested P0 contract work: `CONFIG_INVALID` now exits `2`, `REQUEST_TIMEOUT` is no longer collapsed into `OBS_UNAVAILABLE`, and proxy `--json` no longer falls back to human stderr for local server-unavailable failures.
+- Public error mapping is centralized for IPC/CLI proxy behavior, but `ObsctlError::exit_code()` still exists as a second mapping for local process paths. The intentional differences need a documented authority boundary or a stronger shared abstraction.
+- Error redaction is applied to JSON CLI envelopes, but not at `ErrorPayload::new`; non-JSON CLI output and daemon-generated IPC payloads still rely on upstream messages already being secret-safe.
+- Invalid subscription topics now return `IPC_PROTOCOL_ERROR` instead of the older `INVALID_TOPIC` wire code. Existing tests only assert failure, so compatibility needs an explicit decision and wire-format coverage.
+- The delayed fake OBS response blocks that fake connection handler while sleeping, which is fine for the added single-request regression but not sufficient for concurrent timeout behavior.
+- Several integration helpers still use fixed sleeps for readiness/shutdown and lack deterministic join/abort handles.
+
+Top improvement proposals:
+- P0: Move or document the public error contract authority and add exhaustive tests tying every `ObsctlError` variant to public IPC codes and process exit classes.
+- P0: Redact at the IPC error-payload boundary and make non-JSON CLI error output use the same sanitization as `--json`.
+- P0: Add wire-format compatibility tests for all public error codes and decide whether invalid topics should restore `INVALID_TOPIC` or remain `IPC_PROTOCOL_ERROR`.
+- P1: Add passive OBS disconnect signaling from `ObsClient` into `ObsSupervisor`.
+- P1: Expand timeout coverage to concurrent late responses and disconnect-during-timeout, with a fake OBS response scheduler that does not block unrelated requests.
+- P1: Reuse reload semantics after `dump-config` and prove aliases/shortcuts plus reconnect settings refresh correctly.
+- P2: Replace remaining sleep-based integration readiness with explicit readiness and deterministic shutdown handles.
+2026-06-19T18:50:20Z iteration 2 reviewer completed status=0
+2026-06-19T18:50:20Z iteration 2 memory updated
+2026-06-19T18:50:20Z iteration 2 completed validation_status=0
+2026-06-19T18:50:20Z iteration 2 checkpoint started
+2026-06-19T18:50:20Z iteration 2 checkpoint status before commit:
+M  AGENT_LOG.md
+M  ALTERNATIVES.jsonl
+M  MEMORY.md
+M  PLAN.md
+M  README.md
+M  SCORES.jsonl
+M  src/cli/client_commands.rs
+M  src/domain/errors.rs
+M  src/ipc/protocol.rs
+M  src/ipc/unix_server.rs
+M  src/server/command_executor.rs
+M  tests/cli_integration.rs
+M  tests/obs_client_integration.rs
+M  tests/server_integration.rs
+M  tests/support/fake_obs_server.rs

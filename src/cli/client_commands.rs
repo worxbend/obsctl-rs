@@ -7,7 +7,10 @@ use tokio::runtime::Runtime;
 use crate::{
     domain::errors::ObsctlError,
     ipc::{
-        protocol::{CommandPayload, ServerMessage},
+        protocol::{
+            CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage,
+            exit_code_for_public_error_code, public_error_code, redacted_message,
+        },
         unix_client::IpcClient,
     },
 };
@@ -51,8 +54,7 @@ impl ProxyCtx {
             }) => {
                 if ok {
                     if self.json_output {
-                        let v = result.unwrap_or(serde_json::Value::Null);
-                        println!("{}", serde_json::to_string(&v).unwrap_or_default());
+                        print_json_success(result);
                     } else if let Some(v) = result {
                         if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
                             println!("{msg}");
@@ -62,34 +64,14 @@ impl ProxyCtx {
                     }
                     0
                 } else {
-                    let (code, msg) = error
-                        .as_ref()
-                        .map(|e| (e.code.clone(), e.message.clone()))
-                        .unwrap_or_else(|| ("ERROR".into(), "unknown error".into()));
-                    if self.json_output {
-                        let err_val = error
-                            .as_ref()
-                            .and_then(|e| serde_json::to_value(e).ok())
-                            .unwrap_or(serde_json::Value::Null);
-                        println!("{}", serde_json::to_string(&err_val).unwrap_or_default());
-                    } else {
-                        eprintln!("error [{code}]: {msg}");
-                    }
-                    map_error_code(&code)
+                    self.emit_response_error(error.as_ref())
                 }
             }
             Ok(ServerMessage::Event { .. }) => {
-                eprintln!("unexpected event instead of response");
-                6
+                self.emit_protocol_error("unexpected event instead of response")
             }
-            Err(e @ ObsctlError::ServerUnavailable { .. }) => {
-                eprintln!("{e}");
-                3
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                e.exit_code()
-            }
+            Err(e @ ObsctlError::ServerUnavailable { .. }) => self.emit_local_error(&e),
+            Err(e) => self.emit_local_error(&e),
         }
     }
 
@@ -104,40 +86,19 @@ impl ProxyCtx {
                 ok, result, error, ..
             }) => {
                 if ok {
-                    if let Some(v) = result {
-                        if self.json_output {
-                            println!("{}", serde_json::to_string(&v).unwrap_or_default());
-                        } else {
-                            print_status_json(&v);
-                        }
+                    if self.json_output {
+                        print_json_success(result);
+                    } else if let Some(v) = result {
+                        print_status_json(&v);
                     }
                     0
                 } else {
-                    let (code, msg) = error
-                        .as_ref()
-                        .map(|e| (e.code.clone(), e.message.clone()))
-                        .unwrap_or_else(|| ("ERROR".into(), "unknown error".into()));
-                    if self.json_output {
-                        let err_val = error
-                            .as_ref()
-                            .and_then(|e| serde_json::to_value(e).ok())
-                            .unwrap_or(serde_json::Value::Null);
-                        println!("{}", serde_json::to_string(&err_val).unwrap_or_default());
-                    } else {
-                        eprintln!("error [{code}]: {msg}");
-                    }
-                    map_error_code(&code)
+                    self.emit_response_error(error.as_ref())
                 }
             }
-            Ok(_) => 6,
-            Err(e @ ObsctlError::ServerUnavailable { .. }) => {
-                eprintln!("{e}");
-                3
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                e.exit_code()
-            }
+            Ok(_) => self.emit_protocol_error("unexpected event instead of response"),
+            Err(e @ ObsctlError::ServerUnavailable { .. }) => self.emit_local_error(&e),
+            Err(e) => self.emit_local_error(&e),
         }
     }
 
@@ -192,6 +153,50 @@ impl ProxyCtx {
     pub fn validate_config(&self) -> i32 {
         self.run_proxy(simple_cmd("validate_config"))
     }
+
+    fn emit_response_error(&self, error: Option<&ErrorPayload>) -> i32 {
+        let (code, msg) = error
+            .map(|e| (e.code.as_str(), e.message.as_str()))
+            .unwrap_or((PublicErrorCode::ServerError.as_str(), "unknown error"));
+        let exit_code = map_error_code(code);
+        if self.json_output {
+            print_json_error(code, msg, exit_code);
+        } else {
+            eprintln!("error [{code}]: {msg}");
+        }
+        exit_code
+    }
+
+    fn emit_protocol_error(&self, message: &str) -> i32 {
+        let code = PublicErrorCode::IpcProtocolError.as_str();
+        let exit_code = PublicErrorCode::IpcProtocolError.exit_code();
+        if self.json_output {
+            print_json_error(code, message, exit_code);
+        } else {
+            eprintln!("{message}");
+        }
+        exit_code
+    }
+
+    fn emit_local_error(&self, error: &ObsctlError) -> i32 {
+        let code = public_error_code(error);
+        let exit_code = code.exit_code();
+        if self.json_output {
+            let message = match error {
+                ObsctlError::ServerUnavailable { message, .. } => message.as_str(),
+                _ => {
+                    print_json_error(code.as_str(), &error.to_string(), exit_code);
+                    return exit_code;
+                }
+            };
+            print_json_error(code.as_str(), message, exit_code);
+        } else if matches!(error, ObsctlError::ServerUnavailable { .. }) {
+            eprintln!("{error}");
+        } else {
+            eprintln!("error: {error}");
+        }
+        exit_code
+    }
 }
 
 fn simple_cmd(name: &str) -> CommandPayload {
@@ -209,13 +214,31 @@ fn target_cmd(name: &str, target: &str) -> CommandPayload {
 }
 
 fn map_error_code(code: &str) -> i32 {
-    match code {
-        "OBS_UNAVAILABLE" | "REQUEST_TIMEOUT" | "SCENE_NOT_FOUND" | "AUDIO_INPUT_NOT_FOUND" => 4,
-        "COMMAND_PARSE_ERROR" => 5,
-        "IPC_PROTOCOL_ERROR" => 6,
-        "SHUTDOWN_DISABLED" => 1,
-        _ => 1,
-    }
+    exit_code_for_public_error_code(code)
+}
+
+fn print_json_success(result: Option<serde_json::Value>) {
+    let envelope = serde_json::json!({
+        "ok": true,
+        "result": result.unwrap_or(serde_json::Value::Null),
+        "error": serde_json::Value::Null,
+        "exit_code": 0,
+    });
+    println!("{}", serde_json::to_string(&envelope).unwrap_or_default());
+}
+
+fn print_json_error(code: &str, message: &str, exit_code: i32) {
+    let safe_message = redacted_message(message);
+    let envelope = serde_json::json!({
+        "ok": false,
+        "result": serde_json::Value::Null,
+        "error": {
+            "code": code,
+            "message": safe_message,
+        },
+        "exit_code": exit_code,
+    });
+    println!("{}", serde_json::to_string(&envelope).unwrap_or_default());
 }
 
 fn print_status_json(v: &serde_json::Value) {
@@ -225,5 +248,20 @@ fn print_status_json(v: &serde_json::Value) {
         }
     } else {
         println!("{v}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::protocol::PublicErrorCode;
+
+    #[test]
+    fn proxy_error_code_mapping_uses_public_contract() {
+        for code in PublicErrorCode::ALL {
+            assert_eq!(map_error_code(code.as_str()), code.exit_code(), "{code}");
+        }
+
+        assert_eq!(map_error_code("UNKNOWN_CODE"), 1);
     }
 }

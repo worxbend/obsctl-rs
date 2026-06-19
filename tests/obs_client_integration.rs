@@ -410,6 +410,49 @@ fn request_timeout_fires_when_server_does_not_reply() {
 }
 
 #[test]
+fn late_response_after_request_timeout_does_not_poison_next_request() {
+    rt().block_on(async {
+        const TIMEOUT_MS: u64 = 75;
+        let late_response_delay = Duration::from_millis(TIMEOUT_MS + 150);
+
+        let server = spawn_fake_obs(false, None).await;
+        server
+            .set_response(
+                "SetCurrentProgramScene",
+                PreparedResponse::success(serde_json::Value::Null).delayed(late_response_delay),
+            )
+            .await;
+
+        let (client, _, _, _) = connect_to_fake_with_timeout(server.addr, None, TIMEOUT_MS).await;
+
+        let timed_out = client
+            .request(requests::set_current_program_scene("BRB"))
+            .await;
+        assert!(
+            matches!(
+                timed_out,
+                Err(obsctl_rs::domain::errors::ObsctlError::RequestTimeout)
+            ),
+            "expected RequestTimeout, got: {timed_out:?}"
+        );
+
+        tokio::time::sleep(late_response_delay + Duration::from_millis(50)).await;
+
+        let data = client
+            .request(requests::get_scene_list())
+            .await
+            .expect("subsequent request after late timeout response");
+        let scenes = data
+            .get("scenes")
+            .and_then(|s| s.as_array())
+            .expect("scenes array");
+        assert_eq!(scenes.len(), 2);
+
+        server.shutdown();
+    });
+}
+
+#[test]
 fn connection_params_from_config_resolves_password_env() {
     use obsctl_rs::config::model::ConnectionConfig;
 

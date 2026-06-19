@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
+use crate::domain::errors::ObsctlError;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -86,6 +88,137 @@ pub fn redacted_message(message: impl AsRef<str>) -> String {
 pub struct ErrorPayload {
     pub code: String,
     pub message: String,
+}
+
+impl ErrorPayload {
+    pub fn new(code: PublicErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code: code.as_str().to_string(),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PublicErrorCode {
+    ConfigInvalid,
+    ServerUnavailable,
+    ObsUnavailable,
+    RequestTimeout,
+    ObsRequestFailed,
+    SceneNotFound,
+    AudioInputNotFound,
+    AliasAmbiguous,
+    CommandParseError,
+    IpcProtocolError,
+    ShutdownDisabled,
+    ServerError,
+}
+
+impl PublicErrorCode {
+    pub const ALL: [Self; 12] = [
+        Self::ConfigInvalid,
+        Self::ServerUnavailable,
+        Self::ObsUnavailable,
+        Self::RequestTimeout,
+        Self::ObsRequestFailed,
+        Self::SceneNotFound,
+        Self::AudioInputNotFound,
+        Self::AliasAmbiguous,
+        Self::CommandParseError,
+        Self::IpcProtocolError,
+        Self::ShutdownDisabled,
+        Self::ServerError,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfigInvalid => "CONFIG_INVALID",
+            Self::ServerUnavailable => "SERVER_UNAVAILABLE",
+            Self::ObsUnavailable => "OBS_UNAVAILABLE",
+            Self::RequestTimeout => "REQUEST_TIMEOUT",
+            Self::ObsRequestFailed => "OBS_REQUEST_FAILED",
+            Self::SceneNotFound => "SCENE_NOT_FOUND",
+            Self::AudioInputNotFound => "AUDIO_INPUT_NOT_FOUND",
+            Self::AliasAmbiguous => "ALIAS_AMBIGUOUS",
+            Self::CommandParseError => "COMMAND_PARSE_ERROR",
+            Self::IpcProtocolError => "IPC_PROTOCOL_ERROR",
+            Self::ShutdownDisabled => "SHUTDOWN_DISABLED",
+            Self::ServerError => "SERVER_ERROR",
+        }
+    }
+
+    pub const fn exit_code(self) -> i32 {
+        match self {
+            Self::ConfigInvalid => 2,
+            Self::ServerUnavailable => 3,
+            Self::ObsUnavailable
+            | Self::RequestTimeout
+            | Self::ObsRequestFailed
+            | Self::SceneNotFound
+            | Self::AudioInputNotFound => 4,
+            Self::CommandParseError => 5,
+            Self::IpcProtocolError => 6,
+            Self::AliasAmbiguous | Self::ShutdownDisabled | Self::ServerError => 1,
+        }
+    }
+
+    pub fn parse(code: &str) -> Option<Self> {
+        match code {
+            "CONFIG_INVALID" => Some(Self::ConfigInvalid),
+            "SERVER_UNAVAILABLE" => Some(Self::ServerUnavailable),
+            "OBS_UNAVAILABLE" => Some(Self::ObsUnavailable),
+            "REQUEST_TIMEOUT" => Some(Self::RequestTimeout),
+            "OBS_REQUEST_FAILED" => Some(Self::ObsRequestFailed),
+            "SCENE_NOT_FOUND" => Some(Self::SceneNotFound),
+            "AUDIO_INPUT_NOT_FOUND" => Some(Self::AudioInputNotFound),
+            "ALIAS_AMBIGUOUS" => Some(Self::AliasAmbiguous),
+            "COMMAND_PARSE_ERROR" => Some(Self::CommandParseError),
+            "IPC_PROTOCOL_ERROR" => Some(Self::IpcProtocolError),
+            "SHUTDOWN_DISABLED" => Some(Self::ShutdownDisabled),
+            "SERVER_ERROR" => Some(Self::ServerError),
+            _ => None,
+        }
+    }
+
+    pub fn from_obsctl_error(error: &ObsctlError) -> Self {
+        match error {
+            ObsctlError::ConfigNotFound(_) | ObsctlError::ConfigInvalid(_) => Self::ConfigInvalid,
+            ObsctlError::ServerUnavailable { .. } | ObsctlError::IpcConnectionFailed(_) => {
+                Self::ServerUnavailable
+            }
+            ObsctlError::IpcProtocolError(_) => Self::IpcProtocolError,
+            ObsctlError::ConnectionFailed(_)
+            | ObsctlError::AuthenticationFailed
+            | ObsctlError::ObsUnavailable => Self::ObsUnavailable,
+            ObsctlError::RequestTimeout => Self::RequestTimeout,
+            ObsctlError::ObsRequestFailed(_) => Self::ObsRequestFailed,
+            ObsctlError::SceneNotFound(_) => Self::SceneNotFound,
+            ObsctlError::AudioInputNotFound(_) => Self::AudioInputNotFound,
+            ObsctlError::AliasAmbiguous(_) => Self::AliasAmbiguous,
+            ObsctlError::CommandParseError(_) => Self::CommandParseError,
+            ObsctlError::ShutdownDisabled => Self::ShutdownDisabled,
+            ObsctlError::DumpConfigFailed(_)
+            | ObsctlError::ServiceInstallFailed(_)
+            | ObsctlError::Io(_) => Self::ServerError,
+        }
+    }
+}
+
+impl std::fmt::Display for PublicErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+pub fn public_error_code(error: &ObsctlError) -> PublicErrorCode {
+    PublicErrorCode::from_obsctl_error(error)
+}
+
+pub fn exit_code_for_public_error_code(code: &str) -> i32 {
+    PublicErrorCode::parse(code)
+        .map(PublicErrorCode::exit_code)
+        .unwrap_or(1)
 }
 
 pub const TOPIC_STATE: &str = "state";
@@ -335,5 +468,97 @@ mod tests {
             serde_json::to_value(LogLevel::Error).unwrap(),
             json!("error")
         );
+    }
+
+    #[test]
+    fn public_error_codes_have_documented_cli_exit_codes() {
+        let cases = [
+            (PublicErrorCode::ConfigInvalid, "CONFIG_INVALID", 2),
+            (PublicErrorCode::ServerUnavailable, "SERVER_UNAVAILABLE", 3),
+            (PublicErrorCode::ObsUnavailable, "OBS_UNAVAILABLE", 4),
+            (PublicErrorCode::RequestTimeout, "REQUEST_TIMEOUT", 4),
+            (PublicErrorCode::ObsRequestFailed, "OBS_REQUEST_FAILED", 4),
+            (PublicErrorCode::SceneNotFound, "SCENE_NOT_FOUND", 4),
+            (
+                PublicErrorCode::AudioInputNotFound,
+                "AUDIO_INPUT_NOT_FOUND",
+                4,
+            ),
+            (PublicErrorCode::AliasAmbiguous, "ALIAS_AMBIGUOUS", 1),
+            (PublicErrorCode::CommandParseError, "COMMAND_PARSE_ERROR", 5),
+            (PublicErrorCode::IpcProtocolError, "IPC_PROTOCOL_ERROR", 6),
+            (PublicErrorCode::ShutdownDisabled, "SHUTDOWN_DISABLED", 1),
+            (PublicErrorCode::ServerError, "SERVER_ERROR", 1),
+        ];
+
+        assert_eq!(cases.len(), PublicErrorCode::ALL.len());
+
+        for (code, wire, exit_code) in cases {
+            assert!(
+                PublicErrorCode::ALL.contains(&code),
+                "{code:?} missing from ALL"
+            );
+            assert_eq!(code.as_str(), wire);
+            assert_eq!(PublicErrorCode::parse(wire), Some(code));
+            assert_eq!(code.exit_code(), exit_code);
+            assert_eq!(exit_code_for_public_error_code(wire), exit_code);
+        }
+
+        assert_eq!(exit_code_for_public_error_code("UNKNOWN_CODE"), 1);
+    }
+
+    #[test]
+    fn obsctl_errors_map_to_public_ipc_error_codes() {
+        let cases = [
+            (
+                ObsctlError::ConfigInvalid("bad".to_string()),
+                PublicErrorCode::ConfigInvalid,
+            ),
+            (
+                ObsctlError::ServerUnavailable {
+                    socket_path: "/tmp/obsctl.sock".to_string(),
+                    message: "connect failed".to_string(),
+                },
+                PublicErrorCode::ServerUnavailable,
+            ),
+            (ObsctlError::ObsUnavailable, PublicErrorCode::ObsUnavailable),
+            (ObsctlError::RequestTimeout, PublicErrorCode::RequestTimeout),
+            (
+                ObsctlError::ObsRequestFailed("request failed".to_string()),
+                PublicErrorCode::ObsRequestFailed,
+            ),
+            (
+                ObsctlError::SceneNotFound("main".to_string()),
+                PublicErrorCode::SceneNotFound,
+            ),
+            (
+                ObsctlError::AudioInputNotFound("mic".to_string()),
+                PublicErrorCode::AudioInputNotFound,
+            ),
+            (
+                ObsctlError::AliasAmbiguous("cam".to_string()),
+                PublicErrorCode::AliasAmbiguous,
+            ),
+            (
+                ObsctlError::CommandParseError("bad command".to_string()),
+                PublicErrorCode::CommandParseError,
+            ),
+            (
+                ObsctlError::IpcProtocolError("bad frame".to_string()),
+                PublicErrorCode::IpcProtocolError,
+            ),
+            (
+                ObsctlError::ShutdownDisabled,
+                PublicErrorCode::ShutdownDisabled,
+            ),
+            (
+                ObsctlError::DumpConfigFailed("write failed".to_string()),
+                PublicErrorCode::ServerError,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(public_error_code(&error), expected, "{error}");
+        }
     }
 }
