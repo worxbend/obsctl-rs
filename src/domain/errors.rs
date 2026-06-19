@@ -61,6 +61,12 @@ pub enum ObsctlError {
 }
 
 impl ObsctlError {
+    /// Exit code for failures handled by the current local process.
+    ///
+    /// This mapping is intentionally separate from the public IPC proxy
+    /// mapping in `crate::ipc::protocol::PublicErrorCode`. Local commands can
+    /// fail before a daemon response exists, while proxy commands map
+    /// daemon-supplied public error codes through the stable IPC contract.
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::ConfigNotFound(_) | Self::ConfigInvalid(_) => 2,
@@ -87,6 +93,104 @@ impl ObsctlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_obsctl_error_variants_have_intended_local_exit_codes() {
+        const OBSCTL_ERROR_VARIANT_COUNT: usize = 18;
+
+        let cases = [
+            (
+                ObsctlError::ConfigNotFound("/path".to_string()),
+                2,
+                "config not found",
+            ),
+            (
+                ObsctlError::ConfigInvalid("bad".to_string()),
+                2,
+                "config invalid",
+            ),
+            (
+                ObsctlError::ServerUnavailable {
+                    socket_path: "/s".to_string(),
+                    message: "refused".to_string(),
+                },
+                3,
+                "server unavailable",
+            ),
+            (
+                ObsctlError::IpcConnectionFailed("x".to_string()),
+                3,
+                "IPC connection failed",
+            ),
+            (
+                ObsctlError::IpcProtocolError("bad frame".to_string()),
+                6,
+                "IPC protocol error",
+            ),
+            (
+                ObsctlError::ConnectionFailed("closed".to_string()),
+                3,
+                "OBS connection failed",
+            ),
+            (
+                ObsctlError::AuthenticationFailed,
+                3,
+                "OBS authentication failed",
+            ),
+            (ObsctlError::ObsUnavailable, 4, "OBS unavailable"),
+            (ObsctlError::RequestTimeout, 4, "request timeout"),
+            (
+                ObsctlError::ObsRequestFailed("request failed".to_string()),
+                4,
+                "OBS request failed",
+            ),
+            (
+                ObsctlError::SceneNotFound("main".to_string()),
+                4,
+                "scene not found",
+            ),
+            (
+                ObsctlError::AudioInputNotFound("mic".to_string()),
+                4,
+                "audio input not found",
+            ),
+            (
+                ObsctlError::AliasAmbiguous("cam".to_string()),
+                1,
+                "ambiguous alias",
+            ),
+            (
+                ObsctlError::CommandParseError("bad".to_string()),
+                5,
+                "command parse error",
+            ),
+            (ObsctlError::ShutdownDisabled, 1, "shutdown disabled"),
+            (
+                ObsctlError::DumpConfigFailed("write failed".to_string()),
+                1,
+                "dump config failed",
+            ),
+            (
+                ObsctlError::ServiceInstallFailed("systemctl failed".to_string()),
+                1,
+                "service install failed",
+            ),
+            (
+                ObsctlError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "disk failed",
+                )),
+                1,
+                "IO error",
+            ),
+        ];
+
+        assert_eq!(cases.len(), OBSCTL_ERROR_VARIANT_COUNT);
+
+        for (error, expected_exit_code, description) in cases {
+            assert_eq!(error.exit_code(), expected_exit_code, "{description}");
+        }
+    }
 
     #[test]
     fn config_errors_map_to_exit_2() {

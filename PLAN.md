@@ -29,28 +29,30 @@ Latest verification:
 
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all-targets --all-features` with 192 tests passing
+- `cargo test --all-targets --all-features` with 207 tests passing
 
 ## Review Findings From Latest Iteration
 
 Fully implemented:
 
-- `PublicErrorCode` now defines the public IPC error taxonomy and CLI exit-code mapping in `src/ipc/protocol.rs`.
-- `CommandExecutor` now converts `ObsctlError::RequestTimeout` to `REQUEST_TIMEOUT` instead of collapsing it into `OBS_UNAVAILABLE`.
-- `CONFIG_INVALID` returned by the daemon now maps to CLI exit code `2`, including proxy `reload-config` coverage.
-- `SHUTDOWN_DISABLED` is represented as a typed domain error and public IPC error code rather than an encoded `ObsRequestFailed` string.
-- Proxy `--json` output now uses one envelope for success, daemon errors, protocol errors, and local server-unavailable failures:
-  `{"ok":bool,"result":...,"error":...,"exit_code":number}`.
-- `--json` proxy failures keep stderr empty and emit machine-readable stdout for server-unavailable, config, OBS, and command errors.
-- README documents the observable CLI contract, proxy command set, JSON envelope, IPC error codes, and timeout taxonomy.
-- Tests cover status, obs-status, scene/mute/volume success envelopes, daemon error envelopes, config error exit code `2`, local server-unavailable JSON, server timeout IPC code, and late OBS responses after timeout.
-- One CLI fake IPC helper now uses a readiness channel instead of a fixed bind sleep.
+- `PublicErrorCode` remains the audited public IPC taxonomy and now documents why IPC owns daemon-reachable wire codes while `ObsctlError::exit_code()` owns local process failures.
+- Every current `ObsctlError` variant is covered by tests for both public IPC code mapping and local process exit-code intent.
+- `ErrorPayload::new` and `ErrorPayload::from_code` redact messages at the IPC error-payload boundary.
+- Non-JSON CLI proxy error output now redacts with the same `redacted_message` utility used by `--json`.
+- CLI fake daemon errors now use `ErrorPayload::from_code`, so unknown daemon-supplied messages exercise the same redaction path.
+- Redaction coverage includes config-like key/value strings, JSON-like secret fields, URLs with credentials, bearer tokens, mixed-case sensitive keys, and unknown daemon error messages in both JSON and default CLI modes.
+- Representative IPC wire JSON tests now cover command requests, subscribe requests, success responses, all public error codes, state events, OBS event examples, and typed log events.
+- README documents the frozen CLI/IPC contracts, including the `INVALID_TOPIC` to `IPC_PROTOCOL_ERROR` compatibility decision.
+- `support::json::redact_secrets` now handles mixed-case secret field names.
 
 Partial or incomplete:
 
-- The public error contract is centralized for IPC/CLI proxy behavior, but `ObsctlError::exit_code()` still exists separately. The two mappings intentionally differ for some execution contexts, but that split is not documented in code and should be made explicit or collapsed into a single authority.
-- Error messages are redacted for `--json` CLI envelopes, but `ErrorPayload::new` and non-JSON CLI error printing still rely on upstream callers to provide secret-safe messages. Redaction belongs at the IPC error-payload boundary as defense in depth.
-- Invalid subscription topics now surface as `IPC_PROTOCOL_ERROR`; previous tests only asserted that subscription failed. This may be acceptable, but the compatibility impact should be locked with a wire-format test or intentionally documented.
+- The `events` topic is still not a real end-to-end OBS event stream. The current server applies OBS events to state, but does not publish normalized OBS events to `TOPIC_EVENTS`; the README and protocol unit test now describe an observable surface that integration tests do not prove.
+- The OBS event wire example is not clearly tied to the actual internal `ObsEvent` model. README shows raw obs-websocket-style `eventType/eventData`, while the protocol unit test uses normalized `type/scene_name` data.
+- Invalid subscription topics are documented as `IPC_PROTOCOL_ERROR`, but the existing integration test still only asserts that subscription failed. It should assert the exact wire code and representative message.
+- Wire compatibility tests mostly serialize hand-built JSON values. They lock envelope shape, but do not always prove real domain structs or server paths serialize to the documented shape.
+- `support::json::redact_secrets` and `ipc::protocol::redacted_message` are separate redaction implementations with overlapping but different behavior; the structured JSON redactor is currently unused by production code.
+- Public error mapping tests rely on a manual variant-count constant. The exhaustive Rust matches are useful, but future maintainers still need a clearer pattern for updating variant fixtures intentionally.
 - Fake OBS delayed responses currently sleep inside the connection handler before reading additional messages. That is adequate for a single late-response regression test, but it does not exercise concurrent late responses or timeout behavior under pipelined requests.
 - Some server integration helpers still use fixed sleeps for readiness and shutdown.
 - Log broadcasting is still manual and sparse. Ordinary `tracing` logs are not automatically bridged to IPC, so the TUI log panel does not yet represent the full server log stream promised by the product contract.
@@ -59,30 +61,33 @@ Partial or incomplete:
 
 Regressions or compatibility risks:
 
-- `INVALID_TOPIC` is no longer a wire code for bad subscriptions. If any client depended on it, this is a breaking protocol change.
-- Unknown daemon error codes still fall back to exit code `1`; that is safe, but compatibility tests should prove known codes are exhaustive and docs stay synchronized.
+- `INVALID_TOPIC` is intentionally no longer a wire code for bad subscriptions. This is now documented, but still needs an integration wire assertion so it does not drift.
+- The newly documented OBS event example can mislead clients because event broadcasting is not implemented end to end and the documented shape conflicts with the protocol unit fixture.
+- Boundary redaction is defense in depth, not a proof that arbitrary formatted messages are safe. Structured fields remain safer than secret-bearing strings.
 - Background test tasks and fake IPC servers still lack deterministic shutdown/join handles in several helpers, so integration coverage can leak tasks and hide races.
 - The repository still contains orchestration/planning artifacts whose intended ownership is unclear, including lowercase `plan.md` and JSONL telemetry files.
 
 ## Next Iteration Priorities
 
-### P0: Contract Hardening
+### P0: Finish Public Contract Freeze
 
-1. Make public error mapping a single audited contract.
-   - Decide whether `PublicErrorCode` should move out of `ipc::protocol` into a domain-facing module, or document why IPC owns the public wire taxonomy.
-   - Add a test that every `ObsctlError` variant has both a public IPC code and an intended process exit class.
-   - Document the difference between local process exit mapping and daemon-reachable IPC error mapping where they intentionally differ.
+1. Make the `events` IPC topic real or remove it from the public contract.
+   - Choose one OBS event payload shape and make README, protocol tests, and implementation agree.
+   - Prefer a typed normalized event contract derived from `ObsEvent` rather than leaking raw obs-websocket naming.
+   - Publish OBS events to `TOPIC_EVENTS` without disrupting state updates.
+   - Add end-to-end tests proving an `events` subscriber receives scene/audio OBS events and state-only/log-only subscribers do not.
 
-2. Redact IPC error payloads at the boundary.
-   - Apply `redacted_message` inside `ErrorPayload::new` or an equivalent constructor used by all server-generated errors.
-   - Replace direct `ErrorPayload { code, message }` construction in tests/helpers where practical so tests exercise the real boundary.
-   - Ensure non-JSON CLI error output is redacted the same way as `--json`.
-   - Add tests for config-like strings, URLs with credentials, bearer tokens, mixed-case sensitive keys, and unknown daemon-supplied messages.
+2. Close remaining wire-path compatibility assertions.
+   - Update `invalid_topic_returns_error` to assert `IPC_PROTOCOL_ERROR` and the documented unknown-topic message.
+   - Add at least one raw server-session test that reads the newline-delimited JSON response for an invalid subscribe request.
+   - Where practical, build state/log/event compatibility fixtures from real domain structs instead of ad hoc `json!` payloads.
+   - Keep README examples synchronized with the asserted wire fixtures.
 
-3. Lock public wire compatibility with snapshots.
-   - Add representative wire JSON tests for command request, subscribe request, success response, each public error code, state event, OBS event, and typed log event.
-   - Decide and document whether bad subscription topics should return `IPC_PROTOCOL_ERROR` or restore a distinct `INVALID_TOPIC` public code.
-   - Add README or migration notes for any intentionally removed/renamed wire codes.
+3. Consolidate redaction utilities.
+   - Move shared redaction behavior into a support module used by `ErrorPayload`, `LogEvent`, CLI output, and structured JSON redaction.
+   - Keep redaction idempotent so repeated boundary sanitization does not corrupt `[REDACTED]` markers.
+   - Add tests for Unicode-adjacent secrets, URL-encoded credentials, repeated redaction, and structured `serde_json::Value` payloads.
+   - Document redaction limits and prefer structured non-secret fields over scanning formatted messages.
 
 ### P1: Server Runtime Robustness
 
@@ -110,44 +115,35 @@ Regressions or compatibility risks:
    - Prevent log broadcast loops and avoid blocking tracing on slow IPC subscribers.
    - Add tests proving warnings/errors emitted through tracing reach `logs` subscribers and secrets are redacted.
 
-8. Consolidate redaction utilities.
-   - Reuse or align `support::json` redaction and `ipc::protocol::redacted_message`.
-   - Document redaction limits: structured fields are safer than arbitrary formatted messages.
-   - Prefer structured error/log fields for sensitive data instead of relying on string scanning.
-
-9. Improve TUI log rendering ergonomics.
+8. Improve TUI log rendering ergonomics.
    - Truncate or elide long targets/messages so logs do not dominate narrow panels.
    - Consider hiding module targets by default or showing them only in debug mode.
    - Add widget assertions for long target names and mixed severity ordering.
 
 ### P2: Test and Repository Hygiene
 
-10. Replace sleep-based test server readiness.
+9. Replace sleep-based test server readiness.
     - Add explicit readiness channels and shutdown handles for fake IPC and server integration helpers.
     - Join or abort background tasks/threads deterministically.
     - Remove duplicate test server setup where a shared helper can stay simple.
 
-11. Clean planning and telemetry files.
+10. Clean planning and telemetry files.
     - Remove or intentionally document the untracked lowercase `plan.md`.
     - Decide whether `ALTERNATIVES.jsonl`, `SCORES.jsonl`, and similar orchestration artifacts belong in the repo.
     - Keep `PLAN.md`, `IMPLEMENTATION_CHECK_PLAN.md`, `AGENT_LOG.md`, and `MEMORY.md` roles distinct.
 
-12. Add protocol compatibility tests for typed logs.
-    - Snapshot raw typed log event JSON and TUI ingestion behavior.
-    - Include a migration note that raw string log payloads are no longer accepted by the TUI unless backward compatibility is intentionally restored.
-
 ### P3: Product Expansion After Hardening
 
-13. Recording control.
+11. Recording control.
     - Add OBS requests: `StartRecord`, `StopRecord`, `PauseRecord`, `ResumeRecord`, `GetRecordStatus`.
     - Add CLI commands: `obsctl record start|stop|pause|resume|status`.
     - Add IPC command names and TUI header recording indicator.
 
-14. Streaming control.
+12. Streaming control.
     - Add OBS requests: `StartStream`, `StopStream`, `GetStreamStatus`.
     - Add CLI commands and TUI status indicator.
 
-15. Scene transition support.
+13. Scene transition support.
     - Add transition list/status/set commands and state fields.
     - Preserve daemon-owned OBS access and typed IPC boundaries.
 

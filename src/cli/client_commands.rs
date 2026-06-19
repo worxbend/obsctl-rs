@@ -162,7 +162,7 @@ impl ProxyCtx {
         if self.json_output {
             print_json_error(code, msg, exit_code);
         } else {
-            eprintln!("error [{code}]: {msg}");
+            eprintln!("error [{code}]: {}", redacted_message(msg));
         }
         exit_code
     }
@@ -173,7 +173,7 @@ impl ProxyCtx {
         if self.json_output {
             print_json_error(code, message, exit_code);
         } else {
-            eprintln!("{message}");
+            eprintln!("{}", redacted_message(message));
         }
         exit_code
     }
@@ -191,9 +191,9 @@ impl ProxyCtx {
             };
             print_json_error(code.as_str(), message, exit_code);
         } else if matches!(error, ObsctlError::ServerUnavailable { .. }) {
-            eprintln!("{error}");
+            eprintln!("{}", redacted_message(error.to_string()));
         } else {
-            eprintln!("error: {error}");
+            eprintln!("error: {}", redacted_message(error.to_string()));
         }
         exit_code
     }

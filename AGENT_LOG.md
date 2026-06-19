@@ -577,3 +577,80 @@ M  tests/cli_integration.rs
 M  tests/obs_client_integration.rs
 M  tests/server_integration.rs
 M  tests/support/fake_obs_server.rs
+2026-06-19T18:50:20Z iteration 3 started remaining=16191s
+2026-06-19T18:50:20Z iteration 3 preplanner effective budgets untracked_scan_max_bytes=536870912 untracked_scan_max_count=10000 snapshot_copy_max_bytes=536870912 snapshot_copy_max_count=10000 snapshot_copy_max_file_bytes=134217728
+2026-06-19T18:50:20Z iteration 3 disposable preplanner repo created path=/tmp/agent-loop-preplanner-repo-okf4hymx/repo copied_entries=82
+2026-06-19T18:50:20Z iteration 3 ideator phase started count=3
+2026-06-19T18:50:20Z iteration 3 ideator phase concurrency workers=3
+2026-06-19T18:50:20Z iteration 3 ideator 1 role="the pragmatist" started
+2026-06-19T18:50:20Z iteration 3 ideator 2 role="the architect" started
+2026-06-19T18:50:20Z iteration 3 ideator 3 role="the contrarian" started
+2026-06-19T18:50:28Z iteration 3 ideator 1 role="the pragmatist" completed status=0
+2026-06-19T18:50:30Z iteration 3 ideator 2 role="the architect" completed status=0
+2026-06-19T18:50:30Z iteration 3 ideator 3 role="the contrarian" completed status=0
+2026-06-19T18:50:30Z iteration 3 ideator phase completed approaches=3
+2026-06-19T18:50:30Z iteration 3 selector started approaches=3
+2026-06-19T18:50:40Z iteration 3 selector completed status=0
+2026-06-19T18:50:40Z iteration 3 disposable preplanner repo cleanup path=/tmp/agent-loop-preplanner-repo-okf4hymx/repo
+2026-06-19T18:50:40Z iteration 3 selector rejected alternative role="the pragmatist" approach="Compatibility Spine First: stabilize the observable IPC/CLI contract before touching runtime breadth, using the public error taxonomy, redaction boundary, and wire snapshots as..." reason="Strong and actionable, but selected too narrowly around the compatibility spine without explicitly framing this as a freeze that future runtime fixes must plug into."
+2026-06-19T18:50:40Z iteration 3 selector rejected alternative role="the architect" approach="Compatibility-First Contract Freeze: treat the next iteration as a public-surface stabilization pass before adding runtime breadth. Start from the externally observable contract..." reason="Closest to the chosen strategy, but slightly broadens into sequencing runtime fixes; the next planner should stay strategic and keep this iteration centered on the contract boundary."
+2026-06-19T18:50:40Z iteration 3 selector rejected alternative role="the contrarian" approach="Contract-First Freeze: treat the next iteration as a compatibility lockdown rather than a feature or robustness sprint, making every runtime change subordinate to a stable publi..." reason="Correctly resists premature runtime work, but states the freeze too absolutely; planning should still allow minimal internal changes when they are required to make the public contract executable and tested."
+2026-06-19T18:50:40Z iteration 3 selector alternatives persisted count=3
+2026-06-19T18:50:40Z iteration 3 selector structured alternatives persisted count=3
+2026-06-19T18:50:40Z iteration 3 planner started
+2026-06-19T18:51:19Z iteration 3 plan: 4 task(s) in 3 phase(s). This iteration freezes the externally observable contract before runtime robustness work resumes. The first two phases are serialized because they share the core error and redaction code paths. The final phase can run in parallel because protocol test coverage and README documentation are independent after the contract and redaction behavior are settled.
+2026-06-19T18:51:19Z iteration 3 phase 1 started parallel=False tasks=1
+2026-06-19T18:53:50Z iteration 3 task t1 ('Centralize public error contract') status=0
+2026-06-19T18:53:50Z iteration 3 phase 2 started parallel=False tasks=1
+2026-06-19T18:57:19Z iteration 3 task t2 ('Redact error payloads at IPC boundary') status=0
+2026-06-19T18:57:19Z iteration 3 phase 3 started parallel=True tasks=2
+2026-06-19T18:58:46Z iteration 3 task t4 ('Document frozen CLI and IPC contracts') status=0
+2026-06-19T18:59:41Z iteration 3 task t3 ('Add IPC wire compatibility tests') status=0
+2026-06-19T18:59:41Z iteration 3 reviewer started
+
+## Reviewer Summary - 2026-06-19 - Iteration 3
+
+Iteration: public error contract documentation, IPC error boundary redaction, CLI non-JSON redaction parity, and representative IPC wire compatibility tests.
+
+What was done:
+- Documented the authority split between daemon-reachable `PublicErrorCode` mapping and local `ObsctlError::exit_code()` mapping.
+- Added tests covering every current `ObsctlError` variant for public IPC code mapping and local exit-code intent.
+- Moved IPC error message redaction into `ErrorPayload::new` / `ErrorPayload::from_code`.
+- Redacted non-JSON CLI proxy error output using the same message sanitizer as `--json`.
+- Updated fake daemon CLI tests to construct errors through `ErrorPayload::from_code`.
+- Added redaction coverage for config-style strings, JSON-like secret fields, URL credentials, bearer tokens, mixed-case sensitive keys, and unknown daemon errors.
+- Added representative wire JSON tests for command requests, subscribe requests, success responses, all public error codes, state events, OBS event examples, and typed log events.
+- Documented that invalid subscription topics now use `IPC_PROTOCOL_ERROR`, not `INVALID_TOPIC`.
+
+What was found:
+- Verification passes: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with 207 tests.
+- The requested contract hardening work is mostly complete: public error mappings are audited, IPC error payloads redact at construction, and CLI JSON/default error paths both sanitize daemon-supplied messages.
+- The `events` topic remains the largest contract gap. The server currently applies OBS events to state but does not publish OBS events to `TOPIC_EVENTS`, while README and protocol tests now describe an OBS event wire surface.
+- The documented OBS event shape and protocol unit fixture disagree: README shows raw obs-websocket-style `eventType/eventData`, while the unit fixture uses normalized `type/scene_name`.
+- Invalid subscription behavior is documented as `IPC_PROTOCOL_ERROR`, but the integration test still only checks that subscription fails instead of asserting the exact wire code.
+- Wire compatibility tests mostly serialize hand-built values, so they lock envelope shapes but do not always prove real server/domain paths produce the documented wire data.
+- Redaction is split between `ipc::protocol::redacted_message` and `support::json::redact_secrets`; the structured JSON redactor is still unused in production code.
+
+Top improvement proposals:
+- P0: Make the `events` IPC topic real end to end or remove it from the public contract; choose one OBS event payload shape and align README, tests, and implementation.
+- P0: Add raw/integration wire assertions for invalid subscription topics returning `IPC_PROTOCOL_ERROR`.
+- P0: Consolidate redaction into one support module used by IPC errors, log events, CLI output, and structured JSON values.
+- P1: Continue runtime hardening with passive OBS disconnect detection and concurrent timeout cleanup once the public wire contract is internally consistent.
+- P1: Bridge `tracing` into bounded typed IPC log events so the TUI log panel reflects ordinary server logs, not only manual lifecycle messages.
+- P2: Replace remaining sleep-based test readiness/shutdown helpers and clean or document orchestration telemetry artifacts.
+2026-06-19T19:04:34Z iteration 3 reviewer completed status=0
+2026-06-19T19:04:34Z iteration 3 memory updated
+2026-06-19T19:04:34Z iteration 3 completed validation_status=0
+2026-06-19T19:04:34Z iteration 3 checkpoint started
+2026-06-19T19:04:34Z iteration 3 checkpoint status before commit:
+M  AGENT_LOG.md
+M  ALTERNATIVES.jsonl
+M  MEMORY.md
+M  PLAN.md
+M  README.md
+M  SCORES.jsonl
+M  src/cli/client_commands.rs
+M  src/domain/errors.rs
+M  src/ipc/protocol.rs
+M  src/support/json.rs
+M  tests/cli_integration.rs

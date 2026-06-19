@@ -283,7 +283,7 @@ impl FakeIpcReply {
                 id,
                 ok: false,
                 result: None,
-                error: Some(ErrorPayload { code, message }),
+                error: Some(ErrorPayload::from_code(code, message)),
             },
         }
     }
@@ -482,6 +482,36 @@ fn json_flag_wraps_reload_config_config_invalid_and_exits_2() {
 }
 
 #[test]
+fn json_flag_redacts_unknown_daemon_error_message() {
+    let (_dir, config_path) = start_fake_ipc_server_with_reply(FakeIpcReply::error(
+        "DAEMON_PRIVATE_CODE",
+        "daemon failed with Password=hunter2 and token=abc.def",
+    ));
+
+    let assert = obsctl()
+        .args([
+            "--json",
+            "--config",
+            config_path.to_str().unwrap(),
+            "status",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicates::str::is_empty());
+
+    let parsed = parse_json_stdout(&assert.get_output().stdout);
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["result"], serde_json::Value::Null);
+    assert_eq!(parsed["error"]["code"], "DAEMON_PRIVATE_CODE");
+    assert_eq!(
+        parsed["error"]["message"],
+        "daemon failed with Password=[REDACTED] and token=[REDACTED]"
+    );
+    assert_eq!(parsed["exit_code"], 1);
+}
+
+#[test]
 fn json_flag_wraps_local_server_unavailable_in_envelope() {
     let dir = TempDir::new().unwrap();
     let config = config_with_socket(&dir);
@@ -504,6 +534,27 @@ fn json_flag_wraps_local_server_unavailable_in_envelope() {
             .unwrap()
             .contains("obsctl server is not running")
     );
+}
+
+#[test]
+fn default_mode_redacts_unknown_daemon_error_message() {
+    let (_dir, config_path) = start_fake_ipc_server_with_reply(FakeIpcReply::error(
+        "DAEMON_PRIVATE_CODE",
+        "daemon failed for http://user:hunter2@example.test with Bearer abc.def",
+    ));
+
+    obsctl()
+        .args(["--config", config_path.to_str().unwrap(), "status"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicates::str::is_empty())
+        .stderr(
+            contains("error [DAEMON_PRIVATE_CODE]: daemon failed for http://[REDACTED]@example.test with Bearer [REDACTED]")
+                .and(predicates::str::contains("hunter2").not())
+                .and(predicates::str::contains("abc.def").not())
+                .and(predicates::str::contains("user").not()),
+        );
 }
 
 #[test]

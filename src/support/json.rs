@@ -3,10 +3,13 @@ use serde_json::Value;
 pub fn redact_secrets(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            for key in ["password", "authentication", "auth", "token"] {
-                if map.contains_key(key) {
-                    map.insert(key.to_string(), Value::String("[REDACTED]".to_string()));
-                }
+            let secret_keys: Vec<String> = map
+                .keys()
+                .filter(|key| is_secret_key(key))
+                .cloned()
+                .collect();
+            for key in secret_keys {
+                map.insert(key, Value::String("[REDACTED]".to_string()));
             }
             for v in map.values_mut() {
                 redact_secrets(v);
@@ -19,6 +22,13 @@ pub fn redact_secrets(value: &mut Value) {
         }
         _ => {}
     }
+}
+
+fn is_secret_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "password" | "authentication" | "auth" | "token"
+    )
 }
 
 #[cfg(test)]
@@ -39,6 +49,14 @@ mod tests {
         let mut v = json!({"data": {"authentication": "abc123"}});
         redact_secrets(&mut v);
         assert_eq!(v["data"]["authentication"], "[REDACTED]");
+    }
+
+    #[test]
+    fn redacts_mixed_case_secret_fields() {
+        let mut v = json!({"Password": "hunter2", "AUTH": "abc123"});
+        redact_secrets(&mut v);
+        assert_eq!(v["Password"], "[REDACTED]");
+        assert_eq!(v["AUTH"], "[REDACTED]");
     }
 
     #[test]

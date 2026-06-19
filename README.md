@@ -184,6 +184,13 @@ Ambiguous matches fail without sending any OBS request.
 | 5 | Command parse error |
 | 6 | IPC error |
 
+There are two intentional exit-code mappings:
+
+- Local process failures use the local error classification. These are failures before a daemon IPC response exists, such as `init`, `validate-config`, `server`, service management, startup, config loading, or socket connection setup.
+- Proxy commands that receive a daemon response use the public IPC error-code table below. That table is the stable daemon-reachable contract for CLI and TUI clients.
+
+These mappings are separate because the same underlying condition can have different process context. For example, a local startup/authentication failure exits as a server/connection failure, while a reachable daemon that cannot use OBS reports `OBS_UNAVAILABLE` to proxy clients.
+
 ## Observable CLI Contract
 
 `obsctl` is daemon-first in normal use. Proxy commands connect to the local Unix socket, send one IPC command to the already-running daemon, wait for the correlated response, print the result, and exit. They do not connect directly to OBS and they do not auto-start the daemon.
@@ -192,7 +199,7 @@ Proxy commands include `status`, `server-status`, `obs-status`, `scene`, `mute`,
 
 Without `--json`, command output is concise and human-readable. Successful command results are printed to stdout. Diagnostics and errors are printed to stderr.
 
-With `--json`, stdout is the machine-readable contract and stderr is not used for human diagnostics. All proxy command outcomes use this envelope:
+With `--json`, stdout is the machine-readable contract and stderr is not used for human diagnostics. All proxy command outcomes use the same envelope with stable `ok`, `result`, `error`, and `exit_code` fields:
 
 ```json
 {
@@ -205,7 +212,7 @@ With `--json`, stdout is the machine-readable contract and stderr is not used fo
 }
 ```
 
-On failure, `ok` is `false`, `result` is `null`, and `error` contains a public IPC error code plus a secret-safe message:
+On failure, `ok` is `false`, `result` is `null`, and `error` contains a public IPC error code plus a secret-safe message. The `exit_code` field is the same code returned by the process:
 
 ```json
 {
@@ -218,6 +225,8 @@ On failure, `ok` is `false`, `result` is `null`, and `error` contains a public I
   "exit_code": 4
 }
 ```
+
+If a future or third-party daemon returns an unknown `error.code`, the CLI preserves that string in the JSON envelope and exits `1`.
 
 Config errors returned by the daemon keep the same envelope and exit with code `2`:
 
@@ -293,6 +302,8 @@ Public error codes are stable and map to CLI exit codes as follows:
 
 `REQUEST_TIMEOUT` and `OBS_UNAVAILABLE` are intentionally distinct. `OBS_UNAVAILABLE` means the daemon cannot currently make OBS requests because OBS is disconnected, authentication failed, or the OBS connection is otherwise unavailable. `REQUEST_TIMEOUT` means a request was attempted against OBS, but no matching response arrived before `connection.request_timeout_ms`.
 
+Bad subscription topics are protocol failures. A subscribe request containing any topic outside `state`, `events`, or `logs` returns `IPC_PROTOCOL_ERROR` with a message naming the unknown topic; `INVALID_TOPIC` is not emitted by the frozen wire contract.
+
 Error messages are intended to be actionable and secret-safe. They must not include OBS passwords, authentication strings, bearer tokens, or resolved secret environment-variable values.
 
 ## IPC Protocol
@@ -305,19 +316,45 @@ Command request:
 {"id":"req-000001","type":"command","command":{"name":"set_scene","target":"Main"}}
 ```
 
+Subscribe request:
+
+```json
+{"id":"req-000002","type":"subscribe","topics":["state","events","logs"]}
+```
+
 Success response:
 
 ```json
 {"id":"req-000001","type":"response","ok":true,"result":{"message":"scene set: Main"}}
 ```
 
-Pushed event:
+Error response:
+
+```json
+{"id":"req-000001","type":"response","ok":false,"error":{"code":"OBS_UNAVAILABLE","message":"OBS is unavailable"}}
+```
+
+State event:
 
 ```json
 {"type":"event","topic":"state","data":{"connected":true}}
 ```
 
-Supported event topics are `state`, `events`, and `logs`.
+OBS event:
+
+```json
+{"type":"event","topic":"events","data":{"eventType":"CurrentProgramSceneChanged","eventData":{"sceneName":"Main"}}}
+```
+
+Typed log event:
+
+```json
+{"type":"event","topic":"logs","data":{"level":"info","message":"daemon listening","target":"obsctl_rs::server","timestamp":"1970-01-01T00:00:00Z"}}
+```
+
+For log events, `level` is one of `trace`, `debug`, `info`, `warn`, or `error`; `target` may be omitted; and `timestamp` is RFC3339 UTC. Supported event topics are `state`, `events`, and `logs`.
+
+Compatibility note: `INVALID_TOPIC` is not a public wire code in this release. Clients that previously treated invalid subscription topics specially should handle `IPC_PROTOCOL_ERROR` for that case. No other public wire code is intentionally renamed or removed.
 
 ## Logging
 

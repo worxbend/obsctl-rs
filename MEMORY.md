@@ -4,3 +4,5 @@
 [anti-pattern] Sleep-based readiness in integration helpers hides races; fake IPC/OBS servers should expose explicit readiness and shutdown handles.
 [pattern] Public CLI/IPC contracts work best when error code, exit mapping, JSON envelope, docs, and integration tests are changed as one compatibility unit.
 [anti-pattern] Redacting only at the final presentation layer leaves non-JSON output and IPC payloads dependent on upstream safety; sanitize at the payload/log boundary too.
+[anti-pattern] Hand-built protocol fixtures can document an API the server does not actually emit; public wire contracts need server-path integration assertions.
+[learning] Redaction helpers drift when string-message and structured-JSON sanitizers live separately; keep one shared policy and make repeated redaction idempotent.
