@@ -4,7 +4,6 @@ use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
 
 use crate::config::model::Config;
-use crate::domain::events::normalize_obs_event;
 use crate::ipc::{
     protocol::{LogEvent, LogLevel},
     session::BroadcastHub,
@@ -15,6 +14,7 @@ use crate::obs::{
     requests,
 };
 use crate::runtime::reconnect_policy::ReconnectPolicy;
+use crate::server::obs_event_adapter::normalize_obs_event;
 use crate::server::state_store::{StateStore, build_snapshot};
 
 pub struct ObsSupervisor {

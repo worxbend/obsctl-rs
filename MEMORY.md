@@ -9,3 +9,5 @@
 [anti-pattern] Public IPC protocol types should not import OBS client internals; keep conversion at a server/domain adapter boundary so wire contracts do not drift with implementation refactors.
 [learning] State subscription tests must account for the initial snapshot pushed on subscribe before asserting later state-change broadcasts.
 [anti-pattern] Moving a cross-layer adapter into `domain` does not fix dependency direction if it imports both implementation internals and public wire types; use server/application adapters or pure domain events.
+[anti-pattern] Broadcasting state after an event without refreshing or mutating the cached snapshot creates false confidence; tests must assert the actual changed state, not just that a broadcast arrived.
+[learning] Source-scanning architecture guards that inspect only `use` imports miss fully-qualified path references; boundary tests need parser support or broader production-source matching.

@@ -183,7 +183,7 @@ async fn start_test_server_with_obs_client(
 async fn start_test_server_with_obs_supervisor(
     dir: &TempDir,
     cfg: Config,
-) -> (PathBuf, StateStore, watch::Sender<bool>) {
+) -> (PathBuf, StateStore, Arc<BroadcastHub>, watch::Sender<bool>) {
     let socket_path = dir.path().join("server_obs_supervisor.sock");
 
     let hub = Arc::new(BroadcastHub::new());
@@ -222,7 +222,7 @@ async fn start_test_server_with_obs_supervisor(
 
     wait_for_ipc_available(&socket_path).await;
 
-    (socket_path, state, shutdown_tx)
+    (socket_path, state, hub, shutdown_tx)
 }
 
 fn cmd(name: &str, args: Value) -> CommandPayload {
@@ -274,6 +274,16 @@ async fn next_event_with_timeout(client: &mut IpcClient) -> ServerMessage {
         .expect("failed to read IPC event")
 }
 
+async fn expect_obs_event(client: &mut IpcClient, expected: Value) {
+    match next_event_with_timeout(client).await {
+        ServerMessage::Event { topic, data } => {
+            assert_eq!(topic, TOPIC_EVENTS);
+            assert_eq!(data, expected);
+        }
+        other => panic!("expected OBS event, got {other:?}"),
+    }
+}
+
 async fn next_state_event_matching<F>(
     client: &mut IpcClient,
     description: &str,
@@ -311,17 +321,41 @@ where
     .unwrap_or_else(|_| panic!("timed out waiting for state event with {description}"))
 }
 
-async fn assert_logs_do_not_receive_obs_payloads(client: &mut IpcClient, forbidden_types: &[&str]) {
-    let quiet_window = Duration::from_millis(150);
+async fn drain_logs_until_marker(client: &mut IpcClient, marker: &str) -> Vec<Value> {
+    let mut logs = Vec::new();
+    loop {
+        match next_event_with_timeout(client).await {
+            ServerMessage::Event { topic, data } => {
+                assert_eq!(topic, TOPIC_LOGS);
+                if data.get("message").and_then(Value::as_str) == Some(marker) {
+                    return logs;
+                }
+                logs.push(data);
+            }
+            other => panic!("expected log event, got {other:?}"),
+        }
+    }
+}
 
-    while let Ok(Ok(ServerMessage::Event { topic, data })) =
-        tokio::time::timeout(quiet_window, client.next_event()).await
-    {
-        assert_eq!(topic, TOPIC_LOGS);
+fn publish_log_marker(hub: &BroadcastHub, marker: &str) {
+    hub.publish_log(LogEvent::new(LogLevel::Info, marker).with_target("tests::server_integration"));
+}
+
+fn assert_logs_do_not_receive_obs_payloads(logs: &[Value], forbidden_types: &[&str]) {
+    for data in logs {
         let payload_type = data.get("type").and_then(Value::as_str);
         assert!(
             !forbidden_types.contains(&payload_type.unwrap_or_default()),
             "logs-only subscriber received OBS event payload: {data}"
+        );
+    }
+}
+
+fn assert_logs_do_not_contain_text(logs: &[Value], forbidden: &str) {
+    for data in logs {
+        assert!(
+            !data.to_string().contains(forbidden),
+            "logs subscriber received forbidden payload text `{forbidden}`: {data}"
         );
     }
 }
@@ -464,7 +498,8 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
     cfg.connection.request_timeout_ms = 500;
 
     let dir = TempDir::new().unwrap();
-    let (socket_path, state, shutdown) = start_test_server_with_obs_supervisor(&dir, cfg).await;
+    let (socket_path, state, hub, shutdown) =
+        start_test_server_with_obs_supervisor(&dir, cfg).await;
     wait_for_obs_connected(&state).await;
 
     let mut events_client = IpcClient::connect(&socket_path).await.unwrap();
@@ -479,14 +514,14 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
         serde_json::json!({ "sceneName": "BRB" }),
     );
 
-    match next_event_with_timeout(&mut events_client).await {
-        ServerMessage::Event { topic, data } => {
-            assert_eq!(topic, TOPIC_EVENTS);
-            assert_eq!(data["type"], "CurrentProgramSceneChanged");
-            assert_eq!(data["scene_name"], "BRB");
-        }
-        other => panic!("expected scene OBS event, got {other:?}"),
-    }
+    expect_obs_event(
+        &mut events_client,
+        serde_json::json!({
+            "type": "CurrentProgramSceneChanged",
+            "scene_name": "BRB"
+        }),
+    )
+    .await;
 
     let scene_state =
         next_state_event_matching(&mut state_client, "current_scene updated to BRB", |data| {
@@ -500,15 +535,15 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
         serde_json::json!({ "inputName": "Mic", "inputMuted": true }),
     );
 
-    match next_event_with_timeout(&mut events_client).await {
-        ServerMessage::Event { topic, data } => {
-            assert_eq!(topic, TOPIC_EVENTS);
-            assert_eq!(data["type"], "InputMuteStateChanged");
-            assert_eq!(data["input_name"], "Mic");
-            assert_eq!(data["muted"], true);
-        }
-        other => panic!("expected audio OBS event, got {other:?}"),
-    }
+    expect_obs_event(
+        &mut events_client,
+        serde_json::json!({
+            "type": "InputMuteStateChanged",
+            "input_name": "Mic",
+            "muted": true
+        }),
+    )
+    .await;
 
     let muted_state = next_state_event_matching(&mut state_client, "Mic input muted", |data| {
         data["audio_inputs"].as_array().is_some_and(|inputs| {
@@ -526,11 +561,183 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
         .expect("Mic input");
     assert_eq!(mic["muted"], true);
 
-    assert_logs_do_not_receive_obs_payloads(
-        &mut logs_client,
-        &["CurrentProgramSceneChanged", "InputMuteStateChanged"],
+    fake_obs.emit_event(
+        "SceneCreated",
+        serde_json::json!({ "sceneName": "Interview" }),
+    );
+
+    expect_obs_event(
+        &mut events_client,
+        serde_json::json!({
+            "type": "SceneListChanged"
+        }),
     )
     .await;
+
+    let scene_list_state =
+        next_state_event_matching(&mut state_client, "scene list mutation broadcast", |data| {
+            data["connected"] == true && data["current_scene"] == "BRB"
+        })
+        .await;
+    assert_eq!(scene_list_state["current_scene"], "BRB");
+
+    fake_obs.emit_event(
+        "InputCreated",
+        serde_json::json!({ "inputName": "Browser Audio" }),
+    );
+
+    expect_obs_event(
+        &mut events_client,
+        serde_json::json!({
+            "type": "InputCreated",
+            "input_name": "Browser Audio"
+        }),
+    )
+    .await;
+
+    let input_created_state =
+        next_state_event_matching(&mut state_client, "Browser Audio input created", |data| {
+            data["audio_inputs"]
+                .as_array()
+                .is_some_and(|inputs| inputs.iter().any(|input| input["name"] == "Browser Audio"))
+        })
+        .await;
+    assert!(
+        input_created_state["audio_inputs"]
+            .as_array()
+            .expect("audio_inputs array")
+            .iter()
+            .any(|input| input["name"] == "Browser Audio")
+    );
+
+    fake_obs.emit_event(
+        "InputVolumeChanged",
+        serde_json::json!({
+            "inputName": "Browser Audio",
+            "inputVolumeMul": 0.42,
+            "inputVolumeDb": -7.5
+        }),
+    );
+
+    expect_obs_event(
+        &mut events_client,
+        serde_json::json!({
+            "type": "InputVolumeChanged",
+            "input_name": "Browser Audio",
+            "volume_mul": 0.42,
+            "volume_db": -7.5
+        }),
+    )
+    .await;
+
+    let volume_state =
+        next_state_event_matching(&mut state_client, "Browser Audio volume updated", |data| {
+            data["audio_inputs"].as_array().is_some_and(|inputs| {
+                inputs.iter().any(|input| {
+                    input["name"] == "Browser Audio"
+                        && input["volume_mul"] == 0.42
+                        && input["volume_db"] == -7.5
+                        && input["volume_percent"] == 65
+                })
+            })
+        })
+        .await;
+    let browser = volume_state["audio_inputs"]
+        .as_array()
+        .expect("audio_inputs array")
+        .iter()
+        .find(|input| input["name"] == "Browser Audio")
+        .expect("Browser Audio input");
+    assert_eq!(browser["volume_mul"], 0.42);
+    assert_eq!(browser["volume_db"], -7.5);
+    assert_eq!(browser["volume_percent"], 65);
+
+    fake_obs.emit_event(
+        "InputRemoved",
+        serde_json::json!({ "inputName": "Browser Audio" }),
+    );
+
+    expect_obs_event(
+        &mut events_client,
+        serde_json::json!({
+            "type": "InputRemoved",
+            "input_name": "Browser Audio"
+        }),
+    )
+    .await;
+
+    let input_removed_state =
+        next_state_event_matching(&mut state_client, "Browser Audio input removed", |data| {
+            data["audio_inputs"]
+                .as_array()
+                .is_some_and(|inputs| inputs.iter().all(|input| input["name"] != "Browser Audio"))
+        })
+        .await;
+    assert!(
+        input_removed_state["audio_inputs"]
+            .as_array()
+            .expect("audio_inputs array")
+            .iter()
+            .all(|input| input["name"] != "Browser Audio")
+    );
+
+    let known_events_log_marker = "obs-event-routing-known-events-complete";
+    publish_log_marker(&hub, known_events_log_marker);
+    let logs_before_marker =
+        drain_logs_until_marker(&mut logs_client, known_events_log_marker).await;
+    assert_logs_do_not_receive_obs_payloads(
+        &logs_before_marker,
+        &[
+            "CurrentProgramSceneChanged",
+            "InputMuteStateChanged",
+            "SceneListChanged",
+            "InputCreated",
+            "InputVolumeChanged",
+            "InputRemoved",
+        ],
+    );
+
+    let state_before_unknown = serde_json::to_value(state.read().await).unwrap();
+    let mut unknown_events_client = IpcClient::connect(&socket_path).await.unwrap();
+    unknown_events_client
+        .subscribe(&[TOPIC_EVENTS])
+        .await
+        .unwrap();
+    let mut unknown_logs_client = IpcClient::connect(&socket_path).await.unwrap();
+    unknown_logs_client.subscribe(&[TOPIC_LOGS]).await.unwrap();
+
+    fake_obs.emit_event(
+        "VendorSpecificEvent",
+        serde_json::json!({
+            "sceneName": "SHOULD_NOT_APPEAR",
+            "inputName": "SHOULD_NOT_APPEAR",
+            "inputMuted": false
+        }),
+    );
+    fake_obs.emit_event(
+        "InputMuteStateChanged",
+        serde_json::json!({ "inputName": "Mic", "inputMuted": true }),
+    );
+
+    expect_obs_event(
+        &mut unknown_events_client,
+        serde_json::json!({
+            "type": "InputMuteStateChanged",
+            "input_name": "Mic",
+            "muted": true
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        serde_json::to_value(state.read().await).unwrap(),
+        state_before_unknown
+    );
+    let unknown_event_log_marker = "obs-event-routing-unknown-event-complete";
+    publish_log_marker(&hub, unknown_event_log_marker);
+    let unknown_logs_before_marker =
+        drain_logs_until_marker(&mut unknown_logs_client, unknown_event_log_marker).await;
+    assert_logs_do_not_contain_text(&unknown_logs_before_marker, "VendorSpecificEvent");
 
     let _ = shutdown.send(true);
     fake_obs.shutdown();

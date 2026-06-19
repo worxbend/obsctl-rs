@@ -814,3 +814,82 @@ M  src/ipc/protocol.rs
 M  src/ipc/session.rs
 M  src/server/obs_supervisor.rs
 M  tests/server_integration.rs
+2026-06-19T19:29:15Z iteration 6 started remaining=13856s
+2026-06-19T19:29:15Z iteration 6 preplanner effective budgets untracked_scan_max_bytes=536870912 untracked_scan_max_count=10000 snapshot_copy_max_bytes=536870912 snapshot_copy_max_count=10000 snapshot_copy_max_file_bytes=134217728
+2026-06-19T19:29:15Z iteration 6 disposable preplanner repo created path=/tmp/agent-loop-preplanner-repo-oh_scv8c/repo copied_entries=84
+2026-06-19T19:29:15Z iteration 6 ideator phase started count=3
+2026-06-19T19:29:15Z iteration 6 ideator phase concurrency workers=3
+2026-06-19T19:29:15Z iteration 6 ideator 1 role="the pragmatist" started
+2026-06-19T19:29:15Z iteration 6 ideator 2 role="the architect" started
+2026-06-19T19:29:15Z iteration 6 ideator 3 role="the contrarian" started
+2026-06-19T19:29:27Z iteration 6 ideator 3 role="the contrarian" completed status=0
+2026-06-19T19:29:27Z iteration 6 ideator 1 role="the pragmatist" completed status=0
+2026-06-19T19:29:32Z iteration 6 ideator 2 role="the architect" completed status=0
+2026-06-19T19:29:32Z iteration 6 ideator phase completed approaches=3
+2026-06-19T19:29:32Z iteration 6 selector started approaches=3
+2026-06-19T19:29:51Z iteration 6 selector completed status=0
+2026-06-19T19:29:51Z iteration 6 disposable preplanner repo cleanup path=/tmp/agent-loop-preplanner-repo-oh_scv8c/repo
+2026-06-19T19:29:51Z iteration 6 selector rejected alternative role="the contrarian" approach="Stabilize the Runtime Before Polishing Boundaries: prioritize deterministic server/OBS lifecycle behavior and test synchronization first, then move the event adapter once the in..." reason="Runtime determinism matters, but selecting it as the primary strategy would delay the already-identified P0 architecture leak and risk spreading the iteration into passive disconnects, shutdown handles, and harness cleanup before the pub..."
+2026-06-19T19:29:51Z iteration 6 selector rejected alternative role="the pragmatist" approach="Boundary-First Stabilization: treat the event boundary as a compatibility contract and make architectural dependency enforcement the first planning lens, with runtime robustness..." reason="The boundary-first framing is strong, but as-is it underemphasizes that server-path integration coverage must be part of the strategy; dependency guards alone will not catch fixture-only contracts or event routing mistakes."
+2026-06-19T19:29:51Z iteration 6 selector rejected alternative role="the architect" approach="Boundary-First Stabilization: treat the event-layer dependency leak as the architectural keystone, then let tests, runtime fixes, and feature work proceed only where they reinfo..." reason="The architectural emphasis is correct, but as-is it risks becoming too structural. The planner needs a sharper constraint: use minimal boundary changes and require targeted runtime proof only for the event contract, avoiding a broader re..."
+2026-06-19T19:29:51Z iteration 6 selector alternatives persisted count=3
+2026-06-19T19:29:51Z iteration 6 selector structured alternatives persisted count=3
+2026-06-19T19:29:51Z iteration 6 planner started
+2026-06-19T19:30:28Z iteration 6 plan: 5 task(s) in 4 phase(s). This slice keeps the iteration centered on the highest-risk boundary issue: OBS internals, domain code, and public IPC event payloads must be decoupled. The adapter move must happen first because the new dependency guards and server-path tests rely on the corrected boundary. The guard tests and positive event-path coverage can run in parallel after that because they touch different test surfaces. Deterministic negative assertions come after the expanded tests so the final routing behavior is stable before full verification.
+2026-06-19T19:30:28Z iteration 6 phase 1 started parallel=False tasks=1
+2026-06-19T19:32:17Z iteration 6 task t1 ('Move OBS event normalization to server adapter') status=0
+2026-06-19T19:32:17Z iteration 6 phase 2 started parallel=True tasks=2
+2026-06-19T19:37:03Z iteration 6 task t3 ('Expand real server-path OBS event coverage') status=0
+2026-06-19T19:37:36Z iteration 6 task t2 ('Strengthen architecture dependency guards') status=0
+2026-06-19T19:37:36Z iteration 6 phase 3 started parallel=False tasks=1
+2026-06-19T19:41:40Z iteration 6 task t4 ('Remove time-based negative assertions from event routing tests') status=0
+2026-06-19T19:41:40Z iteration 6 phase 4 started parallel=False tasks=1
+2026-06-19T19:41:51Z iteration 6 task t5 ('Run boundary-focused verification') status=0
+2026-06-19T19:41:51Z iteration 6 reviewer started
+
+## Reviewer Summary - 2026-06-19 - Iteration 6
+
+Iteration: server-side OBS event adapter, stronger dependency-boundary guards, expanded server-path event coverage, and deterministic log-routing assertions.
+
+What was done:
+- Removed `domain::events` and moved `ObsEvent -> ObsEventPayload` conversion into `server::obs_event_adapter`.
+- Updated `ObsSupervisor` to apply internal OBS events to state and publish only normalized public event payloads from the server layer.
+- Added dedicated dependency-boundary tests for IPC and domain modules, including grouped import matcher coverage.
+- Expanded the fake-OBS-to-IPC server integration path to cover `SceneListChanged`, `InputCreated`, `InputRemoved`, `InputMuteStateChanged`, `InputVolumeChanged`, `CurrentProgramSceneChanged`, and unknown-event drops.
+- Replaced the event-routing test's log quiet-window assertion with marker-based log draining.
+- Verified `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with 225 tests.
+
+What was found:
+- The main cross-layer leak from `domain::events` is fixed; the domain layer no longer imports IPC wire payloads or OBS client event types.
+- The new boundary tests are useful but still import-focused. Fully-qualified production references such as `crate::obs::client::ObsEvent` outside `use` statements can bypass them.
+- Boundary-scanning helpers are duplicated across two integration test files, and an older literal-string architecture check still lives in `tests/server_integration.rs`.
+- Server-path event payload coverage is much broader, but the single long scenario mixes payload routing, state routing, log routing, and unknown-event behavior, making future failures harder to diagnose.
+- `SceneListChanged` state behavior is still stale: the state store broadcasts without refreshing the scene list or updating `updated_at`, and the new test does not catch that because it only checks the existing current scene.
+- `InputCreated` still adds every created OBS input to `audio_inputs` without checking whether the input is actually audio-capable.
+- Marker-based log draining removes the fixed negative sleep in this test, but the broader integration harness still uses fixed sleeps and unjoined background tasks.
+
+Top improvement proposals:
+- P0: Refresh or explicitly mark stale state after scene-list mutations, and add server-path assertions that created/removed scenes appear in `state`, not only in `events`.
+- P0: Correct input-created/input-removed semantics by using OBS input kind data or a full input-list refresh before mutating `audio_inputs`.
+- P0: Consolidate boundary guard helpers and extend them to catch fully-qualified forbidden paths, not just imports.
+- P0: Split the large OBS event routing integration test into focused tests for payload shapes, state-cache behavior, log isolation, and unknown-event drops.
+- P1: Continue runtime hardening with passive OBS disconnect detection, concurrent timeout cleanup, and dump/reload refresh semantics.
+- P1: Bridge ordinary `tracing` records into bounded typed IPC log events.
+- P2: Replace sleep-based test readiness/shutdown helpers and clean or document orchestration telemetry artifacts.
+2026-06-19T19:45:42Z iteration 6 reviewer completed status=0
+2026-06-19T19:45:42Z iteration 6 memory updated
+2026-06-19T19:45:42Z iteration 6 completed validation_status=0
+2026-06-19T19:45:42Z iteration 6 checkpoint started
+2026-06-19T19:45:42Z iteration 6 checkpoint status before commit:
+M  AGENT_LOG.md
+M  ALTERNATIVES.jsonl
+M  MEMORY.md
+M  PLAN.md
+M  SCORES.jsonl
+M  src/domain/mod.rs
+M  src/server/mod.rs
+R  src/domain/events.rs -> src/server/obs_event_adapter.rs
+M  src/server/obs_supervisor.rs
+A  tests/architecture_boundaries.rs
+A  tests/dependency_boundaries.rs
+M  tests/server_integration.rs
