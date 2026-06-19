@@ -343,7 +343,7 @@ State event:
 OBS event:
 
 ```json
-{"type":"event","topic":"events","data":{"eventType":"CurrentProgramSceneChanged","eventData":{"sceneName":"Main"}}}
+{"type":"event","topic":"events","data":{"type":"CurrentProgramSceneChanged","scene_name":"BRB"}}
 ```
 
 Typed log event:
@@ -352,7 +352,11 @@ Typed log event:
 {"type":"event","topic":"logs","data":{"level":"info","message":"daemon listening","target":"obsctl_rs::server","timestamp":"1970-01-01T00:00:00Z"}}
 ```
 
+OBS events use normalized typed payloads derived from the internal OBS event model, not raw obs-websocket event envelopes. Audio events use the same convention, for example `{"type":"InputMuteStateChanged","input_name":"Mic","muted":true}` or `{"type":"InputVolumeChanged","input_name":"Desktop Audio","volume_mul":0.75,"volume_db":-2.5}`.
+
 For log events, `level` is one of `trace`, `debug`, `info`, `warn`, or `error`; `target` may be omitted; and `timestamp` is RFC3339 UTC. Supported event topics are `state`, `events`, and `logs`.
+
+Error and log messages are redacted by a best-effort boundary sanitizer. Prefer structured non-secret fields over formatted messages that include secret-bearing values.
 
 Compatibility note: `INVALID_TOPIC` is not a public wire code in this release. Clients that previously treated invalid subscription topics specially should handle `IPC_PROTOCOL_ERROR` for that case. No other public wire code is intentionally renamed or removed.
 

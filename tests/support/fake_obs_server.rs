@@ -89,6 +89,8 @@ pub struct FakeObsHandle {
     shutdown: oneshot::Sender<()>,
     /// Broadcast to disconnect all active connection handlers.
     disconnect_tx: broadcast::Sender<()>,
+    /// Broadcast OBS events to all active connection handlers.
+    event_tx: broadcast::Sender<Value>,
 }
 
 impl FakeObsHandle {
@@ -108,6 +110,15 @@ impl FakeObsHandle {
             "eventData": event_data,
         });
         self.state.lock().await.pending_events.push(msg);
+    }
+
+    /// Emit an OBS event to currently connected clients.
+    pub fn emit_event(&self, event_type: &str, event_data: Value) {
+        let msg = json!({
+            "eventType": event_type,
+            "eventData": event_data,
+        });
+        let _ = self.event_tx.send(msg);
     }
 
     /// Close all active WebSocket connections without stopping the accept loop.
@@ -136,10 +147,12 @@ pub async fn spawn_fake_obs(require_auth: bool, password: Option<&str>) -> FakeO
     let (req_tx, req_rx) = mpsc::channel::<(String, Value)>(64);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     let (disconnect_tx, _) = broadcast::channel::<()>(8);
+    let (event_tx, _) = broadcast::channel::<Value>(16);
 
     let state_clone = state.clone();
     let password = password.map(|p| p.to_string());
     let disconnect_tx_clone = disconnect_tx.clone();
+    let event_tx_clone = event_tx.clone();
 
     tokio::spawn(async move {
         loop {
@@ -153,7 +166,8 @@ pub async fn spawn_fake_obs(require_auth: bool, password: Option<&str>) -> FakeO
                             let pw = password.clone();
                             let auth = require_auth;
                             let disc_rx = disconnect_tx_clone.subscribe();
-                            tokio::spawn(handle_connection(stream, s, tx, auth, pw, disc_rx));
+                            let event_rx = event_tx_clone.subscribe();
+                            tokio::spawn(handle_connection(stream, s, tx, auth, pw, disc_rx, event_rx));
                         }
                         Err(_) => break,
                     }
@@ -168,6 +182,7 @@ pub async fn spawn_fake_obs(require_auth: bool, password: Option<&str>) -> FakeO
         requests: req_rx,
         shutdown: shutdown_tx,
         disconnect_tx,
+        event_tx,
     }
 }
 
@@ -178,6 +193,7 @@ async fn handle_connection(
     require_auth: bool,
     password: Option<String>,
     mut disconnect_rx: broadcast::Receiver<()>,
+    mut event_rx: broadcast::Receiver<Value>,
 ) {
     let ws_stream = match accept_async(stream).await {
         Ok(s) => s,
@@ -283,6 +299,24 @@ async fn handle_connection(
     // --- Handle requests ---
     loop {
         tokio::select! {
+            event = event_rx.recv() => {
+                let event_data = match event {
+                    Ok(event_data) => event_data,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                let event_msg = json!({
+                    "op": OPCODE_EVENT,
+                    "d": event_data,
+                });
+                if sink
+                    .send(Message::Text(event_msg.to_string()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             _ = disconnect_rx.recv() => {
                 let _ = sink.send(Message::Close(None)).await;
                 break;

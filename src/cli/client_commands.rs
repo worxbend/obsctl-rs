@@ -9,10 +9,11 @@ use crate::{
     ipc::{
         protocol::{
             CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage,
-            exit_code_for_public_error_code, public_error_code, redacted_message,
+            exit_code_for_public_error_code, public_error_code,
         },
         unix_client::IpcClient,
     },
+    support::redaction::redact_message,
 };
 
 const SERVER_UNAVAILABLE_HINT: &str = "\
@@ -162,7 +163,7 @@ impl ProxyCtx {
         if self.json_output {
             print_json_error(code, msg, exit_code);
         } else {
-            eprintln!("error [{code}]: {}", redacted_message(msg));
+            eprintln!("error [{code}]: {}", redact_message(msg));
         }
         exit_code
     }
@@ -173,7 +174,7 @@ impl ProxyCtx {
         if self.json_output {
             print_json_error(code, message, exit_code);
         } else {
-            eprintln!("{}", redacted_message(message));
+            eprintln!("{}", redact_message(message));
         }
         exit_code
     }
@@ -191,9 +192,9 @@ impl ProxyCtx {
             };
             print_json_error(code.as_str(), message, exit_code);
         } else if matches!(error, ObsctlError::ServerUnavailable { .. }) {
-            eprintln!("{}", redacted_message(error.to_string()));
+            eprintln!("{}", redact_message(error.to_string()));
         } else {
-            eprintln!("error: {}", redacted_message(error.to_string()));
+            eprintln!("error: {}", redact_message(error.to_string()));
         }
         exit_code
     }
@@ -228,7 +229,7 @@ fn print_json_success(result: Option<serde_json::Value>) {
 }
 
 fn print_json_error(code: &str, message: &str, exit_code: i32) {
-    let safe_message = redacted_message(message);
+    let safe_message = redact_message(message);
     let envelope = serde_json::json!({
         "ok": false,
         "result": serde_json::Value::Null,

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,8 +15,8 @@ use obsctl_rs::{
     config::model::Config,
     ipc::{
         protocol::{
-            CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_LOGS,
-            exit_code_for_public_error_code,
+            CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS,
+            TOPIC_STATE, exit_code_for_public_error_code,
         },
         session::BroadcastHub,
         unix_client::IpcClient,
@@ -27,7 +28,8 @@ use obsctl_rs::{
         state::{ObsSnapshot, SceneState},
     },
     server::{
-        client_registry::ClientRegistry, command_executor::CommandExecutor, state_store::StateStore,
+        client_registry::ClientRegistry, command_executor::CommandExecutor,
+        obs_supervisor::ObsSupervisor, state_store::StateStore,
     },
 };
 use support::fake_obs_server::{PreparedResponse, spawn_fake_obs};
@@ -148,6 +150,51 @@ async fn start_test_server_with_obs_client(
     (client, shutdown_tx)
 }
 
+async fn start_test_server_with_obs_supervisor(
+    dir: &TempDir,
+    cfg: Config,
+) -> (PathBuf, StateStore, watch::Sender<bool>) {
+    let socket_path = dir.path().join("server_obs_supervisor.sock");
+
+    let hub = Arc::new(BroadcastHub::new());
+    let state = StateStore::new(Arc::clone(&hub));
+    let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let config = Arc::new(Mutex::new(cfg));
+    let registry = ClientRegistry::new();
+    let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(4);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+
+    let executor = CommandExecutor::new(
+        state.clone(),
+        Arc::clone(&obs_handle),
+        Arc::clone(&config),
+        None,
+        socket_path.clone(),
+        registry,
+        reconnect_tx,
+        shutdown_tx.clone(),
+        Arc::clone(&hub),
+    );
+    let supervisor = ObsSupervisor::new(
+        Arc::clone(&config),
+        state.clone(),
+        obs_handle,
+        reconnect_rx,
+        shutdown_rx.clone(),
+        Arc::clone(&hub),
+    );
+
+    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
+    tokio::spawn(executor.run(cmd_rx));
+    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+    tokio::spawn(supervisor.run());
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    (socket_path, state, shutdown_tx)
+}
+
 fn cmd(name: &str, args: Value) -> CommandPayload {
     CommandPayload {
         name: name.to_string(),
@@ -162,6 +209,26 @@ fn extract_response(msg: ServerMessage) -> (bool, Option<Value>, Option<String>)
         } => (ok, result, error.map(|e| e.code)),
         other => panic!("expected Response, got {other:?}"),
     }
+}
+
+async fn wait_for_obs_connected(state: &StateStore) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if state.read().await.connected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("OBS supervisor did not connect to fake OBS");
+}
+
+async fn next_event_with_timeout(client: &mut IpcClient) -> ServerMessage {
+    tokio::time::timeout(Duration::from_millis(500), client.next_event())
+        .await
+        .expect("timed out waiting for IPC event")
+        .expect("failed to read IPC event")
 }
 
 #[tokio::test]
@@ -288,6 +355,91 @@ async fn obs_command_timeout_returns_request_timeout_ipc_code_and_exit_4() {
     assert!(ok, "subsequent command should succeed: {code:?}");
     assert_eq!(result.unwrap()["message"], "scene set: Main");
 
+    fake_obs.shutdown();
+}
+
+#[tokio::test]
+async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
+    let fake_obs = spawn_fake_obs(false, None).await;
+
+    let mut cfg = Config::default();
+    cfg.connection.host = "127.0.0.1".to_string();
+    cfg.connection.port = fake_obs.addr.port();
+    cfg.connection.password_env = String::new();
+    cfg.connection.request_timeout_ms = 500;
+
+    let dir = TempDir::new().unwrap();
+    let (socket_path, state, shutdown) = start_test_server_with_obs_supervisor(&dir, cfg).await;
+    wait_for_obs_connected(&state).await;
+
+    let mut events_client = IpcClient::connect(&socket_path).await.unwrap();
+    events_client.subscribe(&[TOPIC_EVENTS]).await.unwrap();
+    let mut state_client = IpcClient::connect(&socket_path).await.unwrap();
+    state_client.subscribe(&[TOPIC_STATE]).await.unwrap();
+    let mut logs_client = IpcClient::connect(&socket_path).await.unwrap();
+    logs_client.subscribe(&[TOPIC_LOGS]).await.unwrap();
+
+    fake_obs.emit_event(
+        "CurrentProgramSceneChanged",
+        serde_json::json!({ "sceneName": "BRB" }),
+    );
+
+    match next_event_with_timeout(&mut events_client).await {
+        ServerMessage::Event { topic, data } => {
+            assert_eq!(topic, TOPIC_EVENTS);
+            assert_eq!(data["type"], "CurrentProgramSceneChanged");
+            assert_eq!(data["scene_name"], "BRB");
+        }
+        other => panic!("expected scene OBS event, got {other:?}"),
+    }
+
+    match next_event_with_timeout(&mut state_client).await {
+        ServerMessage::Event { topic, data } => {
+            assert_eq!(topic, TOPIC_STATE);
+            assert_eq!(data["current_scene"], "BRB");
+            assert_ne!(data["type"], "CurrentProgramSceneChanged");
+        }
+        other => panic!("expected state event, got {other:?}"),
+    }
+
+    fake_obs.emit_event(
+        "InputMuteStateChanged",
+        serde_json::json!({ "inputName": "Mic", "inputMuted": true }),
+    );
+
+    match next_event_with_timeout(&mut events_client).await {
+        ServerMessage::Event { topic, data } => {
+            assert_eq!(topic, TOPIC_EVENTS);
+            assert_eq!(data["type"], "InputMuteStateChanged");
+            assert_eq!(data["input_name"], "Mic");
+            assert_eq!(data["muted"], true);
+        }
+        other => panic!("expected audio OBS event, got {other:?}"),
+    }
+
+    match next_event_with_timeout(&mut state_client).await {
+        ServerMessage::Event { topic, data } => {
+            assert_eq!(topic, TOPIC_STATE);
+            let mic = data["audio_inputs"]
+                .as_array()
+                .expect("audio_inputs array")
+                .iter()
+                .find(|input| input["name"] == "Mic")
+                .expect("Mic input");
+            assert_eq!(mic["muted"], true);
+            assert_ne!(data["type"], "InputMuteStateChanged");
+        }
+        other => panic!("expected state event, got {other:?}"),
+    }
+
+    let logs_result =
+        tokio::time::timeout(Duration::from_millis(150), logs_client.next_event()).await;
+    assert!(
+        logs_result.is_err(),
+        "logs-only subscriber should not receive OBS event payloads"
+    );
+
+    let _ = shutdown.send(true);
     fake_obs.shutdown();
 }
 

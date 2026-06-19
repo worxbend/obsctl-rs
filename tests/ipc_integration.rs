@@ -1,13 +1,21 @@
 use std::sync::Arc;
 
+use obsctl_rs::domain::errors::ObsctlError;
 use obsctl_rs::ipc::{
-    protocol::{CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_LOGS, TOPIC_STATE},
+    protocol::{
+        CommandPayload, LogEvent, LogLevel, PublicErrorCode, ServerMessage, TOPIC_LOGS,
+        TOPIC_STATE, public_error_code,
+    },
     session::{BroadcastHub, CommandDispatch},
     unix_client::IpcClient,
     unix_server::IpcServer,
 };
 use tempfile::TempDir;
-use tokio::sync::{mpsc, watch};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+    sync::{mpsc, watch},
+};
 
 async fn start_test_server(
     socket_path: &std::path::Path,
@@ -204,7 +212,74 @@ async fn invalid_topic_returns_error() {
 
     let mut client = IpcClient::connect(&socket_path).await.unwrap();
     let result = client.subscribe(&["not_a_real_topic"]).await;
-    assert!(result.is_err());
+    let err = result.expect_err("invalid topic should be rejected");
+    assert_eq!(public_error_code(&err).as_str(), "IPC_PROTOCOL_ERROR");
+    match err {
+        ObsctlError::IpcProtocolError(message) => {
+            assert!(message.contains("unknown topics"));
+            assert!(message.contains("not_a_real_topic"));
+        }
+        other => panic!("expected IpcProtocolError, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn raw_invalid_subscribe_returns_protocol_error_envelope() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("raw_invalid_topic.sock");
+    let (_, _cmd_rx, _shutdown) = start_test_server(&socket_path).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    let stream = UnixStream::connect(&socket_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    writer
+        .write_all(br#"{"id":"raw-invalid-001","type":"subscribe","topics":["not_a_real_topic"]}"#)
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+
+    let mut line = String::new();
+    let bytes_read = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        reader.read_line(&mut line),
+    )
+    .await
+    .expect("server should write an invalid subscribe response")
+    .unwrap();
+    assert!(bytes_read > 0);
+    assert!(line.ends_with('\n'), "response should be newline-delimited");
+
+    let response: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    let envelope = response.as_object().expect("response should be an object");
+    assert_eq!(
+        envelope.len(),
+        4,
+        "unexpected response envelope: {response}"
+    );
+    assert_eq!(response["type"], "response");
+    assert_eq!(response["id"], "raw-invalid-001");
+    assert_eq!(response["ok"], false);
+    assert!(
+        !envelope.contains_key("result"),
+        "error responses should omit result"
+    );
+
+    let error = response["error"]
+        .as_object()
+        .expect("error response should contain an error object");
+    assert_eq!(error.len(), 2, "unexpected error payload: {response}");
+    assert_eq!(
+        error.get("code").and_then(serde_json::Value::as_str),
+        Some(PublicErrorCode::IpcProtocolError.as_str())
+    );
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .expect("error message should be a string");
+    assert!(message.contains("unknown topics"));
+    assert!(message.contains("not_a_real_topic"));
 }
 
 #[tokio::test]

@@ -3,6 +3,8 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::domain::errors::ObsctlError;
+use crate::obs::client::ObsEvent;
+pub use crate::support::redaction::redact_message as redacted_message;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -36,11 +38,89 @@ pub enum ServerMessage {
 }
 
 impl ServerMessage {
+    pub fn obs_event(event: ObsEventPayload) -> Self {
+        Self::Event {
+            topic: TOPIC_EVENTS.to_string(),
+            data: serde_json::to_value(event)
+                .expect("ObsEventPayload serialization should not fail"),
+        }
+    }
+
     pub fn log_event(event: LogEvent) -> Self {
         Self::Event {
             topic: TOPIC_LOGS.to_string(),
             data: serde_json::to_value(event).expect("LogEvent serialization should not fail"),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ObsEventPayload {
+    CurrentProgramSceneChanged {
+        scene_name: String,
+    },
+    SceneListChanged,
+    InputCreated {
+        input_name: String,
+    },
+    InputRemoved {
+        input_name: String,
+    },
+    InputMuteStateChanged {
+        input_name: String,
+        muted: bool,
+    },
+    InputVolumeChanged {
+        input_name: String,
+        volume_mul: f64,
+        volume_db: f64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownObsEvent;
+
+impl ObsEventPayload {
+    pub fn from_obs_event(event: &ObsEvent) -> Option<Self> {
+        match event {
+            ObsEvent::CurrentProgramSceneChanged { scene_name } => {
+                Some(Self::CurrentProgramSceneChanged {
+                    scene_name: scene_name.clone(),
+                })
+            }
+            ObsEvent::SceneListChanged => Some(Self::SceneListChanged),
+            ObsEvent::InputCreated { input_name } => Some(Self::InputCreated {
+                input_name: input_name.clone(),
+            }),
+            ObsEvent::InputRemoved { input_name } => Some(Self::InputRemoved {
+                input_name: input_name.clone(),
+            }),
+            ObsEvent::InputMuteStateChanged { input_name, muted } => {
+                Some(Self::InputMuteStateChanged {
+                    input_name: input_name.clone(),
+                    muted: *muted,
+                })
+            }
+            ObsEvent::InputVolumeChanged {
+                input_name,
+                volume_mul,
+                volume_db,
+            } => Some(Self::InputVolumeChanged {
+                input_name: input_name.clone(),
+                volume_mul: *volume_mul,
+                volume_db: *volume_db,
+            }),
+            ObsEvent::Other { .. } => None,
+        }
+    }
+}
+
+impl TryFrom<&ObsEvent> for ObsEventPayload {
+    type Error = UnknownObsEvent;
+
+    fn try_from(event: &ObsEvent) -> Result<Self, Self::Error> {
+        Self::from_obs_event(event).ok_or(UnknownObsEvent)
     }
 }
 
@@ -78,10 +158,6 @@ impl LogEvent {
         self.target = Some(target.into());
         self
     }
-}
-
-pub fn redacted_message(message: impl AsRef<str>) -> String {
-    redact_associated_secret_values(message.as_ref())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,251 +327,11 @@ pub fn is_valid_topic(topic: &str) -> bool {
     matches!(topic, TOPIC_STATE | TOPIC_EVENTS | TOPIC_LOGS)
 }
 
-const REDACTED_SECRET: &str = "[REDACTED]";
-const SECRET_KEYS: [&str; 4] = ["authentication", "password", "token", "auth"];
-
-fn redact_associated_secret_values(message: &str) -> String {
-    let message = redact_url_credentials(message);
-    let mut redacted = String::with_capacity(message.len());
-    let mut scan_at = 0;
-    let mut copy_from = 0;
-
-    while scan_at < message.len() {
-        if !message.is_char_boundary(scan_at) {
-            scan_at += 1;
-            continue;
-        }
-
-        let Some(value_range) = secret_value_range(&message, scan_at) else {
-            scan_at += message[scan_at..]
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .unwrap_or(1);
-            continue;
-        };
-
-        redacted.push_str(&message[copy_from..value_range.start]);
-        redacted.push_str(REDACTED_SECRET);
-        scan_at = value_range.end;
-        copy_from = value_range.end;
-    }
-
-    redacted.push_str(&message[copy_from..]);
-    redact_bearer_tokens(&redacted)
-}
-
-fn redact_url_credentials(message: &str) -> String {
-    let mut redacted = String::with_capacity(message.len());
-    let mut cursor = 0;
-
-    while let Some(scheme_offset) = message[cursor..].find("://") {
-        let scheme_end = cursor + scheme_offset + 3;
-        let host_end = url_authority_end(message, scheme_end);
-        let Some(at_offset) = message[scheme_end..host_end].find('@') else {
-            redacted.push_str(&message[cursor..host_end]);
-            cursor = host_end;
-            continue;
-        };
-
-        let at_index = scheme_end + at_offset;
-        redacted.push_str(&message[cursor..scheme_end]);
-        redacted.push_str(REDACTED_SECRET);
-        redacted.push_str(&message[at_index..host_end]);
-        cursor = host_end;
-    }
-
-    redacted.push_str(&message[cursor..]);
-    redacted
-}
-
-fn url_authority_end(message: &str, authority_start: usize) -> usize {
-    for (offset, ch) in message[authority_start..].char_indices() {
-        if ch.is_whitespace() || matches!(ch, '/' | '?' | '#') {
-            return authority_start + offset;
-        }
-    }
-    message.len()
-}
-
-fn redact_bearer_tokens(message: &str) -> String {
-    let mut redacted = String::with_capacity(message.len());
-    let mut scan_at = 0;
-    let mut copy_from = 0;
-
-    while scan_at < message.len() {
-        if !message.is_char_boundary(scan_at) {
-            scan_at += 1;
-            continue;
-        }
-
-        let Some(value_range) = bearer_token_value_range(message, scan_at) else {
-            scan_at += message[scan_at..]
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .unwrap_or(1);
-            continue;
-        };
-
-        redacted.push_str(&message[copy_from..value_range.start]);
-        redacted.push_str(REDACTED_SECRET);
-        scan_at = value_range.end;
-        copy_from = value_range.end;
-    }
-
-    redacted.push_str(&message[copy_from..]);
-    redacted
-}
-
-fn bearer_token_value_range(message: &str, bearer_start: usize) -> Option<std::ops::Range<usize>> {
-    const BEARER: &str = "bearer";
-    let bearer_end = bearer_start.checked_add(BEARER.len())?;
-    if bearer_end > message.len() || !message[bearer_start..bearer_end].eq_ignore_ascii_case(BEARER)
-    {
-        return None;
-    }
-    if !is_key_boundary_before(message, bearer_start) {
-        return None;
-    }
-
-    let mut cursor = bearer_end;
-    if !matches!(message[cursor..].chars().next(), Some(ch) if ch.is_whitespace()) {
-        return None;
-    }
-    cursor = consume_whitespace(message, cursor);
-    if cursor >= message.len() {
-        return None;
-    }
-
-    let value_end = redacted_literal_end(message, cursor)
-        .unwrap_or_else(|| unquoted_value_end(message, cursor));
-    if value_end == cursor {
-        None
-    } else {
-        Some(cursor..value_end)
-    }
-}
-
-fn secret_value_range(message: &str, key_start: usize) -> Option<std::ops::Range<usize>> {
-    for key in SECRET_KEYS {
-        let key_end = key_start.checked_add(key.len())?;
-        if key_end > message.len() || !message[key_start..key_end].eq_ignore_ascii_case(key) {
-            continue;
-        }
-        if !is_key_boundary_before(message, key_start) {
-            continue;
-        }
-        if let Some(range) = associated_value_range(message, key_end) {
-            return Some(range);
-        }
-    }
-    None
-}
-
-fn associated_value_range(message: &str, key_end: usize) -> Option<std::ops::Range<usize>> {
-    if is_identifier_char(message[key_end..].chars().next()) {
-        return None;
-    }
-
-    let mut cursor = key_end;
-    cursor = consume_optional_key_quote(message, cursor);
-    cursor = consume_whitespace(message, cursor);
-
-    if !matches!(message[cursor..].chars().next(), Some(':') | Some('=')) {
-        return None;
-    }
-
-    cursor += 1;
-    cursor = consume_whitespace(message, cursor);
-
-    if cursor >= message.len() {
-        return None;
-    }
-
-    match message[cursor..].chars().next() {
-        Some(quote @ ('"' | '\'')) => {
-            let value_start = cursor + quote.len_utf8();
-            let value_end = quoted_value_end(message, value_start, quote);
-            Some(value_start..value_end)
-        }
-        Some(_) => {
-            let value_end = redacted_literal_end(message, cursor)
-                .unwrap_or_else(|| unquoted_value_end(message, cursor));
-            if value_end == cursor {
-                None
-            } else {
-                Some(cursor..value_end)
-            }
-        }
-        None => None,
-    }
-}
-
-fn consume_optional_key_quote(message: &str, cursor: usize) -> usize {
-    match message[cursor..].chars().next() {
-        Some('"' | '\'') => cursor + 1,
-        _ => cursor,
-    }
-}
-
-fn consume_whitespace(message: &str, mut cursor: usize) -> usize {
-    while let Some(ch) = message[cursor..].chars().next() {
-        if !ch.is_whitespace() {
-            break;
-        }
-        cursor += ch.len_utf8();
-    }
-    cursor
-}
-
-fn quoted_value_end(message: &str, value_start: usize, quote: char) -> usize {
-    let mut escaped = false;
-    for (offset, ch) in message[value_start..].char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == quote {
-            return value_start + offset;
-        }
-    }
-    message.len()
-}
-
-fn unquoted_value_end(message: &str, value_start: usize) -> usize {
-    for (offset, ch) in message[value_start..].char_indices() {
-        if ch.is_whitespace() || matches!(ch, ',' | ';' | '}' | ']') {
-            return value_start + offset;
-        }
-    }
-    message.len()
-}
-
-fn redacted_literal_end(message: &str, value_start: usize) -> Option<usize> {
-    message[value_start..]
-        .starts_with(REDACTED_SECRET)
-        .then_some(value_start + REDACTED_SECRET.len())
-}
-
-fn is_key_boundary_before(message: &str, key_start: usize) -> bool {
-    if key_start == 0 {
-        return true;
-    }
-    !is_identifier_char(message[..key_start].chars().next_back())
-}
-
-fn is_identifier_char(ch: Option<char>) -> bool {
-    matches!(ch, Some(c) if c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::obs::client::ObsEvent;
+    use crate::support::redaction::REDACTED_SECRET;
     use serde_json::json;
 
     fn assert_wire_json<T>(message: &T, expected_raw: &str, expected_value: serde_json::Value)
@@ -696,13 +532,11 @@ mod tests {
 
     #[test]
     fn obs_event_wire_json_is_stable() {
-        let message = ServerMessage::Event {
-            topic: TOPIC_EVENTS.to_string(),
-            data: json!({
-                "type": "CurrentProgramSceneChanged",
-                "scene_name": "BRB"
-            }),
+        let obs_event = ObsEvent::CurrentProgramSceneChanged {
+            scene_name: "BRB".to_string(),
         };
+        let payload = ObsEventPayload::from_obs_event(&obs_event).unwrap();
+        let message = ServerMessage::obs_event(payload);
 
         assert_wire_json(
             &message,
@@ -716,6 +550,55 @@ mod tests {
                 }
             }),
         );
+    }
+
+    #[test]
+    fn obs_audio_mute_event_payload_is_normalized() {
+        let obs_event = ObsEvent::InputMuteStateChanged {
+            input_name: "Mic".to_string(),
+            muted: true,
+        };
+        let payload = ObsEventPayload::from_obs_event(&obs_event).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(payload).unwrap(),
+            json!({
+                "type": "InputMuteStateChanged",
+                "input_name": "Mic",
+                "muted": true
+            })
+        );
+    }
+
+    #[test]
+    fn obs_audio_volume_event_payload_is_normalized() {
+        let obs_event = ObsEvent::InputVolumeChanged {
+            input_name: "Desktop Audio".to_string(),
+            volume_mul: 0.75,
+            volume_db: -2.5,
+        };
+        let payload = ObsEventPayload::try_from(&obs_event).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(payload).unwrap(),
+            json!({
+                "type": "InputVolumeChanged",
+                "input_name": "Desktop Audio",
+                "volume_mul": 0.75,
+                "volume_db": -2.5
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_obs_events_do_not_create_public_payloads() {
+        let obs_event = ObsEvent::Other {
+            event_type: "VendorSpecificEvent".to_string(),
+            data: json!({ "raw": true }),
+        };
+
+        assert_eq!(ObsEventPayload::from_obs_event(&obs_event), None);
+        assert!(ObsEventPayload::try_from(&obs_event).is_err());
     }
 
     #[test]

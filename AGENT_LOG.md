@@ -654,3 +654,86 @@ M  src/domain/errors.rs
 M  src/ipc/protocol.rs
 M  src/support/json.rs
 M  tests/cli_integration.rs
+2026-06-19T19:04:34Z iteration 4 started remaining=15337s
+2026-06-19T19:04:34Z iteration 4 preplanner effective budgets untracked_scan_max_bytes=536870912 untracked_scan_max_count=10000 snapshot_copy_max_bytes=536870912 snapshot_copy_max_count=10000 snapshot_copy_max_file_bytes=134217728
+2026-06-19T19:04:34Z iteration 4 disposable preplanner repo created path=/tmp/agent-loop-preplanner-repo-o9j3ua7t/repo copied_entries=82
+2026-06-19T19:04:34Z iteration 4 ideator phase started count=3
+2026-06-19T19:04:34Z iteration 4 ideator phase concurrency workers=3
+2026-06-19T19:04:34Z iteration 4 ideator 1 role="the pragmatist" started
+2026-06-19T19:04:34Z iteration 4 ideator 2 role="the architect" started
+2026-06-19T19:04:34Z iteration 4 ideator 3 role="the contrarian" started
+2026-06-19T19:04:44Z iteration 4 ideator 2 role="the architect" completed status=0
+2026-06-19T19:04:45Z iteration 4 ideator 3 role="the contrarian" completed status=0
+2026-06-19T19:04:45Z iteration 4 ideator 1 role="the pragmatist" completed status=0
+2026-06-19T19:04:45Z iteration 4 ideator phase completed approaches=3
+2026-06-19T19:04:45Z iteration 4 selector started approaches=3
+2026-06-19T19:04:56Z iteration 4 selector completed status=0
+2026-06-19T19:04:56Z iteration 4 disposable preplanner repo cleanup path=/tmp/agent-loop-preplanner-repo-o9j3ua7t/repo
+2026-06-19T19:04:56Z iteration 4 selector rejected alternative role="the architect" approach="Contract-First Narrowing: freeze the observable IPC surface before expanding runtime behavior, treating README examples, protocol fixtures, integration assertions, and server em..." reason="Strong on convergence, but selected as-is it leans too quickly toward freezing and implementing the current surface instead of first questioning whether every advertised contract should remain public."
+2026-06-19T19:04:56Z iteration 4 selector rejected alternative role="the contrarian" approach="Contract Triage Before Feature Completion: treat the next iteration as a public-surface correction pass, where misleading or unproven contracts are narrowed first, and only then..." reason="Strong on truthfulness and triage, but selected as-is it risks over-narrowing useful surfaces that are already close to completion, especially the events topic."
+2026-06-19T19:04:56Z iteration 4 selector rejected alternative role="the pragmatist" approach="Contract-First Convergence: treat the next iteration as a public IPC contract stabilization pass, forcing docs, typed models, server emissions, and integration assertions to con..." reason="Strong practical framing, but selected as-is it is slightly less explicit than needed about demotion or removal being valid outcomes for unproven public behavior."
+2026-06-19T19:04:56Z iteration 4 selector alternatives persisted count=3
+2026-06-19T19:04:56Z iteration 4 selector structured alternatives persisted count=3
+2026-06-19T19:04:56Z iteration 4 planner started
+2026-06-19T19:05:50Z iteration 4 plan: 5 task(s) in 4 phase(s). This iteration freezes the highest-risk public surface first: the advertised `events` topic becomes real, invalid subscribe errors get wire-level assertions, redaction stops drifting across duplicate implementations, and documentation is updated only after the emitted shapes are backed by typed models and server-path tests.
+2026-06-19T19:05:50Z iteration 4 phase 1 started parallel=False tasks=1
+2026-06-19T19:08:27Z iteration 4 task t1 ('Define normalized OBS event IPC contract') status=0
+2026-06-19T19:08:27Z iteration 4 phase 2 started parallel=True tasks=2
+2026-06-19T19:11:15Z iteration 4 task t3 ('Lock invalid subscribe wire errors') status=0
+2026-06-19T19:11:42Z iteration 4 task t2 ('Publish OBS events end to end') status=0
+2026-06-19T19:11:42Z iteration 4 phase 3 started parallel=False tasks=1
+2026-06-19T19:15:08Z iteration 4 task t4 ('Consolidate redaction policy') status=0
+2026-06-19T19:15:08Z iteration 4 phase 4 started parallel=False tasks=1
+2026-06-19T19:16:19Z iteration 4 task t5 ('Synchronize README protocol examples') status=0
+2026-06-19T19:16:19Z iteration 4 reviewer started
+
+## Reviewer Summary - 2026-06-19 - Iteration 4
+
+Iteration: normalized OBS event IPC contract, end-to-end event publication, invalid subscribe wire assertions, shared redaction policy, and README protocol synchronization.
+
+What was done:
+- Added normalized `ObsEventPayload` IPC payloads for known scene/audio OBS events and a `ServerMessage::obs_event` helper.
+- Published OBS events from `ObsSupervisor` to `TOPIC_EVENTS` after applying them to server state.
+- Added fake OBS event broadcasting and a server integration test proving scene/audio events reach `events` subscribers while state/log subscriptions remain separate.
+- Locked invalid subscribe behavior with typed-client and raw newline-delimited JSON tests asserting `IPC_PROTOCOL_ERROR`.
+- Consolidated message and structured JSON redaction into `support::redaction`, with IPC errors/logs, CLI proxy output, and `support::json` using the same policy.
+- Updated README examples to show normalized OBS event payloads and documented redaction limits.
+
+What was found:
+- Verification passes: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with 221 tests.
+- The `events` topic is now implemented end to end for known normalized OBS events, closing the previous public-contract gap.
+- The IPC protocol module now imports `obs::client::ObsEvent`, which couples public wire types to OBS-client internals and should be moved behind a server/domain adapter.
+- Unknown OBS events are dropped from `TOPIC_EVENTS`; this is a reasonable narrow contract, but README should state that only known normalized event variants are public.
+- The new server event routing test can be order-sensitive because state subscriptions also receive an initial snapshot asynchronously before later state broadcasts.
+- Redaction is unified and idempotent, but remains best-effort string scanning; structured non-secret fields should remain the preferred contract.
+- Sleep-based readiness and background task cleanup remain in the new and existing integration helpers.
+
+Top improvement proposals:
+- P0: Decouple `ObsEventPayload` conversion from `ipc::protocol` so IPC does not depend on `obs::client`.
+- P0: Make OBS event routing tests deterministic by draining/matching initial state snapshots and replacing fixed sleeps with readiness signals.
+- P0: Document known-only OBS event publication and add protocol coverage for every public `ObsEventPayload` variant.
+- P1: Continue runtime hardening with passive OBS disconnect detection and concurrent timeout cleanup.
+- P1: Bridge ordinary `tracing` records into bounded typed IPC log events.
+- P2: Clean up planning/telemetry artifacts and replace remaining sleep-based helpers with deterministic shutdown/join handles.
+2026-06-19T19:19:49Z iteration 4 reviewer completed status=0
+2026-06-19T19:19:49Z iteration 4 memory updated
+2026-06-19T19:19:49Z iteration 4 completed validation_status=0
+2026-06-19T19:19:49Z iteration 4 checkpoint started
+2026-06-19T19:19:49Z iteration 4 checkpoint status before commit:
+M  AGENT_LOG.md
+M  ALTERNATIVES.jsonl
+M  MEMORY.md
+M  PLAN.md
+M  README.md
+M  SCORES.jsonl
+M  src/cli/client_commands.rs
+M  src/ipc/protocol.rs
+M  src/ipc/session.rs
+M  src/obs/client.rs
+M  src/server/obs_supervisor.rs
+M  src/support/json.rs
+M  src/support/mod.rs
+A  src/support/redaction.rs
+M  tests/ipc_integration.rs
+M  tests/server_integration.rs
+M  tests/support/fake_obs_server.rs

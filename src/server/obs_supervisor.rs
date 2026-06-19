@@ -150,10 +150,12 @@ impl ObsSupervisor {
     ) -> crate::domain::result::Result<(ObsClient, String, String)> {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ObsEvent>(64);
         let state_clone = self.state.clone();
+        let hub = Arc::clone(&self.hub);
 
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                state_clone.apply_event(event).await;
+                state_clone.apply_event(event.clone()).await;
+                hub.publish_obs_event(&event);
             }
         });
 

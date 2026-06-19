@@ -14,7 +14,7 @@ use crate::obs::protocol::{
 };
 
 /// Events emitted by the OBS client to its supervisor.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ObsEvent {
     CurrentProgramSceneChanged {
         scene_name: String,
