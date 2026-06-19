@@ -8,3 +8,4 @@
 [learning] Redaction helpers drift when string-message and structured-JSON sanitizers live separately; keep one shared policy and make repeated redaction idempotent.
 [anti-pattern] Public IPC protocol types should not import OBS client internals; keep conversion at a server/domain adapter boundary so wire contracts do not drift with implementation refactors.
 [learning] State subscription tests must account for the initial snapshot pushed on subscribe before asserting later state-change broadcasts.
+[anti-pattern] Moving a cross-layer adapter into `domain` does not fix dependency direction if it imports both implementation internals and public wire types; use server/application adapters or pure domain events.

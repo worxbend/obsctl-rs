@@ -4,6 +4,7 @@ use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
 
 use crate::config::model::Config;
+use crate::domain::events::normalize_obs_event;
 use crate::ipc::{
     protocol::{LogEvent, LogLevel},
     session::BroadcastHub,
@@ -155,7 +156,9 @@ impl ObsSupervisor {
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 state_clone.apply_event(event.clone()).await;
-                hub.publish_obs_event(&event);
+                if let Some(payload) = normalize_obs_event(&event) {
+                    hub.publish_obs_event(payload);
+                }
             }
         });
 

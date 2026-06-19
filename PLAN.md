@@ -24,74 +24,71 @@ Implemented and verified:
 - Ratatui TUI model/session/widgets with typed state and typed server log rendering.
 - Typed IPC `LogEvent` contract with `level`, `message`, optional `target`, and RFC3339 `timestamp`.
 - Explicit server-side typed log publication for selected daemon, supervisor, and command-executor events.
-- Normalized typed OBS event IPC payloads for scene and audio events, published on the `events` topic while state updates continue on `state`.
+- Normalized typed OBS event IPC payloads for known scene and audio events on the `events` topic while state updates continue on `state`.
 - Shared best-effort redaction policy for IPC error/log messages, CLI proxy output, and structured JSON secret fields.
 
 Latest verification:
 
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all-targets --all-features` with 221 tests passing
+- `cargo test --all-targets --all-features` with 220 tests passing
 
 ## Review Findings From Latest Iteration
 
 Fully implemented:
 
-- The `events` IPC topic is now real end to end for known OBS scene and audio events. `ObsSupervisor` applies each event to state and publishes a normalized `ObsEventPayload` to `TOPIC_EVENTS`.
-- README, protocol fixtures, and server integration coverage now agree on normalized OBS event wire shapes such as `{"type":"CurrentProgramSceneChanged","scene_name":"BRB"}` and `InputMuteStateChanged`.
-- Invalid subscription topics now have both typed-client and raw newline-delimited JSON assertions for `IPC_PROTOCOL_ERROR` and the documented unknown-topic message.
-- Redaction logic has been consolidated into `support::redaction`; IPC errors/logs, CLI proxy output, and `support::json::redact_secrets` now share the same secret-key vocabulary.
-- Redaction tests now cover Unicode-adjacent values, URL-encoded credentials, repeated redaction idempotence, mixed-case keys, bearer tokens, and structured `serde_json::Value` payloads.
-- Fake OBS can broadcast events to active WebSocket clients, enabling server-path event publication tests instead of only hand-built protocol fixtures.
+- `ipc::protocol` no longer imports `obs::client::ObsEvent`; the public IPC wire module now owns only `ObsEventPayload`, `ServerMessage`, log events, and error taxonomy.
+- OBS-to-public-event conversion was moved out of `ipc::protocol` into `domain::events::normalize_obs_event`, and `ObsSupervisor` now publishes only normalized `ObsEventPayload` values.
+- `BroadcastHub::publish_obs_event` now accepts already-normalized public event payloads instead of OBS-client events.
+- Public wire fixtures now cover every current `ObsEventPayload` variant: `CurrentProgramSceneChanged`, `SceneListChanged`, `InputCreated`, `InputRemoved`, `InputMuteStateChanged`, and `InputVolumeChanged`.
+- The state event fixture is now built from a real `ObsSnapshot`, reducing one ad hoc fixture gap.
+- The server-path OBS event routing test no longer assumes the next state event is the OBS-triggered update; it loops until the expected state snapshot is observed.
+- README now documents that `events` publishes only known normalized scene/audio events, that unknown/new OBS events are dropped, that scene-list mutations collapse to `SceneListChanged`, and that timestamps/raw event names/stable IDs are absent.
 - Verification passes: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
 
 Partial or incomplete:
 
-- The new `ObsEventPayload` contract lives in `ipc::protocol` but imports `obs::client::ObsEvent`, which couples the public IPC protocol module back to the OBS client implementation. A small domain event type or server-side adapter would keep dependency direction cleaner.
-- Unknown OBS events are intentionally dropped from the public `events` topic. This keeps the public contract narrow, but it means clients cannot inspect vendor/new OBS events and the README should state that only known normalized events are published.
-- The server-path event test proves routing, but it relies on the state subscriber's next event being the OBS-triggered state update. Because state subscriptions also send an initial snapshot asynchronously, the test should explicitly drain or match until the expected state to avoid order-sensitive flakiness.
-- The normalized event payload currently includes only the fields already in `ObsEvent`. It does not include event timestamps, raw event names for aliased OBS events such as `SceneCreated`, or stable event IDs. That is acceptable for the current contract but should be revisited before broader client consumption.
-- Redaction is unified, but still best-effort string scanning. Structured, typed non-secret fields remain safer than formatted messages containing secret-bearing values.
-- Public error mapping tests rely on a manual variant-count constant. The exhaustive Rust matches are useful, but future maintainers still need a clearer pattern for updating variant fixtures intentionally.
-- Fake OBS delayed responses currently sleep inside the connection handler before reading additional messages. That is adequate for a single late-response regression test, but it does not exercise concurrent late responses or timeout behavior under pipelined requests.
-- Some server integration helpers still use fixed sleeps for readiness and shutdown.
-- Log broadcasting is still manual and sparse. Ordinary `tracing` logs are not automatically bridged to IPC, so the TUI log panel does not yet represent the full server log stream promised by the product contract.
+- The conversion leak was moved, not fully solved. `domain::events` imports both `ipc::protocol::ObsEventPayload` and `obs::client::ObsEvent`, so the nominal domain layer is acting as a cross-layer adapter between OBS internals and public IPC wire types.
+- The new dependency guard checks `src/ipc/protocol.rs`, `src/cli`, and `src/tui` for the literal string `obs::client`, but it does not protect `src/domain`, `src/ipc` broadly, or grouped imports such as `crate::obs::{client::ObsEvent}`.
+- Server-path event coverage still exercises only `CurrentProgramSceneChanged` and `InputMuteStateChanged`. `SceneListChanged`, `InputCreated`, `InputRemoved`, `InputVolumeChanged`, and unknown-event drops are covered by unit/wire tests but not by the real fake-OBS-to-IPC path.
+- The logs-subscriber negative assertion uses a 150ms quiet window. It is better than checking only one message, but it remains time-based and can miss a delayed misroute.
+- Several older server and IPC integration helpers still use fixed sleeps for readiness and shutdown. This iteration replaced one supervisor setup sleep with a polling helper, but the broader test harness is still race-prone.
+- The public event payload still intentionally lacks timestamps, raw OBS event names, mutation reasons, and stable event IDs. That is acceptable only if the current narrow contract is treated as deliberate compatibility surface.
+- Log broadcasting is still manual and sparse. Ordinary `tracing` records are not bridged to IPC, so the TUI log panel is not yet the full server log stream.
 - `reload_config` updates command execution config and snapshot metadata, but changed OBS host/password/reconnect settings still need reconnect-path coverage. `dump-config` still does not reuse the same reload-and-rebroadcast path after writing.
 - OBS supervisor still does not detect passive OBS disconnects by itself; it waits for shutdown or explicit reconnect while stale `ObsClient` handles can remain available until a later request fails.
 
 Regressions or compatibility risks:
 
-- Moving normalized event conversion into `ipc::protocol` makes the IPC layer depend on OBS-client types, increasing the chance that future OBS-client refactors accidentally alter the public protocol surface.
-- The `events` topic now has an observable contract, so future payload-shape changes are wire compatibility changes and need tests/docs in the same iteration.
-- The new server event routing test may pass or fail depending on whether the initial state snapshot or the event-induced state broadcast reaches the subscriber first.
-- Boundary redaction is defense in depth, not a proof that arbitrary formatted messages are safe. Structured fields remain safer than secret-bearing strings.
-- Background test tasks and fake IPC servers still lack deterministic shutdown/join handles in several helpers, so integration coverage can leak tasks and hide races.
-- The repository still contains orchestration/planning artifacts whose intended ownership is unclear, including lowercase `plan.md` and JSONL telemetry files.
+- `domain::events` now depends on public IPC payloads and OBS-client internals. That dependency direction will make future OBS-client refactors or IPC payload changes easier to accidentally couple.
+- The import-boundary test is too narrow to enforce the architecture rule it names, so future violations can pass CI.
+- The `events` topic is now a real public compatibility contract. Any payload shape change, dropped/added variant, or timestamp/reason addition needs tests and README changes in the same iteration.
+- Unknown OBS events are deliberately not observable to clients. This keeps the public contract small but means clients cannot inspect vendor or newly introduced OBS events until the project adds explicit variants.
+- Background test tasks and fake IPC/OBS servers still lack deterministic shutdown/join handles in several helpers, which can hide races or leak tasks across tests.
+- The repository still contains orchestration/planning artifacts whose ownership is unclear, including lowercase `plan.md` and JSONL telemetry files.
 
 ## Next Iteration Priorities
 
-### P0: Tighten The New Event Contract
+### P0: Finish The Event Boundary
 
-1. Decouple normalized IPC events from the OBS client module.
-   - Move the public event payload model or the conversion adapter so `ipc::protocol` no longer imports `obs::client::ObsEvent`.
-   - Keep `ObsEventPayload` as the public wire type and make the server/supervisor own conversion from internal OBS events.
-   - Add a dependency-boundary check or focused review assertion so CLI/TUI remain thin IPC clients and IPC protocol types do not grow OBS implementation dependencies.
+1. Move OBS event conversion to an explicit server/application adapter or introduce a pure domain event.
+   - Do not leave `domain::events` importing both `ipc::protocol` and `obs::client`.
+   - Prefer `server::obs_event_adapter` for the direct `ObsEvent -> ObsEventPayload` mapping, or define a pure domain event type that does not depend on IPC or OBS implementation modules.
+   - Keep `ObsEventPayload` as the public wire type and make `ObsSupervisor` own the conversion boundary.
 
-2. Make OBS event routing tests deterministic.
-   - Drain the initial `state` subscription snapshot before asserting event-induced state updates, or loop until the expected snapshot is observed.
-   - Replace fixed sleeps in the new supervisor test setup with readiness channels for IPC bind and OBS connected state.
-   - Ensure the test proves `events` subscribers receive normalized payloads and `state` subscribers receive state snapshots without depending on broadcast ordering.
+2. Strengthen dependency-boundary tests.
+   - Assert `src/ipc/protocol.rs` and public IPC modules do not import `crate::obs`, `obsctl_rs::obs`, or grouped `obs::{...}` paths.
+   - Assert `src/domain` does not import IPC protocol wire types or OBS client implementation types unless the project intentionally documents a domain-adapter exception.
+   - Keep CLI/TUI thin-client checks and make them robust against grouped imports.
 
-3. Clarify the public event coverage contract.
-   - Document that only known normalized scene/audio events are published and unknown OBS events are intentionally dropped.
-   - Decide whether `SceneCreated`, `SceneRemoved`, `SceneNameChanged`, and `SceneListReindexed` should all collapse to `SceneListChanged` publicly or preserve a normalized reason field.
-   - Add protocol tests for every public `ObsEventPayload` variant, including `SceneListChanged`, `InputCreated`, and `InputRemoved`.
-   - Consider whether event timestamps should be added now before clients depend on a timestamp-free contract.
+3. Expand server-path OBS event coverage.
+   - Use fake OBS broadcasts to prove `SceneListChanged`, `InputCreated`, `InputRemoved`, and `InputVolumeChanged` reach `events` subscribers with documented normalized shapes.
+   - Prove unknown OBS events do not reach `events`, `state`, or `logs` subscribers beyond expected snapshots/logs.
+   - Keep tests matching expected state snapshots by predicate rather than broadcast order.
 
-4. Close remaining wire-fixture realism gaps.
-   - Build at least one state event fixture from a real `ObsSnapshot` instead of ad hoc JSON.
-   - Build log and OBS event compatibility fixtures through public constructors or server paths where practical.
-   - Keep README examples synchronized with asserted fixtures.
+4. Remove remaining time-based assertions from the event routing test.
+   - Replace the logs quiet-window check with deterministic receiver draining or explicit per-topic assertions.
+   - Where negative assertions are unavoidable, use bounded deterministic synchronization from the fake OBS/server path instead of arbitrary sleep windows.
 
 ### P1: Server Runtime Robustness
 
@@ -192,4 +189,5 @@ target/debug/obsctl tui
 - Server command executor remains the only IPC-command-to-OBS-action path.
 - Secrets must not appear in logs, errors, tests, snapshots, docs, or TUI panels.
 - IPC contracts should be typed at the boundary and covered by wire-format tests before feature breadth expands.
+- Cross-layer adapters should live in server/application modules or use pure domain types; the domain layer should not become a dumping ground for IPC-to-OBS coupling.
 - Public CLI/IPC behavior is a compatibility surface: changes to error codes, JSON envelopes, or topic payload shapes need docs and representative tests in the same iteration.

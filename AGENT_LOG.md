@@ -737,3 +737,80 @@ A  src/support/redaction.rs
 M  tests/ipc_integration.rs
 M  tests/server_integration.rs
 M  tests/support/fake_obs_server.rs
+2026-06-19T19:19:49Z iteration 5 started remaining=14422s
+2026-06-19T19:19:49Z iteration 5 preplanner effective budgets untracked_scan_max_bytes=536870912 untracked_scan_max_count=10000 snapshot_copy_max_bytes=536870912 snapshot_copy_max_count=10000 snapshot_copy_max_file_bytes=134217728
+2026-06-19T19:19:49Z iteration 5 disposable preplanner repo created path=/tmp/agent-loop-preplanner-repo-rejmb7kj/repo copied_entries=83
+2026-06-19T19:19:49Z iteration 5 ideator phase started count=3
+2026-06-19T19:19:49Z iteration 5 ideator phase concurrency workers=3
+2026-06-19T19:19:49Z iteration 5 ideator 1 role="the pragmatist" started
+2026-06-19T19:19:49Z iteration 5 ideator 2 role="the architect" started
+2026-06-19T19:19:49Z iteration 5 ideator 3 role="the contrarian" started
+2026-06-19T19:19:58Z iteration 5 ideator 1 role="the pragmatist" completed status=0
+2026-06-19T19:19:58Z iteration 5 ideator 2 role="the architect" completed status=0
+2026-06-19T19:20:00Z iteration 5 ideator 3 role="the contrarian" completed status=0
+2026-06-19T19:20:00Z iteration 5 ideator phase completed approaches=3
+2026-06-19T19:20:00Z iteration 5 selector started approaches=3
+2026-06-19T19:20:09Z iteration 5 selector completed status=0
+2026-06-19T19:20:09Z iteration 5 disposable preplanner repo cleanup path=/tmp/agent-loop-preplanner-repo-rejmb7kj/repo
+2026-06-19T19:20:09Z iteration 5 selector rejected alternative role="the pragmatist" approach="Contract-First Stabilization: freeze the public IPC event surface first, then let server internals adapt behind it before taking on runtime robustness work." reason="Strong overall, but selected only after sharpening its warning about realistic server-path proof into a central planning constraint rather than a secondary risk."
+2026-06-19T19:20:09Z iteration 5 selector rejected alternative role="the architect" approach="Contract Firewall First: treat the normalized IPC event surface as a compatibility firewall, stabilizing dependency direction and public semantics before runtime expansion." reason="Correctly frames the IPC surface as a compatibility firewall, but is less explicit that deterministic tests are required now to make that firewall enforceable."
+2026-06-19T19:20:09Z iteration 5 selector rejected alternative role="the contrarian" approach="Contract Freeze First: treat the new IPC events surface as a compatibility boundary before touching runtime robustness, and force every next change to justify itself against a s..." reason="Useful caution against schema expansion, but too freeze-oriented as-is; the Planner still needs room to clarify intentionally dropped events and lock existing variants with realistic tests."
+2026-06-19T19:20:09Z iteration 5 selector alternatives persisted count=3
+2026-06-19T19:20:09Z iteration 5 selector structured alternatives persisted count=3
+2026-06-19T19:20:09Z iteration 5 planner started
+2026-06-19T19:21:04Z iteration 5 plan: 4 task(s) in 2 phase(s). This iteration focuses on the public IPC events contract because it is now observable compatibility surface. Phase 1 removes the architecture leak first so later tests and docs describe the intended boundary. Phase 2 tasks are independent after that: protocol fixtures, deterministic server-path coverage, and README contract clarification touch separate files.
+2026-06-19T19:21:04Z iteration 5 phase 1 started parallel=False tasks=1
+2026-06-19T19:23:34Z iteration 5 task t1 ('Move OBS Event Conversion Behind Domain Boundary') status=0
+2026-06-19T19:23:34Z iteration 5 phase 2 started parallel=True tasks=3
+2026-06-19T19:24:30Z iteration 5 task t4 ('Document Known Event Coverage Contract') status=0
+2026-06-19T19:25:33Z iteration 5 task t3 ('Make OBS Event Routing Integration Test Deterministic') status=0
+2026-06-19T19:25:43Z iteration 5 task t2 ('Expand Public Event Wire Fixtures') status=0
+2026-06-19T19:25:43Z iteration 5 reviewer started
+
+## Reviewer Summary - 2026-06-19 - Iteration 5
+
+Iteration: OBS event conversion boundary cleanup, public event fixture expansion, deterministic event routing assertions, and known-event contract documentation.
+
+What was done:
+- Removed the direct `obs::client::ObsEvent` dependency from `ipc::protocol`.
+- Added `domain::events::normalize_obs_event` and changed `ObsSupervisor` to publish already-normalized `ObsEventPayload` values.
+- Changed `BroadcastHub::publish_obs_event` to accept public event payloads rather than OBS-client events.
+- Expanded IPC protocol fixtures to cover all public `ObsEventPayload` variants.
+- Built the state wire fixture from a real `ObsSnapshot` instead of ad hoc JSON.
+- Made the server event routing test wait until the expected state snapshot is observed instead of assuming event order.
+- Documented known-only OBS event publication, unknown-event dropping, collapsed scene-list mutations, and the current absence of timestamps/raw names/stable IDs.
+
+What was found:
+- Verification passes: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with 220 tests.
+- The original IPC protocol dependency leak is fixed, but the new `domain::events` module imports both `ipc::protocol::ObsEventPayload` and `obs::client::ObsEvent`, so a cross-layer adapter now lives in the domain module.
+- The new import-boundary test is useful but too narrow: it checks only `src/ipc/protocol.rs`, CLI, and TUI for the literal string `obs::client`, so grouped imports or domain-layer coupling can still pass.
+- Server-path event routing coverage remains limited to scene-current and input-mute events; scene-list, input-created/removed, volume-changed, and unknown-event behavior still need fake-OBS-to-IPC assertions.
+- The event routing test is less order-sensitive for state, but the logs negative assertion still depends on a 150ms quiet window.
+- Several older integration helpers still use fixed sleeps and unjoined background tasks.
+- The current event payload contract is narrow by design and lacks timestamps, raw OBS event names, mutation reasons, and stable IDs; future additions are compatibility changes.
+
+Top improvement proposals:
+- P0: Move event conversion into an explicit server/application adapter or introduce a pure domain event type so `domain` does not bridge OBS internals to IPC wire payloads.
+- P0: Strengthen dependency-boundary tests to cover `src/domain`, grouped imports, and broad `crate::obs`/`ipc::protocol` references.
+- P0: Add server-path coverage for every public OBS event payload variant and for unknown-event drops.
+- P0: Replace the remaining quiet-window negative assertion in the event routing test with deterministic synchronization.
+- P1: Continue runtime hardening: passive OBS disconnect detection, concurrent timeout cleanup, and dump/reload refresh semantics.
+- P1: Bridge ordinary `tracing` records into bounded typed IPC log events.
+- P2: Clean planning/telemetry artifacts and replace remaining sleep-based helpers with deterministic readiness/shutdown handles.
+2026-06-19T19:29:15Z iteration 5 reviewer completed status=0
+2026-06-19T19:29:15Z iteration 5 memory updated
+2026-06-19T19:29:15Z iteration 5 completed validation_status=0
+2026-06-19T19:29:15Z iteration 5 checkpoint started
+2026-06-19T19:29:15Z iteration 5 checkpoint status before commit:
+M  AGENT_LOG.md
+M  ALTERNATIVES.jsonl
+M  MEMORY.md
+M  PLAN.md
+M  README.md
+M  SCORES.jsonl
+A  src/domain/events.rs
+M  src/domain/mod.rs
+M  src/ipc/protocol.rs
+M  src/ipc/session.rs
+M  src/server/obs_supervisor.rs
+M  tests/server_integration.rs

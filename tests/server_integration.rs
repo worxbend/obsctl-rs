@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,35 @@ use obsctl_rs::{
     },
 };
 use support::fake_obs_server::{PreparedResponse, spawn_fake_obs};
+
+#[test]
+fn ipc_protocol_cli_and_tui_do_not_import_obs_client() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    assert_no_obs_client_import(&root.join("src/ipc/protocol.rs"));
+    assert_no_obs_client_imports_in_dir(&root.join("src/cli"));
+    assert_no_obs_client_imports_in_dir(&root.join("src/tui"));
+}
+
+fn assert_no_obs_client_imports_in_dir(dir: &Path) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            assert_no_obs_client_imports_in_dir(&path);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            assert_no_obs_client_import(&path);
+        }
+    }
+}
+
+fn assert_no_obs_client_import(path: &Path) {
+    let source = fs::read_to_string(path).unwrap();
+    assert!(
+        !source.contains("obs::client"),
+        "{} must not import obs::client",
+        path.display()
+    );
+}
 
 async fn start_test_server_with_config(
     dir: &TempDir,
@@ -190,7 +220,7 @@ async fn start_test_server_with_obs_supervisor(
     tokio::spawn(server.run(cmd_tx, shutdown_rx));
     tokio::spawn(supervisor.run());
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    wait_for_ipc_available(&socket_path).await;
 
     (socket_path, state, shutdown_tx)
 }
@@ -224,11 +254,76 @@ async fn wait_for_obs_connected(state: &StateStore) {
     .expect("OBS supervisor did not connect to fake OBS");
 }
 
+async fn wait_for_ipc_available(socket_path: &Path) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if IpcClient::connect(socket_path).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("IPC server did not become available");
+}
+
 async fn next_event_with_timeout(client: &mut IpcClient) -> ServerMessage {
     tokio::time::timeout(Duration::from_millis(500), client.next_event())
         .await
         .expect("timed out waiting for IPC event")
         .expect("failed to read IPC event")
+}
+
+async fn next_state_event_matching<F>(
+    client: &mut IpcClient,
+    description: &str,
+    matches: F,
+) -> Value
+where
+    F: Fn(&Value) -> bool,
+{
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match client
+                .next_event()
+                .await
+                .expect("failed to read state event")
+            {
+                ServerMessage::Event { topic, data } => {
+                    assert_eq!(topic, TOPIC_STATE);
+                    assert_ne!(
+                        data.get("type").and_then(Value::as_str),
+                        Some("CurrentProgramSceneChanged")
+                    );
+                    assert_ne!(
+                        data.get("type").and_then(Value::as_str),
+                        Some("InputMuteStateChanged")
+                    );
+                    if matches(&data) {
+                        return data;
+                    }
+                }
+                other => panic!("expected state event, got {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for state event with {description}"))
+}
+
+async fn assert_logs_do_not_receive_obs_payloads(client: &mut IpcClient, forbidden_types: &[&str]) {
+    let quiet_window = Duration::from_millis(150);
+
+    while let Ok(Ok(ServerMessage::Event { topic, data })) =
+        tokio::time::timeout(quiet_window, client.next_event()).await
+    {
+        assert_eq!(topic, TOPIC_LOGS);
+        let payload_type = data.get("type").and_then(Value::as_str);
+        assert!(
+            !forbidden_types.contains(&payload_type.unwrap_or_default()),
+            "logs-only subscriber received OBS event payload: {data}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -393,14 +488,12 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
         other => panic!("expected scene OBS event, got {other:?}"),
     }
 
-    match next_event_with_timeout(&mut state_client).await {
-        ServerMessage::Event { topic, data } => {
-            assert_eq!(topic, TOPIC_STATE);
-            assert_eq!(data["current_scene"], "BRB");
-            assert_ne!(data["type"], "CurrentProgramSceneChanged");
-        }
-        other => panic!("expected state event, got {other:?}"),
-    }
+    let scene_state =
+        next_state_event_matching(&mut state_client, "current_scene updated to BRB", |data| {
+            data["current_scene"] == "BRB"
+        })
+        .await;
+    assert_eq!(scene_state["current_scene"], "BRB");
 
     fake_obs.emit_event(
         "InputMuteStateChanged",
@@ -417,27 +510,27 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
         other => panic!("expected audio OBS event, got {other:?}"),
     }
 
-    match next_event_with_timeout(&mut state_client).await {
-        ServerMessage::Event { topic, data } => {
-            assert_eq!(topic, TOPIC_STATE);
-            let mic = data["audio_inputs"]
-                .as_array()
-                .expect("audio_inputs array")
+    let muted_state = next_state_event_matching(&mut state_client, "Mic input muted", |data| {
+        data["audio_inputs"].as_array().is_some_and(|inputs| {
+            inputs
                 .iter()
-                .find(|input| input["name"] == "Mic")
-                .expect("Mic input");
-            assert_eq!(mic["muted"], true);
-            assert_ne!(data["type"], "InputMuteStateChanged");
-        }
-        other => panic!("expected state event, got {other:?}"),
-    }
+                .any(|input| input["name"] == "Mic" && input["muted"] == true)
+        })
+    })
+    .await;
+    let mic = muted_state["audio_inputs"]
+        .as_array()
+        .expect("audio_inputs array")
+        .iter()
+        .find(|input| input["name"] == "Mic")
+        .expect("Mic input");
+    assert_eq!(mic["muted"], true);
 
-    let logs_result =
-        tokio::time::timeout(Duration::from_millis(150), logs_client.next_event()).await;
-    assert!(
-        logs_result.is_err(),
-        "logs-only subscriber should not receive OBS event payloads"
-    );
+    assert_logs_do_not_receive_obs_payloads(
+        &mut logs_client,
+        &["CurrentProgramSceneChanged", "InputMuteStateChanged"],
+    )
+    .await;
 
     let _ = shutdown.send(true);
     fake_obs.shutdown();

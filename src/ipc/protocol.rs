@@ -3,7 +3,6 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::domain::errors::ObsctlError;
-use crate::obs::client::ObsEvent;
 pub use crate::support::redaction::redact_message as redacted_message;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,52 +75,6 @@ pub enum ObsEventPayload {
         volume_mul: f64,
         volume_db: f64,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnknownObsEvent;
-
-impl ObsEventPayload {
-    pub fn from_obs_event(event: &ObsEvent) -> Option<Self> {
-        match event {
-            ObsEvent::CurrentProgramSceneChanged { scene_name } => {
-                Some(Self::CurrentProgramSceneChanged {
-                    scene_name: scene_name.clone(),
-                })
-            }
-            ObsEvent::SceneListChanged => Some(Self::SceneListChanged),
-            ObsEvent::InputCreated { input_name } => Some(Self::InputCreated {
-                input_name: input_name.clone(),
-            }),
-            ObsEvent::InputRemoved { input_name } => Some(Self::InputRemoved {
-                input_name: input_name.clone(),
-            }),
-            ObsEvent::InputMuteStateChanged { input_name, muted } => {
-                Some(Self::InputMuteStateChanged {
-                    input_name: input_name.clone(),
-                    muted: *muted,
-                })
-            }
-            ObsEvent::InputVolumeChanged {
-                input_name,
-                volume_mul,
-                volume_db,
-            } => Some(Self::InputVolumeChanged {
-                input_name: input_name.clone(),
-                volume_mul: *volume_mul,
-                volume_db: *volume_db,
-            }),
-            ObsEvent::Other { .. } => None,
-        }
-    }
-}
-
-impl TryFrom<&ObsEvent> for ObsEventPayload {
-    type Error = UnknownObsEvent;
-
-    fn try_from(event: &ObsEvent) -> Result<Self, Self::Error> {
-        Self::from_obs_event(event).ok_or(UnknownObsEvent)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,9 +283,10 @@ pub fn is_valid_topic(topic: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::client::ObsEvent;
+    use crate::obs::state::{AudioState, ObsSnapshot, SceneState};
     use crate::support::redaction::REDACTED_SECRET;
     use serde_json::json;
+    use time::macros::datetime;
 
     fn assert_wire_json<T>(message: &T, expected_raw: &str, expected_value: serde_json::Value)
     where
@@ -457,37 +411,34 @@ mod tests {
 
     #[test]
     fn state_event_wire_json_is_stable() {
+        let snapshot = ObsSnapshot {
+            connected: true,
+            obs_studio_version: Some("30.1.2".to_string()),
+            obs_websocket_version: Some("5.3.0".to_string()),
+            current_scene: Some("Main".to_string()),
+            scenes: vec![SceneState {
+                name: "Main".to_string(),
+                alias: Some("main".to_string()),
+                shortcut: Some("1".to_string()),
+                group: Some("live".to_string()),
+                active: true,
+            }],
+            audio_inputs: vec![AudioState {
+                name: "Mic".to_string(),
+                alias: Some("mic".to_string()),
+                shortcut: Some("m".to_string()),
+                kind: Some("wasapi_input_capture".to_string()),
+                muted: Some(false),
+                volume_mul: Some(0.75),
+                volume_db: Some(-2.5),
+                volume_percent: Some(75),
+            }],
+            last_error: None,
+            updated_at: datetime!(2024-01-02 03:04:05 UTC),
+        };
         let message = ServerMessage::Event {
             topic: TOPIC_STATE.to_string(),
-            data: json!({
-                "connected": true,
-                "obs_studio_version": "30.1.2",
-                "obs_websocket_version": "5.3.0",
-                "current_scene": "Main",
-                "scenes": [
-                    {
-                        "name": "Main",
-                        "alias": "main",
-                        "shortcut": "1",
-                        "group": "live",
-                        "active": true
-                    }
-                ],
-                "audio_inputs": [
-                    {
-                        "name": "Mic",
-                        "alias": "mic",
-                        "shortcut": "m",
-                        "kind": "wasapi_input_capture",
-                        "muted": false,
-                        "volume_mul": 0.75,
-                        "volume_db": -2.5,
-                        "volume_percent": 75
-                    }
-                ],
-                "last_error": null,
-                "updated_at": "2024-01-02T03:04:05Z"
-            }),
+            data: serde_json::to_value(snapshot).unwrap(),
         };
         let value = serde_json::to_value(&message).unwrap();
 
@@ -531,74 +482,80 @@ mod tests {
     }
 
     #[test]
-    fn obs_event_wire_json_is_stable() {
-        let obs_event = ObsEvent::CurrentProgramSceneChanged {
-            scene_name: "BRB".to_string(),
-        };
-        let payload = ObsEventPayload::from_obs_event(&obs_event).unwrap();
-        let message = ServerMessage::obs_event(payload);
-
-        assert_wire_json(
-            &message,
-            r#"{"type":"event","topic":"events","data":{"scene_name":"BRB","type":"CurrentProgramSceneChanged"}}"#,
-            json!({
-                "type": "event",
-                "topic": "events",
-                "data": {
+    fn obs_event_wire_json_covers_public_payload_variants() {
+        let cases = [
+            (
+                ObsEventPayload::CurrentProgramSceneChanged {
+                    scene_name: "BRB".to_string(),
+                },
+                json!({
                     "type": "CurrentProgramSceneChanged",
                     "scene_name": "BRB"
-                }
-            }),
-        );
-    }
+                }),
+            ),
+            (
+                ObsEventPayload::SceneListChanged,
+                json!({
+                    "type": "SceneListChanged"
+                }),
+            ),
+            (
+                ObsEventPayload::InputCreated {
+                    input_name: "Mic".to_string(),
+                },
+                json!({
+                    "type": "InputCreated",
+                    "input_name": "Mic"
+                }),
+            ),
+            (
+                ObsEventPayload::InputRemoved {
+                    input_name: "Mic".to_string(),
+                },
+                json!({
+                    "type": "InputRemoved",
+                    "input_name": "Mic"
+                }),
+            ),
+            (
+                ObsEventPayload::InputMuteStateChanged {
+                    input_name: "Mic".to_string(),
+                    muted: true,
+                },
+                json!({
+                    "type": "InputMuteStateChanged",
+                    "input_name": "Mic",
+                    "muted": true
+                }),
+            ),
+            (
+                ObsEventPayload::InputVolumeChanged {
+                    input_name: "Desktop Audio".to_string(),
+                    volume_mul: 0.75,
+                    volume_db: -2.5,
+                },
+                json!({
+                    "type": "InputVolumeChanged",
+                    "input_name": "Desktop Audio",
+                    "volume_mul": 0.75,
+                    "volume_db": -2.5
+                }),
+            ),
+        ];
 
-    #[test]
-    fn obs_audio_mute_event_payload_is_normalized() {
-        let obs_event = ObsEvent::InputMuteStateChanged {
-            input_name: "Mic".to_string(),
-            muted: true,
-        };
-        let payload = ObsEventPayload::from_obs_event(&obs_event).unwrap();
+        for (payload, expected_data) in cases {
+            let message = ServerMessage::obs_event(payload);
+            let value = serde_json::to_value(&message).unwrap();
 
-        assert_eq!(
-            serde_json::to_value(payload).unwrap(),
-            json!({
-                "type": "InputMuteStateChanged",
-                "input_name": "Mic",
-                "muted": true
-            })
-        );
-    }
-
-    #[test]
-    fn obs_audio_volume_event_payload_is_normalized() {
-        let obs_event = ObsEvent::InputVolumeChanged {
-            input_name: "Desktop Audio".to_string(),
-            volume_mul: 0.75,
-            volume_db: -2.5,
-        };
-        let payload = ObsEventPayload::try_from(&obs_event).unwrap();
-
-        assert_eq!(
-            serde_json::to_value(payload).unwrap(),
-            json!({
-                "type": "InputVolumeChanged",
-                "input_name": "Desktop Audio",
-                "volume_mul": 0.75,
-                "volume_db": -2.5
-            })
-        );
-    }
-
-    #[test]
-    fn unknown_obs_events_do_not_create_public_payloads() {
-        let obs_event = ObsEvent::Other {
-            event_type: "VendorSpecificEvent".to_string(),
-            data: json!({ "raw": true }),
-        };
-
-        assert_eq!(ObsEventPayload::from_obs_event(&obs_event), None);
-        assert!(ObsEventPayload::try_from(&obs_event).is_err());
+            assert_eq!(
+                value,
+                json!({
+                    "type": "event",
+                    "topic": "events",
+                    "data": expected_data
+                })
+            );
+        }
     }
 
     #[test]

@@ -4,7 +4,6 @@ use tokio::sync::{broadcast, oneshot};
 use crate::ipc::protocol::{
     CommandPayload, LogEvent, ObsEventPayload, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE,
 };
-use crate::obs::client::ObsEvent;
 
 pub const BROADCAST_CAPACITY: usize = 64;
 
@@ -47,13 +46,8 @@ impl BroadcastHub {
         self.publish(TOPIC_LOGS, ServerMessage::log_event(event));
     }
 
-    pub fn publish_obs_event(&self, event: &ObsEvent) -> bool {
-        let Some(payload) = ObsEventPayload::from_obs_event(event) else {
-            return false;
-        };
-
-        self.publish(TOPIC_EVENTS, ServerMessage::obs_event(payload));
-        true
+    pub fn publish_obs_event(&self, event: ObsEventPayload) {
+        self.publish(TOPIC_EVENTS, ServerMessage::obs_event(event));
     }
 
     pub fn subscribe_state(&self) -> broadcast::Receiver<ServerMessage> {
@@ -99,7 +93,6 @@ mod tests {
     use serde_json::json;
 
     use crate::ipc::protocol::{LogEvent, LogLevel, ObsEventPayload, TOPIC_EVENTS, TOPIC_LOGS};
-    use crate::obs::client::ObsEvent;
 
     use super::*;
 
@@ -139,12 +132,11 @@ mod tests {
         let hub = BroadcastHub::new();
         let mut events_rx = hub.subscribe_events();
 
-        let published = hub.publish_obs_event(&ObsEvent::InputMuteStateChanged {
+        hub.publish_obs_event(ObsEventPayload::InputMuteStateChanged {
             input_name: "Mic".to_string(),
             muted: true,
         });
 
-        assert!(published);
         let msg = events_rx.recv().await.unwrap();
         match msg {
             ServerMessage::Event { topic, data } => {
@@ -168,19 +160,5 @@ mod tests {
             }
             other => panic!("expected OBS event, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn publish_obs_event_skips_unknown_events() {
-        let hub = BroadcastHub::new();
-        let mut events_rx = hub.subscribe_events();
-
-        let published = hub.publish_obs_event(&ObsEvent::Other {
-            event_type: "VendorSpecificEvent".to_string(),
-            data: json!({ "raw": true }),
-        });
-
-        assert!(!published);
-        assert!(events_rx.try_recv().is_err());
     }
 }

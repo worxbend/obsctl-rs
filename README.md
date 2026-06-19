@@ -352,7 +352,22 @@ Typed log event:
 {"type":"event","topic":"logs","data":{"level":"info","message":"daemon listening","target":"obsctl_rs::server","timestamp":"1970-01-01T00:00:00Z"}}
 ```
 
-OBS events use normalized typed payloads derived from the internal OBS event model, not raw obs-websocket event envelopes. Audio events use the same convention, for example `{"type":"InputMuteStateChanged","input_name":"Mic","muted":true}` or `{"type":"InputVolumeChanged","input_name":"Desktop Audio","volume_mul":0.75,"volume_db":-2.5}`.
+The `events` topic publishes only known normalized scene and audio OBS events. Unknown, vendor-specific, or newly added OBS events are intentionally dropped instead of being forwarded as raw obs-websocket envelopes.
+
+Current public OBS event payloads are:
+
+```json
+{"type":"event","topic":"events","data":{"type":"CurrentProgramSceneChanged","scene_name":"BRB"}}
+{"type":"event","topic":"events","data":{"type":"SceneListChanged"}}
+{"type":"event","topic":"events","data":{"type":"InputCreated","input_name":"Mic"}}
+{"type":"event","topic":"events","data":{"type":"InputRemoved","input_name":"Mic"}}
+{"type":"event","topic":"events","data":{"type":"InputMuteStateChanged","input_name":"Mic","muted":true}}
+{"type":"event","topic":"events","data":{"type":"InputVolumeChanged","input_name":"Desktop Audio","volume_mul":0.75,"volume_db":-2.5}}
+```
+
+Scene-list mutation events from OBS, including scene created, removed, renamed, and reindexed notifications, are exposed publicly as `SceneListChanged`. The public payload does not preserve a reason field for those mutations.
+
+OBS event payloads currently do not include timestamps, raw OBS event names, or stable event IDs. Those fields should be treated as absent from the public wire contract unless added in a future compatibility update.
 
 For log events, `level` is one of `trace`, `debug`, `info`, `warn`, or `error`; `target` may be omitted; and `timestamp` is RFC3339 UTC. Supported event topics are `state`, `events`, and `logs`.
 
