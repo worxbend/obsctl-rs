@@ -58,8 +58,8 @@ fn effective_log_level(cli: &Cli) -> String {
     if cli.verbose {
         return "debug".to_string();
     }
-    if let Some(ref level) = cli.log_level {
-        return level.clone();
+    if let Some(level) = cli.log_level.clone() {
+        return level;
     }
     if let Ok(rust_log) = std::env::var("RUST_LOG") {
         return rust_log;

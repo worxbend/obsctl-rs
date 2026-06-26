@@ -415,7 +415,7 @@ Full task details in `.agent-loop/tasks.json`.
 | T016 | Fix redundant .clone() on HashSet inserts           | improvement | 16  | completed |
 | T017 | Fix parser.rs clone()+clear() → mem::take          | improvement | 17  | completed |
 | T018 | Eliminate TOPIC_*.to_string() hot-path allocs       | improvement | 18  | completed |
-| T019 | Remove unnecessary level.clone() in cli/router.rs   | improvement | 19  | pending |
+| T019 | Remove unnecessary level.clone() in cli/router.rs   | improvement | 19  | completed |
 | T020 | Fix Span::raw clones in widgets/scenes+audio        | improvement | 20  | pending |
 | T021 | Add tracing::debug for unhandled TOPIC_EVENTS vars  | improvement | 21  | pending |
 | T022 | Define ES_* event subscription constants            | improvement | 22  | pending |
