@@ -1041,3 +1041,116 @@ async fn reload_config_returns_config_invalid_for_bad_file() {
     assert!(ok, "server should still respond after failed reload");
     assert_eq!(result.unwrap()["message"], "pong");
 }
+
+async fn start_obs_connected_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>, support::fake_obs_server::FakeObsHandle) {
+    let fake_obs = spawn_fake_obs(false, None).await;
+
+    let mut cfg = Config::default();
+    cfg.connection.host = "127.0.0.1".to_string();
+    cfg.connection.port = fake_obs.addr.port();
+    cfg.connection.password_env = String::new();
+    cfg.connection.request_timeout_ms = 500;
+    let params = ObsConnectionParams::from_config(&cfg.connection);
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let (obs_client, _, _, _disconnect) = connect(&params, event_tx).await.unwrap();
+
+    let snapshot = ObsSnapshot {
+        connected: true,
+        ..ObsSnapshot::default()
+    };
+
+    let (client, shutdown) = start_test_server_with_obs_client(dir, cfg, obs_client, snapshot).await;
+    (client, shutdown, fake_obs)
+}
+
+#[tokio::test]
+async fn toggle_stream_returns_streaming_started_when_active() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, _shutdown, fake_obs) = start_obs_connected_server(&dir).await;
+
+    fake_obs
+        .set_response(
+            "ToggleStream",
+            PreparedResponse::success(serde_json::json!({ "outputActive": true })),
+        )
+        .await;
+
+    let resp = client
+        .send_command(cmd("toggle_stream", Value::Null))
+        .await
+        .unwrap();
+    let (ok, result, _) = extract_response(resp);
+    assert!(ok, "toggle_stream should succeed");
+    assert_eq!(result.unwrap()["message"], "streaming started");
+
+    fake_obs.shutdown();
+}
+
+#[tokio::test]
+async fn toggle_stream_returns_streaming_stopped_when_inactive() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, _shutdown, fake_obs) = start_obs_connected_server(&dir).await;
+
+    fake_obs
+        .set_response(
+            "ToggleStream",
+            PreparedResponse::success(serde_json::json!({ "outputActive": false })),
+        )
+        .await;
+
+    let resp = client
+        .send_command(cmd("toggle_stream", Value::Null))
+        .await
+        .unwrap();
+    let (ok, result, _) = extract_response(resp);
+    assert!(ok, "toggle_stream should succeed");
+    assert_eq!(result.unwrap()["message"], "streaming stopped");
+
+    fake_obs.shutdown();
+}
+
+#[tokio::test]
+async fn toggle_record_returns_recording_started_when_active() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, _shutdown, fake_obs) = start_obs_connected_server(&dir).await;
+
+    fake_obs
+        .set_response(
+            "ToggleRecord",
+            PreparedResponse::success(serde_json::json!({ "outputActive": true })),
+        )
+        .await;
+
+    let resp = client
+        .send_command(cmd("toggle_record", Value::Null))
+        .await
+        .unwrap();
+    let (ok, result, _) = extract_response(resp);
+    assert!(ok, "toggle_record should succeed");
+    assert_eq!(result.unwrap()["message"], "recording started");
+
+    fake_obs.shutdown();
+}
+
+#[tokio::test]
+async fn toggle_record_returns_recording_stopped_when_inactive() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, _shutdown, fake_obs) = start_obs_connected_server(&dir).await;
+
+    fake_obs
+        .set_response(
+            "ToggleRecord",
+            PreparedResponse::success(serde_json::json!({ "outputActive": false })),
+        )
+        .await;
+
+    let resp = client
+        .send_command(cmd("toggle_record", Value::Null))
+        .await
+        .unwrap();
+    let (ok, result, _) = extract_response(resp);
+    assert!(ok, "toggle_record should succeed");
+    assert_eq!(result.unwrap()["message"], "recording stopped");
+
+    fake_obs.shutdown();
+}
