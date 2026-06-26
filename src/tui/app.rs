@@ -48,24 +48,9 @@ async fn run_loop(
     let (ipc_tx, mut ipc_rx) = mpsc::channel::<std::result::Result<ServerMessage, String>>(64);
 
     match TuiEventSession::connect(socket_path).await {
-        Ok(mut session) => {
+        Ok(session) => {
             model.connected_to_daemon = true;
-            let tx = ipc_tx.clone();
-            tokio::spawn(async move {
-                loop {
-                    match session.next_event().await {
-                        Ok(msg) => {
-                            if tx.send(Ok(msg)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = tx.send(Err(e.to_string())).await;
-                            break;
-                        }
-                    }
-                }
-            });
+            spawn_session_forwarder(session, ipc_tx.clone());
         }
         Err(e) => {
             model.connected_to_daemon = false;
@@ -196,25 +181,10 @@ async fn run_loop(
                                 }
                                 TuiAction::RetryConnect => {
                                     match TuiEventSession::connect(socket_path).await {
-                                        Ok(mut session) => {
+                                        Ok(session) => {
                                             model.connected_to_daemon = true;
                                             model.last_result = Some("Reconnected to daemon.".to_string());
-                                            let tx = ipc_tx.clone();
-                                            tokio::spawn(async move {
-                                                loop {
-                                                    match session.next_event().await {
-                                                        Ok(msg) => {
-                                                            if tx.send(Ok(msg)).await.is_err() {
-                                                                break;
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = tx.send(Err(e.to_string())).await;
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            });
+                                            spawn_session_forwarder(session, ipc_tx.clone());
                                         }
                                         Err(e) => {
                                             model.last_result =
@@ -235,6 +205,27 @@ async fn run_loop(
             }
         }
     }
+}
+
+fn spawn_session_forwarder(
+    mut session: TuiEventSession,
+    tx: mpsc::Sender<std::result::Result<ServerMessage, String>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match session.next_event().await {
+                Ok(msg) => {
+                    if tx.send(Ok(msg)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e.to_string())).await;
+                    break;
+                }
+            }
+        }
+    });
 }
 
 fn render(f: &mut ratatui::Frame, model: &TuiModel) {
