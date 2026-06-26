@@ -114,15 +114,17 @@ impl CommandExecutor {
     }
 
     async fn cmd_server_status(&self) -> crate::domain::result::Result<Value> {
+        let snap = self.state.read().await;
         let status = ServerStatus {
             pid: std::process::id(),
             uptime_seconds: self.started_at.elapsed().as_secs(),
             socket_path: self.socket_path.clone(),
             client_count: self.registry.count(),
-            obs_connected: self.state.read().await.connected,
+            obs_connected: snap.connected,
             reconnecting: false, // supervisor sets this separately
-            last_error: self.state.read().await.last_error.clone(),
+            last_error: snap.last_error.clone(),
         };
+        drop(snap);
         serde_json::to_value(status).map_err(|e| ObsctlError::ObsRequestFailed(e.to_string()))
     }
 
