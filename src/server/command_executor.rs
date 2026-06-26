@@ -16,7 +16,7 @@ use crate::ipc::{
     protocol::{ErrorPayload, LogEvent, LogLevel, ServerMessage, public_error_code},
     session::{BroadcastHub, CommandDispatch},
 };
-use crate::obs::{client::ObsClient, requests, state::ServerStatus};
+use crate::obs::{client::ObsClient, requests, state::{ObsSnapshot, ServerStatus}};
 use crate::server::{client_registry::ClientRegistry, state_store::StateStore};
 
 pub struct CommandExecutor {
@@ -147,15 +147,7 @@ impl CommandExecutor {
         let client = self.require_obs().await?;
         let snap = self.state.read().await;
 
-        let entries: Vec<AliasEntry> = snap
-            .scenes
-            .iter()
-            .map(|s| AliasEntry {
-                name: s.name.clone(),
-                alias: s.alias.clone(),
-                shortcut: s.shortcut.clone(),
-            })
-            .collect();
+        let entries = scene_alias_entries(&snap);
         drop(snap);
 
         let resolved = resolve(&target, &entries)?;
@@ -177,15 +169,7 @@ impl CommandExecutor {
         let client = self.require_obs().await?;
         let snap = self.state.read().await;
 
-        let entries: Vec<AliasEntry> = snap
-            .audio_inputs
-            .iter()
-            .map(|a| AliasEntry {
-                name: a.name.clone(),
-                alias: a.alias.clone(),
-                shortcut: a.shortcut.clone(),
-            })
-            .collect();
+        let entries = audio_alias_entries(&snap);
         drop(snap);
 
         let resolved = resolve_audio(&target, &entries)?;
@@ -203,15 +187,7 @@ impl CommandExecutor {
         let client = self.require_obs().await?;
         let snap = self.state.read().await;
 
-        let entries: Vec<AliasEntry> = snap
-            .audio_inputs
-            .iter()
-            .map(|a| AliasEntry {
-                name: a.name.clone(),
-                alias: a.alias.clone(),
-                shortcut: a.shortcut.clone(),
-            })
-            .collect();
+        let entries = audio_alias_entries(&snap);
         drop(snap);
 
         let resolved = resolve_audio(&target, &entries)?;
@@ -239,15 +215,7 @@ impl CommandExecutor {
         let client = self.require_obs().await?;
         let snap = self.state.read().await;
 
-        let entries: Vec<AliasEntry> = snap
-            .audio_inputs
-            .iter()
-            .map(|a| AliasEntry {
-                name: a.name.clone(),
-                alias: a.alias.clone(),
-                shortcut: a.shortcut.clone(),
-            })
-            .collect();
+        let entries = audio_alias_entries(&snap);
         drop(snap);
 
         let resolved = resolve_audio(&target, &entries)?;
@@ -447,4 +415,26 @@ fn required_string(args: &Value, key: &str) -> crate::domain::result::Result<Str
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| ObsctlError::CommandParseError(format!("missing {key}")))
+}
+
+fn scene_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry> {
+    snap.scenes
+        .iter()
+        .map(|s| AliasEntry {
+            name: s.name.clone(),
+            alias: s.alias.clone(),
+            shortcut: s.shortcut.clone(),
+        })
+        .collect()
+}
+
+fn audio_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry> {
+    snap.audio_inputs
+        .iter()
+        .map(|a| AliasEntry {
+            name: a.name.clone(),
+            alias: a.alias.clone(),
+            shortcut: a.shortcut.clone(),
+        })
+        .collect()
 }
