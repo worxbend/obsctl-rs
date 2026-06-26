@@ -8,7 +8,7 @@ use tracing::debug;
 use crate::config::model::{AudioInputConfig, SceneConfig};
 use crate::domain::volume::{mul_to_db, mul_to_percent};
 use crate::ipc::{
-    protocol::{ServerMessage, TOPIC_STATE},
+    protocol::{ServerMessage, Topic},
     session::BroadcastHub,
 };
 use crate::obs::client::ObsEvent;
@@ -71,10 +71,10 @@ impl StateStore {
             }
         };
         let msg = ServerMessage::Event {
-            topic: TOPIC_STATE.to_string(),
+            topic: Topic::State,
             data,
         };
-        self.hub.publish(TOPIC_STATE, msg);
+        self.hub.publish(Topic::State, msg);
         debug!("State broadcast: connected={}", snapshot.connected);
     }
 
@@ -288,7 +288,7 @@ mod tests {
 
         match msg {
             ServerMessage::Event { topic, data } => {
-                assert_eq!(topic, TOPIC_STATE);
+                assert_eq!(topic, Topic::State);
                 assert_eq!(data["connected"], true);
             }
             other => panic!("unexpected message: {other:?}"),

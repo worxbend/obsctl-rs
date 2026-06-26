@@ -1,7 +1,7 @@
 // TUI model and event applier tests.
 
 use obsctl_rs::{
-    ipc::protocol::{LogEvent, LogLevel, ServerMessage, TOPIC_LOGS},
+    ipc::protocol::{LogEvent, LogLevel, ServerMessage, Topic},
     obs::state::{AudioState, ObsSnapshot, SceneState},
     tui::{event_applier::apply_server_message, model::TuiModel},
 };
@@ -48,7 +48,7 @@ fn state_event_updates_model_snapshot() {
     let snapshot = make_snapshot(true);
     let data = serde_json::to_value(&snapshot).unwrap();
     let msg = ServerMessage::Event {
-        topic: "state".into(),
+        topic: Topic::State,
         data,
     };
 
@@ -95,7 +95,7 @@ fn malformed_log_event_is_ignored() {
     let mut model = TuiModel::default();
 
     let msg = ServerMessage::Event {
-        topic: TOPIC_LOGS.into(),
+        topic: Topic::Logs,
         data: serde_json::json!({ "message": "missing level and timestamp" }),
     };
 
@@ -109,7 +109,7 @@ fn unknown_topic_is_ignored() {
     let mut model = TuiModel::default();
 
     let msg = ServerMessage::Event {
-        topic: "events".into(),
+        topic: Topic::Events,
         data: serde_json::json!({ "type": "SomeEvent" }),
     };
 
@@ -125,7 +125,7 @@ fn malformed_state_payload_does_not_panic() {
     let mut model = TuiModel::default();
 
     let msg = ServerMessage::Event {
-        topic: "state".into(),
+        topic: Topic::State,
         data: serde_json::json!({ "not_a_snapshot": true }),
     };
 

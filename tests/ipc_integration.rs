@@ -3,7 +3,7 @@ use std::sync::Arc;
 use obsctl_rs::domain::errors::ObsctlError;
 use obsctl_rs::ipc::{
     protocol::{
-        CommandPayload, LogEvent, LogLevel, PublicErrorCode, ServerMessage, TOPIC_LOGS,
+        CommandPayload, LogEvent, LogLevel, PublicErrorCode, ServerMessage, Topic, TOPIC_LOGS,
         TOPIC_STATE, public_error_code,
     },
     session::{BroadcastHub, CommandDispatch},
@@ -53,7 +53,7 @@ async fn logs_subscriber_receives_typed_log_event_json() {
         .unwrap();
     match event {
         ServerMessage::Event { topic, data } => {
-            assert_eq!(topic, TOPIC_LOGS);
+            assert_eq!(topic, Topic::Logs);
             let log_event: LogEvent = serde_json::from_value(data).unwrap();
             assert_eq!(log_event.level, LogLevel::Error);
             assert_eq!(log_event.message, "OBS unavailable");

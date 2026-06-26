@@ -10,8 +10,8 @@ use tracing::{debug, error, warn};
 use crate::ipc::{
     codec::{decode, encode},
     protocol::{
-        ClientMessage, CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage, TOPIC_EVENTS,
-        TOPIC_LOGS, TOPIC_STATE, is_valid_topic,
+        ClientMessage, CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage, Topic,
+        TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE, is_valid_topic,
     },
     session::{BroadcastHub, CommandDispatch, SessionSubscriptions},
 };
@@ -247,7 +247,7 @@ async fn handle_line(
                         }) = reply_rx.await
                         {
                             let state_event = ServerMessage::Event {
-                                topic: TOPIC_STATE.to_string(),
+                                topic: Topic::State,
                                 data,
                             };
                             send_encoded(&state_event, &write_tx).await;

@@ -16,7 +16,7 @@ use obsctl_rs::{
     config::model::Config,
     ipc::{
         protocol::{
-            CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS,
+            CommandPayload, LogEvent, LogLevel, ServerMessage, Topic, TOPIC_EVENTS, TOPIC_LOGS,
             TOPIC_STATE, exit_code_for_public_error_code,
         },
         session::BroadcastHub,
@@ -277,7 +277,7 @@ async fn next_event_with_timeout(client: &mut IpcClient) -> ServerMessage {
 async fn expect_obs_event(client: &mut IpcClient, expected: Value) {
     match next_event_with_timeout(client).await {
         ServerMessage::Event { topic, data } => {
-            assert_eq!(topic, TOPIC_EVENTS);
+            assert_eq!(topic, Topic::Events);
             assert_eq!(data, expected);
         }
         other => panic!("expected OBS event, got {other:?}"),
@@ -300,7 +300,7 @@ where
                 .expect("failed to read state event")
             {
                 ServerMessage::Event { topic, data } => {
-                    assert_eq!(topic, TOPIC_STATE);
+                    assert_eq!(topic, Topic::State);
                     assert_ne!(
                         data.get("type").and_then(Value::as_str),
                         Some("CurrentProgramSceneChanged")
@@ -326,7 +326,7 @@ async fn drain_logs_until_marker(client: &mut IpcClient, marker: &str) -> Vec<Va
     loop {
         match next_event_with_timeout(client).await {
             ServerMessage::Event { topic, data } => {
-                assert_eq!(topic, TOPIC_LOGS);
+                assert_eq!(topic, Topic::Logs);
                 if data.get("message").and_then(Value::as_str) == Some(marker) {
                     return logs;
                 }
@@ -997,7 +997,7 @@ async fn reload_config_publishes_typed_log_event() {
     let event = logs_client.next_event().await.unwrap();
     match event {
         ServerMessage::Event { topic, data } => {
-            assert_eq!(topic, TOPIC_LOGS);
+            assert_eq!(topic, Topic::Logs);
             let log_event: LogEvent = serde_json::from_value(data).unwrap();
             assert_eq!(log_event.level, LogLevel::Info);
             assert_eq!(log_event.message, "Config reloaded");

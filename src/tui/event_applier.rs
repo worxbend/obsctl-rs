@@ -1,5 +1,5 @@
 use crate::{
-    ipc::protocol::{LogEvent, ObsEventPayload, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE},
+    ipc::protocol::{LogEvent, ObsEventPayload, ServerMessage, Topic},
     obs::state::ObsSnapshot,
     tui::model::TuiModel,
 };
@@ -10,8 +10,8 @@ use crate::{
 /// normal refresh rate.
 pub fn apply_server_message(model: &mut TuiModel, msg: ServerMessage) -> bool {
     if let ServerMessage::Event { topic, data } = msg {
-        match topic.as_str() {
-            TOPIC_STATE => {
+        match topic {
+            Topic::State => {
                 if let Ok(snapshot) = serde_json::from_value::<ObsSnapshot>(data) {
                     model.snapshot = Some(snapshot);
                     model.connected_to_daemon = true;
@@ -19,13 +19,13 @@ pub fn apply_server_message(model: &mut TuiModel, msg: ServerMessage) -> bool {
                 }
                 return true;
             }
-            TOPIC_LOGS => {
+            Topic::Logs => {
                 if let Ok(event) = serde_json::from_value::<LogEvent>(data) {
                     model.push_log(event.into());
                 }
                 return true;
             }
-            TOPIC_EVENTS => {
+            Topic::Events => {
                 if let Ok(ObsEventPayload::InputVolumeMeters { inputs }) =
                     serde_json::from_value::<ObsEventPayload>(data)
                 {
@@ -36,7 +36,6 @@ pub fn apply_server_message(model: &mut TuiModel, msg: ServerMessage) -> bool {
                 }
                 return true;
             }
-            _ => {}
         }
     }
     true

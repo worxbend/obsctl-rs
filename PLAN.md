@@ -413,8 +413,8 @@ Full task details in `.agent-loop/tasks.json`.
 | T014 | Add fn req/req_with helpers in obs/requests.rs      | improvement | 14  | pending |
 | T015 | Fix required_string idiom (str::to_owned)           | improvement | 15  | completed |
 | T016 | Fix redundant .clone() on HashSet inserts           | improvement | 16  | completed |
-| T017 | Fix parser.rs clone()+clear() → mem::take          | improvement | 17  | pending |
-| T018 | Eliminate TOPIC_*.to_string() hot-path allocs       | improvement | 18  | pending |
+| T017 | Fix parser.rs clone()+clear() → mem::take          | improvement | 17  | completed |
+| T018 | Eliminate TOPIC_*.to_string() hot-path allocs       | improvement | 18  | completed |
 | T019 | Remove unnecessary level.clone() in cli/router.rs   | improvement | 19  | pending |
 | T020 | Fix Span::raw clones in widgets/scenes+audio        | improvement | 20  | pending |
 | T021 | Add tracing::debug for unhandled TOPIC_EVENTS vars  | improvement | 21  | pending |

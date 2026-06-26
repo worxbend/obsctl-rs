@@ -31,7 +31,7 @@ pub enum ServerMessage {
         error: Option<ErrorPayload>,
     },
     Event {
-        topic: String,
+        topic: Topic,
         data: Value,
     },
 }
@@ -39,7 +39,7 @@ pub enum ServerMessage {
 impl ServerMessage {
     pub fn obs_event(event: ObsEventPayload) -> Self {
         Self::Event {
-            topic: TOPIC_EVENTS.to_string(),
+            topic: Topic::Events,
             data: serde_json::to_value(event)
                 .expect("ObsEventPayload serialization should not fail"),
         }
@@ -47,7 +47,7 @@ impl ServerMessage {
 
     pub fn log_event(event: LogEvent) -> Self {
         Self::Event {
-            topic: TOPIC_LOGS.to_string(),
+            topic: Topic::Logs,
             data: serde_json::to_value(event).expect("LogEvent serialization should not fail"),
         }
     }
@@ -291,6 +291,16 @@ pub const TOPIC_STATE: &str = "state";
 pub const TOPIC_EVENTS: &str = "events";
 pub const TOPIC_LOGS: &str = "logs";
 
+/// Typed topic discriminant for `ServerMessage::Event`. Serializes as the
+/// lowercase wire string ("state", "events", "logs") to preserve wire compat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Topic {
+    State,
+    Events,
+    Logs,
+}
+
 pub fn is_valid_topic(topic: &str) -> bool {
     matches!(topic, TOPIC_STATE | TOPIC_EVENTS | TOPIC_LOGS)
 }
@@ -455,7 +465,7 @@ mod tests {
             updated_at: datetime!(2024-01-02 03:04:05 UTC),
         };
         let message = ServerMessage::Event {
-            topic: TOPIC_STATE.to_string(),
+            topic: Topic::State,
             data: serde_json::to_value(snapshot).unwrap(),
         };
         let value = serde_json::to_value(&message).unwrap();
@@ -659,7 +669,7 @@ mod tests {
 
         match decoded {
             ServerMessage::Event { topic, data } => {
-                assert_eq!(topic, TOPIC_LOGS);
+                assert_eq!(topic, Topic::Logs);
                 let decoded_event: LogEvent = serde_json::from_value(data).unwrap();
                 assert_eq!(decoded_event, event);
             }

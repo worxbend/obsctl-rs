@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::ipc::protocol::{
-    CommandPayload, LogEvent, ObsEventPayload, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE,
+    CommandPayload, LogEvent, ObsEventPayload, ServerMessage, Topic, TOPIC_STATE,
 };
 
 pub const BROADCAST_CAPACITY: usize = 64;
@@ -33,21 +33,20 @@ impl BroadcastHub {
         }
     }
 
-    pub fn publish(&self, topic: &str, msg: ServerMessage) {
+    pub fn publish(&self, topic: Topic, msg: ServerMessage) {
         let _ = match topic {
-            TOPIC_STATE => self.state_tx.send(msg),
-            TOPIC_EVENTS => self.events_tx.send(msg),
-            TOPIC_LOGS => self.logs_tx.send(msg),
-            _ => return,
+            Topic::State => self.state_tx.send(msg),
+            Topic::Events => self.events_tx.send(msg),
+            Topic::Logs => self.logs_tx.send(msg),
         };
     }
 
     pub fn publish_log(&self, event: LogEvent) {
-        self.publish(TOPIC_LOGS, ServerMessage::log_event(event));
+        self.publish(Topic::Logs, ServerMessage::log_event(event));
     }
 
     pub fn publish_obs_event(&self, event: ObsEventPayload) {
-        self.publish(TOPIC_EVENTS, ServerMessage::obs_event(event));
+        self.publish(Topic::Events, ServerMessage::obs_event(event));
     }
 
     pub fn subscribe_state(&self) -> broadcast::Receiver<ServerMessage> {
@@ -92,7 +91,7 @@ impl SessionSubscriptions {
 mod tests {
     use serde_json::json;
 
-    use crate::ipc::protocol::{LogEvent, LogLevel, ObsEventPayload, TOPIC_EVENTS, TOPIC_LOGS};
+    use crate::ipc::protocol::{LogEvent, LogLevel, ObsEventPayload, Topic};
 
     use super::*;
 
@@ -106,7 +105,7 @@ mod tests {
         let msg = logs_rx.recv().await.unwrap();
         match msg {
             ServerMessage::Event { topic, data } => {
-                assert_eq!(topic, TOPIC_LOGS);
+                assert_eq!(topic, Topic::Logs);
                 let event: LogEvent = serde_json::from_value(data).unwrap();
                 assert_eq!(event.level, LogLevel::Warn);
                 assert_eq!(event.message, "OBS unavailable");
@@ -140,7 +139,7 @@ mod tests {
         let msg = events_rx.recv().await.unwrap();
         match msg {
             ServerMessage::Event { topic, data } => {
-                assert_eq!(topic, TOPIC_EVENTS);
+                assert_eq!(topic, Topic::Events);
                 let event: ObsEventPayload = serde_json::from_value(data.clone()).unwrap();
                 assert_eq!(
                     event,
