@@ -405,7 +405,7 @@ Full task details in `.agent-loop/tasks.json`.
 | T006 | Extract handle_action dispatch from run_loop        | improvement | 6   | **done** |
 | T007 | Fix double read-lock race in cmd_server_status      | fix         | 7   | **done** |
 | T008 | Remove/fix Command::Disconnect dead variant         | fix         | 8   | **done** |
-| T009 | Return error from cmd_dump_config when path is None | fix         | 9   | pending |
+| T009 | Return error from cmd_dump_config when path is None | fix         | 9   | **done** |
 | T010 | Push connection error to model.logs                 | fix         | 10  | pending |
 | T011 | CHECKPOINT: build+test after arch/error fixes       | validation  | 11  | pending |
 | T012 | Merge validate_scene/audio_duplicates in dump.rs    | improvement | 12  | pending |

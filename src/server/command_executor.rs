@@ -320,7 +320,9 @@ impl CommandExecutor {
                 }
             }
         } else {
-            warn!("dump-config: no config_path configured, skipping write");
+            return Err(crate::domain::errors::ObsctlError::ConfigInvalid(
+                "dump-config requires a config file path".to_string(),
+            ));
         }
 
         let scene_count = merged.scenes.len();
