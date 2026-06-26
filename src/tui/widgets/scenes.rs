@@ -25,7 +25,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
                         Color::DarkGray
                     }),
                 ),
-                Span::raw(s.name.clone()),
+                Span::raw(s.name.as_str()),
             ];
             if let Some(a) = &s.alias {
                 spans.push(Span::styled(

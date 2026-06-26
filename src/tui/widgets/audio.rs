@@ -65,7 +65,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
                 None => String::new(),
             };
 
-            let mut spans = vec![mute_icon, Span::raw(a.name.clone())];
+            let mut spans = vec![mute_icon, Span::raw(a.name.as_str())];
 
             if let Some(al) = &a.alias {
                 spans.push(Span::styled(
