@@ -86,47 +86,49 @@ pub fn validate(config: &Config) -> Result<Vec<ValidationWarning>> {
     Ok(warnings)
 }
 
+fn check_unique_aliases_shortcuts<'a>(
+    kind: &str,
+    items: impl Iterator<Item = (Option<&'a str>, Option<&'a str>)>,
+) -> Result<()> {
+    let mut aliases = std::collections::HashSet::new();
+    let mut shortcuts = std::collections::HashSet::new();
+
+    for (alias, shortcut) in items {
+        if let Some(a) = alias
+            && !aliases.insert(a)
+        {
+            return Err(ObsctlError::ConfigInvalid(format!(
+                "duplicate {kind} alias: {a}"
+            )));
+        }
+        if let Some(s) = shortcut
+            && !shortcuts.insert(s)
+        {
+            return Err(ObsctlError::ConfigInvalid(format!(
+                "duplicate {kind} shortcut: {s}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_no_duplicate_aliases(config: &Config) -> Result<()> {
-    let mut scene_aliases = std::collections::HashSet::new();
-    let mut scene_shortcuts = std::collections::HashSet::new();
-
-    for scene in &config.scenes {
-        if let Some(alias) = &scene.alias
-            && !scene_aliases.insert(alias.clone())
-        {
-            return Err(ObsctlError::ConfigInvalid(format!(
-                "duplicate scene alias: {alias}"
-            )));
-        }
-        if let Some(shortcut) = &scene.shortcut
-            && !scene_shortcuts.insert(shortcut.clone())
-        {
-            return Err(ObsctlError::ConfigInvalid(format!(
-                "duplicate scene shortcut: {shortcut}"
-            )));
-        }
-    }
-
-    let mut audio_aliases = std::collections::HashSet::new();
-    let mut audio_shortcuts = std::collections::HashSet::new();
-
-    for input in &config.audio.inputs {
-        if let Some(alias) = &input.alias
-            && !audio_aliases.insert(alias.clone())
-        {
-            return Err(ObsctlError::ConfigInvalid(format!(
-                "duplicate audio alias: {alias}"
-            )));
-        }
-        if let Some(shortcut) = &input.shortcut
-            && !audio_shortcuts.insert(shortcut.clone())
-        {
-            return Err(ObsctlError::ConfigInvalid(format!(
-                "duplicate audio shortcut: {shortcut}"
-            )));
-        }
-    }
-
+    check_unique_aliases_shortcuts(
+        "scene",
+        config
+            .scenes
+            .iter()
+            .map(|s| (s.alias.as_deref(), s.shortcut.as_deref())),
+    )?;
+    check_unique_aliases_shortcuts(
+        "audio",
+        config
+            .audio
+            .inputs
+            .iter()
+            .map(|i| (i.alias.as_deref(), i.shortcut.as_deref())),
+    )?;
     Ok(())
 }
 

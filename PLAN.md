@@ -55,7 +55,7 @@ fn validate_no_duplicates(
 ) -> Result<()>
 ```
 
-### M — `config/schema.rs`: same alias/shortcut uniqueness loop duplicated for scenes and audio
+### M — `config/schema.rs`: same alias/shortcut uniqueness loop duplicated for scenes and audio [DONE T013]
 `validate` (lines ~89–131) iterates scenes and audio inputs checking for duplicate aliases and
 shortcuts with near-identical code. Extract:
 ```rust
@@ -409,7 +409,7 @@ Full task details in `.agent-loop/tasks.json`.
 | T010 | Push connection error to model.logs                 | fix         | 10  | **done** |
 | T011 | CHECKPOINT: build+test after arch/error fixes       | validation  | 11  | **done** |
 | T012 | Merge validate_scene/audio_duplicates in dump.rs    | improvement | 12  | pending |
-| T013 | Extract check_unique_aliases_shortcuts in schema.rs | improvement | 13  | pending |
+| T013 | Extract check_unique_aliases_shortcuts in schema.rs | improvement | 13  | completed |
 | T014 | Add fn req/req_with helpers in obs/requests.rs      | improvement | 14  | pending |
 | T015 | Fix required_string idiom (str::to_owned)           | improvement | 15  | pending |
 | T016 | Fix redundant .clone() on HashSet inserts           | improvement | 16  | pending |
