@@ -155,13 +155,13 @@ fn run_server(config_path: Option<PathBuf>, headless: bool) -> i32 {
         .or_else(paths::config_path)
         .or_else(paths::default_config_path);
 
-    if let Some(ref path) = effective_path {
-        if !path.exists() && !headless {
-            if let Err(e) = first_time_setup(path) {
-                eprintln!("Setup failed: {e}");
-                return 1;
-            }
-        }
+    if let Some(ref path) = effective_path
+        && !path.exists()
+        && !headless
+        && let Err(e) = first_time_setup(path)
+    {
+        eprintln!("Setup failed: {e}");
+        return 1;
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -202,7 +202,7 @@ fn first_time_setup(config_path: &std::path::Path) -> std::io::Result<()> {
     }
 
     crate::config::writer::write(&config, config_path)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     eprintln!("\nConfig written to {}.\n", config_path.display());
     Ok(())

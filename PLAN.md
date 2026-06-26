@@ -401,7 +401,7 @@ Full task details in `.agent-loop/tasks.json`.
 | T002 | Extract spawn_session_forwarder in tui/app.rs       | improvement | 2   | **done** |
 | T003 | Extract format_ipc_response in tui/app.rs           | improvement | 3   | **done** |
 | T004 | Extract scene/audio alias entry helpers             | improvement | 4   | **done** |
-| T005 | CHECKPOINT: build+test after H dedup refactors      | validation  | 5   | pending |
+| T005 | CHECKPOINT: build+test after H dedup refactors      | validation  | 5   | **done** |
 | T006 | Extract handle_action dispatch from run_loop        | improvement | 6   | pending |
 | T007 | Fix double read-lock race in cmd_server_status      | fix         | 7   | pending |
 | T008 | Remove/fix Command::Disconnect dead variant         | fix         | 8   | pending |

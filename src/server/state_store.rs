@@ -197,6 +197,7 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
 }
 
 /// Build a full ObsSnapshot from OBS data plus config metadata.
+#[allow(clippy::too_many_arguments)]
 pub fn build_snapshot(
     obs_studio_version: &str,
     obs_ws_version: &str,

@@ -38,8 +38,8 @@ fn level_bar(level: f32, muted: bool) -> Line<'static> {
     } else {
         Color::Green
     };
-    let filled_str: String = std::iter::repeat('█').take(filled).collect();
-    let empty_str: String = std::iter::repeat('░').take(empty).collect();
+    let filled_str = "█".repeat(filled);
+    let empty_str = "░".repeat(empty);
     Line::from(vec![
         Span::raw("  "),
         Span::styled(filled_str, Style::default().fg(bar_color)),
