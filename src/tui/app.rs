@@ -257,7 +257,7 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) {
     let areas = layout::compute(f);
 
     if !model.connected_to_daemon {
-        render_unavailable(f, f.area(), model);
+        widgets::connection::render_unavailable(f, f.area(), model);
         return;
     }
 
@@ -268,51 +268,6 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) {
     widgets::command_palette::render(f, areas.palette, model);
 }
 
-fn render_unavailable(f: &mut ratatui::Frame, area: ratatui::layout::Rect, model: &TuiModel) {
-    use ratatui::{
-        style::{Color, Style},
-        text::Line,
-        widgets::{Block, Borders, Paragraph},
-    };
-
-    let err = model
-        .last_result
-        .as_deref()
-        .unwrap_or("Could not connect to obsctl daemon.");
-
-    let lines = vec![
-        Line::styled(
-            "obsctl server is not running",
-            Style::default().fg(Color::Red),
-        ),
-        Line::raw(""),
-        Line::styled(err, Style::default().fg(Color::Yellow)),
-        Line::raw(""),
-        Line::raw("Start the daemon with:"),
-        Line::styled(
-            "  obsctl server --headless",
-            Style::default().fg(Color::Cyan),
-        ),
-        Line::raw("Or install the service:"),
-        Line::styled("  obsctl service install", Style::default().fg(Color::Cyan)),
-        Line::styled(
-            "  systemctl --user enable --now obsctl.service",
-            Style::default().fg(Color::Cyan),
-        ),
-        Line::raw(""),
-        Line::styled(
-            "Press R to retry, q to quit.",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" obsctl — daemon unavailable ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    f.render_widget(Paragraph::new(lines), inner);
-}
 
 async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
     match parser::parse(input) {

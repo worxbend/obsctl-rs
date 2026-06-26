@@ -421,8 +421,8 @@ Full task details in `.agent-loop/tasks.json`.
 | T022 | Define ES_* event subscription constants            | improvement | 22  | completed |
 | T023 | CHECKPOINT: build+test+clippy after idioms          | validation  | 23  | completed |
 | T024 | Reduce per-call allocation in TuiModel::scenes()    | improvement | 24  | completed |
-| T025 | Introduce CommandExecutorConfig struct              | improvement | 25  | pending |
-| T026 | Move render_unavailable to widgets module           | improvement | 26  | pending |
+| T025 | Introduce CommandExecutorConfig struct              | improvement | 25  | completed |
+| T026 | Move render_unavailable to widgets module           | improvement | 26  | completed |
 | T027 | Move MAX_TUI_LOG_ENTRIES to impl TuiModel const     | improvement | 27  | pending |
 | T028 | CHECKPOINT: build+test after org changes            | validation  | 28  | pending |
 | T029 | Fix variant exhaustiveness checks (compile-time)    | improvement | 29  | pending |
