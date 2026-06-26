@@ -417,7 +417,7 @@ impl CommandExecutor {
 fn required_string(args: &Value, key: &str) -> crate::domain::result::Result<String> {
     args.get(key)
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(str::to_owned)
         .ok_or_else(|| ObsctlError::CommandParseError(format!("missing {key}")))
 }
 
