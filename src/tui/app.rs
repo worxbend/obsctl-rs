@@ -89,109 +89,13 @@ async fn run_loop(
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         if let Some(action) = handle_key(&model, key) {
-                            match action {
-                                TuiAction::Quit => return Ok(0),
-                                TuiAction::OpenPalette => {
-                                    model.command_palette.active = true;
-                                    model.command_palette.input.clear();
-                                    model.command_palette.input.push('/');
-                                }
-                                TuiAction::ClosePalette => {
-                                    model.command_palette.active = false;
-                                    model.command_palette.input.clear();
-                                }
-                                TuiAction::PaletteChar(c) => {
-                                    model.command_palette.input.push(c);
-                                }
-                                TuiAction::PaletteBackspace => {
-                                    model.command_palette.input.pop();
-                                }
-                                TuiAction::PaletteSubmit => {
-                                    let input = model.command_palette.input.clone();
-                                    model.command_palette.active = false;
-                                    model.command_palette.input.clear();
-                                    let result = dispatch_palette_command(socket_path, &input).await;
-                                    if result == "quit" {
-                                        return Ok(0);
-                                    }
-                                    model.last_result = Some(result);
-                                }
-                                TuiAction::ReloadConfig => {
-                                    let result = send_simple(socket_path, "reload_config").await;
-                                    model.last_result = Some(result);
-                                }
-                                TuiAction::DumpConfig => {
-                                    let result = send_simple(socket_path, "dump_config").await;
-                                    model.last_result = Some(result);
-                                }
-                                TuiAction::FocusScenes => {
-                                    model.focus = FocusPanel::Scenes;
-                                }
-                                TuiAction::FocusAudio => {
-                                    model.focus = FocusPanel::Audio;
-                                }
-                                TuiAction::NavUp => {
-                                    model.move_up();
-                                }
-                                TuiAction::NavDown => {
-                                    model.move_down();
-                                }
-                                TuiAction::ActivateScene => {
-                                    if let Some(name) =
-                                        model.focused_scene().map(|s| s.name.clone())
-                                    {
-                                        let result =
-                                            send_simple_with_target(socket_path, "set_scene", &name)
-                                                .await;
-                                        model.last_result = Some(result);
-                                    }
-                                }
-                                TuiAction::ToggleMute => {
-                                    if let Some(name) =
-                                        model.focused_audio().map(|a| a.name.clone())
-                                    {
-                                        let result = send_simple_with_target(
-                                            socket_path,
-                                            "toggle_mute",
-                                            &name,
-                                        )
-                                        .await;
-                                        model.last_result = Some(result);
-                                    }
-                                }
-                                TuiAction::VolumeDown => {
-                                    if let Some(a) = model.focused_audio() {
-                                        let name = a.name.clone();
-                                        let current = a.volume_percent.unwrap_or(50);
-                                        let new_vol = current.saturating_sub(5);
-                                        let result =
-                                            send_set_volume(socket_path, &name, new_vol).await;
-                                        model.last_result = Some(result);
-                                    }
-                                }
-                                TuiAction::VolumeUp => {
-                                    if let Some(a) = model.focused_audio() {
-                                        let name = a.name.clone();
-                                        let current = a.volume_percent.unwrap_or(50);
-                                        let new_vol = (current + 5).min(100);
-                                        let result =
-                                            send_set_volume(socket_path, &name, new_vol).await;
-                                        model.last_result = Some(result);
-                                    }
-                                }
-                                TuiAction::RetryConnect => {
-                                    match TuiEventSession::connect(socket_path).await {
-                                        Ok(session) => {
-                                            model.connected_to_daemon = true;
-                                            model.last_result = Some("Reconnected to daemon.".to_string());
-                                            spawn_session_forwarder(session, ipc_tx.clone());
-                                        }
-                                        Err(e) => {
-                                            model.last_result =
-                                                Some(format!("Retry failed: {e}"));
-                                        }
-                                    }
-                                }
+                            let (should_quit, result) =
+                                handle_action(action, &mut model, socket_path, &ipc_tx).await;
+                            if should_quit {
+                                return Ok(0);
+                            }
+                            if let Some(r) = result {
+                                model.last_result = Some(r);
                             }
                             terminal.draw(|f| render(f, &model))?;
                         }
@@ -226,6 +130,118 @@ fn spawn_session_forwarder(
             }
         }
     });
+}
+
+async fn handle_action(
+    action: TuiAction,
+    model: &mut TuiModel,
+    socket_path: &Path,
+    ipc_tx: &mpsc::Sender<std::result::Result<ServerMessage, String>>,
+) -> (bool, Option<String>) {
+    match action {
+        TuiAction::Quit => (true, None),
+        TuiAction::OpenPalette => {
+            model.command_palette.active = true;
+            model.command_palette.input.clear();
+            model.command_palette.input.push('/');
+            (false, None)
+        }
+        TuiAction::ClosePalette => {
+            model.command_palette.active = false;
+            model.command_palette.input.clear();
+            (false, None)
+        }
+        TuiAction::PaletteChar(c) => {
+            model.command_palette.input.push(c);
+            (false, None)
+        }
+        TuiAction::PaletteBackspace => {
+            model.command_palette.input.pop();
+            (false, None)
+        }
+        TuiAction::PaletteSubmit => {
+            let input = model.command_palette.input.clone();
+            model.command_palette.active = false;
+            model.command_palette.input.clear();
+            let result = dispatch_palette_command(socket_path, &input).await;
+            if result == "quit" {
+                return (true, None);
+            }
+            (false, Some(result))
+        }
+        TuiAction::ReloadConfig => {
+            let result = send_simple(socket_path, "reload_config").await;
+            (false, Some(result))
+        }
+        TuiAction::DumpConfig => {
+            let result = send_simple(socket_path, "dump_config").await;
+            (false, Some(result))
+        }
+        TuiAction::FocusScenes => {
+            model.focus = FocusPanel::Scenes;
+            (false, None)
+        }
+        TuiAction::FocusAudio => {
+            model.focus = FocusPanel::Audio;
+            (false, None)
+        }
+        TuiAction::NavUp => {
+            model.move_up();
+            (false, None)
+        }
+        TuiAction::NavDown => {
+            model.move_down();
+            (false, None)
+        }
+        TuiAction::ActivateScene => {
+            if let Some(name) = model.focused_scene().map(|s| s.name.clone()) {
+                let result = send_simple_with_target(socket_path, "set_scene", &name).await;
+                (false, Some(result))
+            } else {
+                (false, None)
+            }
+        }
+        TuiAction::ToggleMute => {
+            if let Some(name) = model.focused_audio().map(|a| a.name.clone()) {
+                let result = send_simple_with_target(socket_path, "toggle_mute", &name).await;
+                (false, Some(result))
+            } else {
+                (false, None)
+            }
+        }
+        TuiAction::VolumeDown => {
+            if let Some(a) = model.focused_audio() {
+                let name = a.name.clone();
+                let current = a.volume_percent.unwrap_or(50);
+                let new_vol = current.saturating_sub(5);
+                let result = send_set_volume(socket_path, &name, new_vol).await;
+                (false, Some(result))
+            } else {
+                (false, None)
+            }
+        }
+        TuiAction::VolumeUp => {
+            if let Some(a) = model.focused_audio() {
+                let name = a.name.clone();
+                let current = a.volume_percent.unwrap_or(50);
+                let new_vol = (current + 5).min(100);
+                let result = send_set_volume(socket_path, &name, new_vol).await;
+                (false, Some(result))
+            } else {
+                (false, None)
+            }
+        }
+        TuiAction::RetryConnect => {
+            match TuiEventSession::connect(socket_path).await {
+                Ok(session) => {
+                    model.connected_to_daemon = true;
+                    spawn_session_forwarder(session, ipc_tx.clone());
+                    (false, Some("Reconnected to daemon.".to_string()))
+                }
+                Err(e) => (false, Some(format!("Retry failed: {e}"))),
+            }
+        }
+    }
 }
 
 fn render(f: &mut ratatui::Frame, model: &TuiModel) {
