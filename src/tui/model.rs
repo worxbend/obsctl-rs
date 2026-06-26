@@ -7,7 +7,6 @@ use crate::{
     obs::state::{AudioState, ObsSnapshot, SceneState, ServerStatus},
 };
 
-pub const MAX_TUI_LOG_ENTRIES: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FocusPanel {
@@ -59,10 +58,12 @@ impl From<LogEvent> for TuiLogEntry {
 }
 
 impl TuiModel {
+    pub const MAX_LOG_ENTRIES: usize = 200;
+
     pub fn push_log(&mut self, entry: TuiLogEntry) {
         self.logs.push(entry);
-        if self.logs.len() > MAX_TUI_LOG_ENTRIES {
-            let overflow = self.logs.len() - MAX_TUI_LOG_ENTRIES;
+        if self.logs.len() > Self::MAX_LOG_ENTRIES {
+            let overflow = self.logs.len() - Self::MAX_LOG_ENTRIES;
             self.logs.drain(0..overflow);
         }
     }

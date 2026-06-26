@@ -423,7 +423,7 @@ Full task details in `.agent-loop/tasks.json`.
 | T024 | Reduce per-call allocation in TuiModel::scenes()    | improvement | 24  | completed |
 | T025 | Introduce CommandExecutorConfig struct              | improvement | 25  | completed |
 | T026 | Move render_unavailable to widgets module           | improvement | 26  | completed |
-| T027 | Move MAX_TUI_LOG_ENTRIES to impl TuiModel const     | improvement | 27  | pending |
+| T027 | Move MAX_TUI_LOG_ENTRIES to impl TuiModel const     | improvement | 27  | completed |
 | T028 | CHECKPOINT: build+test after org changes            | validation  | 28  | pending |
 | T029 | Fix variant exhaustiveness checks (compile-time)    | improvement | 29  | pending |
 | T030 | Add tests for cmd_toggle_stream/toggle_record       | improvement | 30  | pending |
