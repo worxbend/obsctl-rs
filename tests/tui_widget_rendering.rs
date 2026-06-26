@@ -6,7 +6,7 @@ use obsctl_rs::{
     ipc::protocol::LogLevel,
     obs::state::{AudioState, ObsSnapshot, SceneState},
     tui::{
-        model::{CommandPaletteState, TuiLogEntry, TuiModel},
+        model::{TuiLogEntry, TuiModel},
         widgets,
     },
 };
@@ -95,30 +95,21 @@ fn log_entry(level: LogLevel, message: &str) -> TuiLogEntry {
 }
 
 fn model_connected() -> TuiModel {
-    TuiModel {
-        snapshot: Some(snap_connected()),
-        server_status: None,
-        logs: vec![
-            log_entry(LogLevel::Info, "server started"),
-            log_entry(LogLevel::Warn, "reconnect attempt"),
-        ],
-        command_palette: CommandPaletteState::default(),
-        last_result: None,
-        connected_to_daemon: true,
-        ..Default::default()
-    }
+    let mut model = TuiModel::default();
+    model.snapshot = Some(snap_connected());
+    model.logs = vec![
+        log_entry(LogLevel::Info, "server started"),
+        log_entry(LogLevel::Warn, "reconnect attempt"),
+    ];
+    model.connected_to_daemon = true;
+    model.clamp_cursors();
+    model
 }
 
 fn model_daemon_disconnected() -> TuiModel {
-    TuiModel {
-        snapshot: None,
-        server_status: None,
-        logs: Vec::new(),
-        command_palette: CommandPaletteState::default(),
-        last_result: None,
-        connected_to_daemon: false,
-        ..Default::default()
-    }
+    let mut model = TuiModel::default();
+    model.connected_to_daemon = false;
+    model
 }
 
 fn buf_string(terminal: &Terminal<TestBackend>) -> String {

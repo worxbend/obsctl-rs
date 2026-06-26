@@ -29,6 +29,8 @@ pub struct TuiModel {
     pub audio_cursor: usize,
     /// Latest RMS magnitude (0-1) per input name, updated from InputVolumeMeters events.
     pub meter_levels: HashMap<String, f32>,
+    /// Cached visible (non-hidden) scenes; rebuilt in `clamp_cursors` after each snapshot update.
+    cached_visible_scenes: Vec<SceneState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,12 +67,9 @@ impl TuiModel {
         }
     }
 
-    /// Visible (non-hidden) scenes, in snapshot order.
-    pub fn scenes(&self) -> Vec<&SceneState> {
-        self.snapshot
-            .as_ref()
-            .map(|s| s.scenes.iter().filter(|sc| !sc.hidden).collect())
-            .unwrap_or_default()
+    /// Visible (non-hidden) scenes, in snapshot order. Returns the cached slice; no allocation per call.
+    pub fn scenes(&self) -> &[SceneState] {
+        &self.cached_visible_scenes
     }
 
     pub fn audio_inputs(&self) -> &[AudioState] {
@@ -116,14 +115,19 @@ impl TuiModel {
 
     /// Keep cursors within valid list bounds; call after snapshot updates.
     pub fn clamp_cursors(&mut self) {
-        let scene_max = self.scenes().len().saturating_sub(1);
+        self.cached_visible_scenes = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.scenes.iter().filter(|sc| !sc.hidden).cloned().collect())
+            .unwrap_or_default();
+        let scene_max = self.cached_visible_scenes.len().saturating_sub(1);
         self.scene_cursor = self.scene_cursor.min(scene_max);
         let audio_max = self.audio_inputs().len().saturating_sub(1);
         self.audio_cursor = self.audio_cursor.min(audio_max);
     }
 
     pub fn focused_scene(&self) -> Option<&SceneState> {
-        self.scenes().into_iter().nth(self.scene_cursor)
+        self.cached_visible_scenes.get(self.scene_cursor)
     }
 
     pub fn focused_audio(&self) -> Option<&AudioState> {
