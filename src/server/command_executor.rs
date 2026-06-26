@@ -19,6 +19,18 @@ use crate::ipc::{
 use crate::obs::{client::ObsClient, requests, state::{ObsSnapshot, ServerStatus}};
 use crate::server::{client_registry::ClientRegistry, state_store::StateStore};
 
+pub struct CommandExecutorConfig {
+    pub state: StateStore,
+    pub obs: Arc<Mutex<Option<ObsClient>>>,
+    pub config: Arc<Mutex<Config>>,
+    pub config_path: Option<PathBuf>,
+    pub socket_path: PathBuf,
+    pub registry: ClientRegistry,
+    pub reconnect_tx: mpsc::Sender<()>,
+    pub shutdown_tx: tokio::sync::watch::Sender<bool>,
+    pub hub: Arc<BroadcastHub>,
+}
+
 pub struct CommandExecutor {
     state: StateStore,
     obs: Arc<Mutex<Option<ObsClient>>>,
@@ -33,29 +45,18 @@ pub struct CommandExecutor {
 }
 
 impl CommandExecutor {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        state: StateStore,
-        obs: Arc<Mutex<Option<ObsClient>>>,
-        config: Arc<Mutex<Config>>,
-        config_path: Option<PathBuf>,
-        socket_path: PathBuf,
-        registry: ClientRegistry,
-        reconnect_tx: mpsc::Sender<()>,
-        shutdown_tx: tokio::sync::watch::Sender<bool>,
-        hub: Arc<BroadcastHub>,
-    ) -> Self {
+    pub fn new(cfg: CommandExecutorConfig) -> Self {
         Self {
-            state,
-            obs,
-            config,
-            config_path,
-            socket_path,
-            registry,
+            state: cfg.state,
+            obs: cfg.obs,
+            config: cfg.config,
+            config_path: cfg.config_path,
+            socket_path: cfg.socket_path,
+            registry: cfg.registry,
             started_at: Instant::now(),
-            reconnect_tx,
-            shutdown_tx,
-            hub,
+            reconnect_tx: cfg.reconnect_tx,
+            shutdown_tx: cfg.shutdown_tx,
+            hub: cfg.hub,
         }
     }
 

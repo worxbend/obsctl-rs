@@ -14,8 +14,11 @@ use crate::ipc::{
 use crate::obs::client::ObsClient;
 use crate::runtime::shutdown;
 use crate::server::{
-    client_registry::ClientRegistry, command_executor::CommandExecutor,
-    obs_supervisor::ObsSupervisor, options::ServerOptions, state_store::StateStore,
+    client_registry::ClientRegistry,
+    command_executor::{CommandExecutor, CommandExecutorConfig},
+    obs_supervisor::ObsSupervisor,
+    options::ServerOptions,
+    state_store::StateStore,
 };
 
 /// Start the daemon and block until shutdown.
@@ -93,17 +96,17 @@ pub async fn run(options: ServerOptions) -> i32 {
     // Install OS signal handlers
     shutdown::install_signal_handler(shutdown_tx.clone());
 
-    let executor = CommandExecutor::new(
-        state.clone(),
-        Arc::clone(&obs_handle),
-        Arc::clone(&config_shared),
-        Some(config_path.clone()),
-        socket_path.clone(),
-        registry.clone(),
-        reconnect_tx.clone(),
-        shutdown_tx.clone(),
-        Arc::clone(&hub),
-    );
+    let executor = CommandExecutor::new(CommandExecutorConfig {
+        state: state.clone(),
+        obs: Arc::clone(&obs_handle),
+        config: Arc::clone(&config_shared),
+        config_path: Some(config_path.clone()),
+        socket_path: socket_path.clone(),
+        registry: registry.clone(),
+        reconnect_tx: reconnect_tx.clone(),
+        shutdown_tx: shutdown_tx.clone(),
+        hub: Arc::clone(&hub),
+    });
 
     let supervisor = ObsSupervisor::new(
         Arc::clone(&config_shared),
