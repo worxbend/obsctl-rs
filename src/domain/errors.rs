@@ -94,6 +94,32 @@ impl ObsctlError {
 mod tests {
     use super::*;
 
+    // Compile-time exhaustiveness guard: fails to compile when a new variant is
+    // added without updating this match, forcing the test cases to be updated too.
+    #[allow(dead_code)]
+    fn _obsctl_error_variant_guard(e: ObsctlError) {
+        match e {
+            ObsctlError::ConfigNotFound(_) => {}
+            ObsctlError::ConfigInvalid(_) => {}
+            ObsctlError::ServerUnavailable { .. } => {}
+            ObsctlError::IpcConnectionFailed(_) => {}
+            ObsctlError::IpcProtocolError(_) => {}
+            ObsctlError::ConnectionFailed(_) => {}
+            ObsctlError::AuthenticationFailed => {}
+            ObsctlError::ObsUnavailable => {}
+            ObsctlError::RequestTimeout => {}
+            ObsctlError::ObsRequestFailed(_) => {}
+            ObsctlError::SceneNotFound(_) => {}
+            ObsctlError::AudioInputNotFound(_) => {}
+            ObsctlError::AliasAmbiguous(_) => {}
+            ObsctlError::CommandParseError(_) => {}
+            ObsctlError::ShutdownDisabled => {}
+            ObsctlError::DumpConfigFailed(_) => {}
+            ObsctlError::ServiceInstallFailed(_) => {}
+            ObsctlError::Io(_) => {}
+        }
+    }
+
     #[test]
     fn all_obsctl_error_variants_have_intended_local_exit_codes() {
         const OBSCTL_ERROR_VARIANT_COUNT: usize = 18;

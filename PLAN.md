@@ -424,8 +424,8 @@ Full task details in `.agent-loop/tasks.json`.
 | T025 | Introduce CommandExecutorConfig struct              | improvement | 25  | completed |
 | T026 | Move render_unavailable to widgets module           | improvement | 26  | completed |
 | T027 | Move MAX_TUI_LOG_ENTRIES to impl TuiModel const     | improvement | 27  | completed |
-| T028 | CHECKPOINT: build+test after org changes            | validation  | 28  | pending |
-| T029 | Fix variant exhaustiveness checks (compile-time)    | improvement | 29  | pending |
+| T028 | CHECKPOINT: build+test after org changes            | validation  | 28  | completed |
+| T029 | Fix variant exhaustiveness checks (compile-time)    | improvement | 29  | completed |
 | T030 | Add tests for cmd_toggle_stream/toggle_record       | improvement | 30  | pending |
 | T031 | Add test for TuiModel::scenes() hidden filter       | improvement | 31  | pending |
 | T032 | Complete CommandPaletteState completions+cycling    | feature     | 32  | pending |

@@ -313,6 +313,47 @@ mod tests {
     use serde_json::json;
     use time::macros::datetime;
 
+    // Compile-time exhaustiveness guards: fail to compile when a new variant is
+    // added without updating this match, forcing the test cases to be updated too.
+    #[allow(dead_code)]
+    fn _obs_event_payload_variant_guard(p: ObsEventPayload) {
+        match p {
+            ObsEventPayload::CurrentProgramSceneChanged { .. } => {}
+            ObsEventPayload::SceneListChanged => {}
+            ObsEventPayload::InputCreated { .. } => {}
+            ObsEventPayload::InputRemoved { .. } => {}
+            ObsEventPayload::InputMuteStateChanged { .. } => {}
+            ObsEventPayload::InputVolumeChanged { .. } => {}
+            ObsEventPayload::InputVolumeMeters { .. } => {}
+            ObsEventPayload::StreamStateChanged { .. } => {}
+            ObsEventPayload::RecordStateChanged { .. } => {}
+        }
+    }
+
+    #[allow(dead_code)]
+    fn _obsctl_error_variant_guard(e: ObsctlError) {
+        match e {
+            ObsctlError::ConfigNotFound(_) => {}
+            ObsctlError::ConfigInvalid(_) => {}
+            ObsctlError::ServerUnavailable { .. } => {}
+            ObsctlError::IpcConnectionFailed(_) => {}
+            ObsctlError::IpcProtocolError(_) => {}
+            ObsctlError::ConnectionFailed(_) => {}
+            ObsctlError::AuthenticationFailed => {}
+            ObsctlError::ObsUnavailable => {}
+            ObsctlError::RequestTimeout => {}
+            ObsctlError::ObsRequestFailed(_) => {}
+            ObsctlError::SceneNotFound(_) => {}
+            ObsctlError::AudioInputNotFound(_) => {}
+            ObsctlError::AliasAmbiguous(_) => {}
+            ObsctlError::CommandParseError(_) => {}
+            ObsctlError::ShutdownDisabled => {}
+            ObsctlError::DumpConfigFailed(_) => {}
+            ObsctlError::ServiceInstallFailed(_) => {}
+            ObsctlError::Io(_) => {}
+        }
+    }
+
     fn assert_wire_json<T>(message: &T, expected_raw: &str, expected_value: serde_json::Value)
     where
         T: Serialize,
