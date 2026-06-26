@@ -22,7 +22,6 @@ pub fn parse(input: &str) -> Result<Command> {
         "validate-config" => expect_args(args, 0, "validate-config", Command::ValidateConfig),
         "reconnect" => expect_args(args, 0, "reconnect", Command::Reconnect),
         "connect" => expect_args(args, 0, "connect", Command::Connect),
-        "disconnect" => expect_args(args, 0, "disconnect", Command::Disconnect),
         "shutdown-server" => expect_args(args, 0, "shutdown-server", Command::ShutdownServer),
         "stream" => expect_args(args, 0, "stream", Command::ToggleStream),
         "rec" | "record" => expect_args(args, 0, "rec", Command::ToggleRecord),
@@ -271,7 +270,6 @@ mod tests {
             "validate-config",
             "reconnect",
             "connect",
-            "disconnect",
             "shutdown-server",
         ] {
             assert!(parse(cmd).is_ok(), "command '{cmd}' should parse ok");

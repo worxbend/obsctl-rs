@@ -10,7 +10,6 @@ pub enum Command {
     ValidateConfig,
     Reconnect,
     Connect,
-    Disconnect,
     ShutdownServer,
     SetScene { target: String },
     Mute { target: String },

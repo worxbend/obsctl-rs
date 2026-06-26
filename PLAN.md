@@ -403,8 +403,8 @@ Full task details in `.agent-loop/tasks.json`.
 | T004 | Extract scene/audio alias entry helpers             | improvement | 4   | **done** |
 | T005 | CHECKPOINT: build+test after H dedup refactors      | validation  | 5   | **done** |
 | T006 | Extract handle_action dispatch from run_loop        | improvement | 6   | **done** |
-| T007 | Fix double read-lock race in cmd_server_status      | fix         | 7   | pending |
-| T008 | Remove/fix Command::Disconnect dead variant         | fix         | 8   | pending |
+| T007 | Fix double read-lock race in cmd_server_status      | fix         | 7   | **done** |
+| T008 | Remove/fix Command::Disconnect dead variant         | fix         | 8   | **done** |
 | T009 | Return error from cmd_dump_config when path is None | fix         | 9   | pending |
 | T010 | Push connection error to model.logs                 | fix         | 10  | pending |
 | T011 | CHECKPOINT: build+test after arch/error fixes       | validation  | 11  | pending |

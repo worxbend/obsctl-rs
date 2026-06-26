@@ -349,7 +349,6 @@ fn command_to_payload(cmd: Command) -> CommandPayload {
         Command::ObsStatus => ("get_obs_status", serde_json::Value::Null),
         Command::ValidateConfig => ("validate_config", serde_json::Value::Null),
         Command::Reconnect | Command::Connect => ("reconnect_obs", serde_json::Value::Null),
-        Command::Disconnect => ("reconnect_obs", serde_json::Value::Null),
         Command::ShutdownServer => ("shutdown_server", serde_json::Value::Null),
         Command::DumpConfig => ("dump_config", serde_json::Value::Null),
         Command::ReloadConfig => ("reload_config", serde_json::Value::Null),
