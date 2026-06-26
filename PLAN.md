@@ -412,7 +412,7 @@ Full task details in `.agent-loop/tasks.json`.
 | T013 | Extract check_unique_aliases_shortcuts in schema.rs | improvement | 13  | completed |
 | T014 | Add fn req/req_with helpers in obs/requests.rs      | improvement | 14  | pending |
 | T015 | Fix required_string idiom (str::to_owned)           | improvement | 15  | completed |
-| T016 | Fix redundant .clone() on HashSet inserts           | improvement | 16  | pending |
+| T016 | Fix redundant .clone() on HashSet inserts           | improvement | 16  | completed |
 | T017 | Fix parser.rs clone()+clear() → mem::take          | improvement | 17  | pending |
 | T018 | Eliminate TOPIC_*.to_string() hot-path allocs       | improvement | 18  | pending |
 | T019 | Remove unnecessary level.clone() in cli/router.rs   | improvement | 19  | pending |
