@@ -91,6 +91,38 @@ pub fn set_input_volume(input_name: &str, volume_mul: f64) -> RequestData {
     }
 }
 
+pub fn get_stream_status() -> RequestData {
+    RequestData {
+        request_type: "GetStreamStatus".to_string(),
+        request_id: next_id(),
+        request_data: None,
+    }
+}
+
+pub fn get_record_status() -> RequestData {
+    RequestData {
+        request_type: "GetRecordStatus".to_string(),
+        request_id: next_id(),
+        request_data: None,
+    }
+}
+
+pub fn toggle_stream() -> RequestData {
+    RequestData {
+        request_type: "ToggleStream".to_string(),
+        request_id: next_id(),
+        request_data: None,
+    }
+}
+
+pub fn toggle_record() -> RequestData {
+    RequestData {
+        request_type: "ToggleRecord".to_string(),
+        request_id: next_id(),
+        request_data: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

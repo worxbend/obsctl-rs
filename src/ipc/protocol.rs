@@ -54,6 +54,12 @@ impl ServerMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputMeterLevel {
+    pub name: String,
+    pub level: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ObsEventPayload {
     CurrentProgramSceneChanged {
@@ -74,6 +80,15 @@ pub enum ObsEventPayload {
         input_name: String,
         volume_mul: f64,
         volume_db: f64,
+    },
+    InputVolumeMeters {
+        inputs: Vec<InputMeterLevel>,
+    },
+    StreamStateChanged {
+        active: bool,
+    },
+    RecordStateChanged {
+        active: bool,
     },
 }
 
@@ -422,6 +437,7 @@ mod tests {
                 shortcut: Some("1".to_string()),
                 group: Some("live".to_string()),
                 active: true,
+                hidden: false,
             }],
             audio_inputs: vec![AudioState {
                 name: "Mic".to_string(),
@@ -433,6 +449,8 @@ mod tests {
                 volume_db: Some(-2.5),
                 volume_percent: Some(75),
             }],
+            streaming: false,
+            recording: false,
             last_error: None,
             updated_at: datetime!(2024-01-02 03:04:05 UTC),
         };
@@ -458,7 +476,8 @@ mod tests {
                             "alias": "main",
                             "shortcut": "1",
                             "group": "live",
-                            "active": true
+                            "active": true,
+                            "hidden": false
                         }
                     ],
                     "audio_inputs": [
@@ -473,6 +492,8 @@ mod tests {
                             "volume_percent": 75
                         }
                     ],
+                    "streaming": false,
+                    "recording": false,
                     "last_error": null,
                     "updated_at": "2024-01-02T03:04:05Z"
                 }
@@ -540,6 +561,26 @@ mod tests {
                     "volume_mul": 0.75,
                     "volume_db": -2.5
                 }),
+            ),
+            (
+                ObsEventPayload::InputVolumeMeters {
+                    inputs: vec![InputMeterLevel {
+                        name: "Mic".to_string(),
+                        level: 0.4,
+                    }],
+                },
+                json!({
+                    "type": "InputVolumeMeters",
+                    "inputs": [{ "name": "Mic", "level": 0.4f32 }]
+                }),
+            ),
+            (
+                ObsEventPayload::StreamStateChanged { active: true },
+                json!({ "type": "StreamStateChanged", "active": true }),
+            ),
+            (
+                ObsEventPayload::RecordStateChanged { active: false },
+                json!({ "type": "RecordStateChanged", "active": false }),
             ),
         ];
 

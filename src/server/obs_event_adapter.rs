@@ -1,4 +1,4 @@
-use crate::ipc::protocol::ObsEventPayload;
+use crate::ipc::protocol::{InputMeterLevel, ObsEventPayload};
 use crate::obs::client::ObsEvent;
 
 pub fn normalize_obs_event(event: &ObsEvent) -> Option<ObsEventPayload> {
@@ -30,6 +30,21 @@ pub fn normalize_obs_event(event: &ObsEvent) -> Option<ObsEventPayload> {
             volume_mul: *volume_mul,
             volume_db: *volume_db,
         }),
+        ObsEvent::InputVolumeMeters { inputs } => Some(ObsEventPayload::InputVolumeMeters {
+            inputs: inputs
+                .iter()
+                .map(|(name, level)| InputMeterLevel {
+                    name: name.clone(),
+                    level: *level,
+                })
+                .collect(),
+        }),
+        ObsEvent::StreamStateChanged { active } => {
+            Some(ObsEventPayload::StreamStateChanged { active: *active })
+        }
+        ObsEvent::RecordStateChanged { active } => {
+            Some(ObsEventPayload::RecordStateChanged { active: *active })
+        }
         ObsEvent::Other { .. } => None,
     }
 }
@@ -66,5 +81,23 @@ mod tests {
         });
 
         assert_eq!(payload, None);
+    }
+
+    #[test]
+    fn stream_state_changed_creates_public_payload() {
+        let payload = normalize_obs_event(&ObsEvent::StreamStateChanged { active: true });
+        assert_eq!(
+            payload,
+            Some(ObsEventPayload::StreamStateChanged { active: true })
+        );
+    }
+
+    #[test]
+    fn record_state_changed_creates_public_payload() {
+        let payload = normalize_obs_event(&ObsEvent::RecordStateChanged { active: false });
+        assert_eq!(
+            payload,
+            Some(ObsEventPayload::RecordStateChanged { active: false })
+        );
     }
 }

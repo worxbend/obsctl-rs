@@ -9,6 +9,7 @@ use crate::{
     },
     config::{paths, schema, writer},
     ipc::socket_path::default_socket_path,
+    runtime::logger,
     server::{daemon, options::ServerOptions},
     service::systemd_user_service::{self, CommandRunner, SystemctlRunner},
 };
@@ -20,14 +21,54 @@ pub fn run(cli: Cli) -> i32 {
         .or_else(|| std::env::var("OBSCTL_CONFIG").ok().map(PathBuf::from))
         .or_else(paths::config_path);
 
+    let level = effective_log_level(&cli);
+
     match cli.command {
-        None | Some(Commands::Tui) => run_tui(config_path),
-        Some(Commands::Init) => run_init(config_path, cli.force),
-        Some(Commands::ValidateConfig) => run_validate_config(config_path),
-        Some(Commands::Server { headless }) => run_server(config_path, headless),
-        Some(Commands::Service { action }) => run_service(action),
-        cmd => run_proxy(config_path, cmd.unwrap(), cli.json),
+        None | Some(Commands::Tui) => {
+            logger::init_cli(&level);
+            run_tui(config_path)
+        }
+        Some(Commands::Init) => {
+            logger::init_cli(&level);
+            run_init(config_path, cli.force)
+        }
+        Some(Commands::ValidateConfig) => {
+            logger::init_cli(&level);
+            run_validate_config(config_path)
+        }
+        Some(Commands::Server { headless }) => {
+            logger::init_server(&level, logger::default_log_path());
+            run_server(config_path, headless)
+        }
+        Some(Commands::Service { action }) => {
+            logger::init_cli(&level);
+            run_service(action)
+        }
+        cmd => {
+            logger::init_cli(&level);
+            run_proxy(config_path, cmd.unwrap(), cli.json)
+        }
     }
+}
+
+/// Derive the effective log level from CLI flags.
+///
+/// Priority: `--verbose` > `--log-level` > `RUST_LOG` env var > mode default.
+fn effective_log_level(cli: &Cli) -> String {
+    if cli.verbose {
+        return "debug".to_string();
+    }
+    if let Some(ref level) = cli.log_level {
+        return level.clone();
+    }
+    if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        return rust_log;
+    }
+    match &cli.command {
+        Some(Commands::Server { .. }) => "info",
+        _ => "warn",
+    }
+    .to_string()
 }
 
 fn resolve_socket_path(config_path: Option<&PathBuf>) -> PathBuf {
@@ -108,6 +149,21 @@ fn run_validate_config(config_path: Option<PathBuf>) -> i32 {
 }
 
 fn run_server(config_path: Option<PathBuf>, headless: bool) -> i32 {
+    // Resolve the config path the daemon would use, so setup writes to the right place.
+    let effective_path = config_path
+        .clone()
+        .or_else(paths::config_path)
+        .or_else(paths::default_config_path);
+
+    if let Some(ref path) = effective_path {
+        if !path.exists() && !headless {
+            if let Err(e) = first_time_setup(path) {
+                eprintln!("Setup failed: {e}");
+                return 1;
+            }
+        }
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -119,6 +175,62 @@ fn run_server(config_path: Option<PathBuf>, headless: bool) -> i32 {
     };
 
     rt.block_on(daemon::run(options))
+}
+
+/// Interactively prompt for OBS connection details and write a minimal config file.
+fn first_time_setup(config_path: &std::path::Path) -> std::io::Result<()> {
+    eprintln!("No config found at {}.", config_path.display());
+    eprintln!("Let's create a minimal config.\n");
+
+    let stdin = std::io::stdin();
+    let mut buf = String::new();
+
+    let host = prompt_line(&stdin, &mut buf, "OBS host", "127.0.0.1")?;
+    let port_str = prompt_line(&stdin, &mut buf, "OBS port", "4455")?;
+    let port: u16 = port_str.parse().unwrap_or_else(|_| {
+        eprintln!("  Invalid port, using 4455.");
+        4455
+    });
+    let password = prompt_line(&stdin, &mut buf, "OBS WebSocket password (blank = no auth)", "")?;
+
+    let mut config = crate::config::model::Config::default();
+    config.connection.host = host;
+    config.connection.port = port;
+    config.connection.password_env = String::new();
+    if !password.is_empty() {
+        config.connection.password = Some(password);
+    }
+
+    crate::config::writer::write(&config, config_path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+    eprintln!("\nConfig written to {}.\n", config_path.display());
+    Ok(())
+}
+
+fn prompt_line(
+    stdin: &std::io::Stdin,
+    buf: &mut String,
+    label: &str,
+    default: &str,
+) -> std::io::Result<String> {
+    use std::io::{BufRead as _, Write as _};
+
+    if default.is_empty() {
+        eprint!("  {label}: ");
+    } else {
+        eprint!("  {label} [{default}]: ");
+    }
+    std::io::stderr().flush()?;
+
+    buf.clear();
+    stdin.lock().read_line(buf)?;
+    let trimmed = buf.trim().to_string();
+    Ok(if trimmed.is_empty() {
+        default.to_string()
+    } else {
+        trimmed
+    })
 }
 
 fn run_tui(config_path: Option<PathBuf>) -> i32 {
@@ -258,6 +370,8 @@ fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> 
         Commands::Vol { target, percent } => ctx.set_volume(&target, percent),
         Commands::DumpConfig => ctx.dump_config(),
         Commands::ReloadConfig => ctx.reload_config(),
+        Commands::ToggleStream => ctx.toggle_stream(),
+        Commands::ToggleRecord => ctx.toggle_record(),
         // Already handled above
         Commands::Init
         | Commands::ValidateConfig

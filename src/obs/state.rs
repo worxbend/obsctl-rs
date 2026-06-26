@@ -9,6 +9,8 @@ pub struct ObsSnapshot {
     pub current_scene: Option<String>,
     pub scenes: Vec<SceneState>,
     pub audio_inputs: Vec<AudioState>,
+    pub streaming: bool,
+    pub recording: bool,
     pub last_error: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
@@ -23,6 +25,8 @@ impl Default for ObsSnapshot {
             current_scene: None,
             scenes: Vec::new(),
             audio_inputs: Vec::new(),
+            streaming: false,
+            recording: false,
             last_error: None,
             updated_at: OffsetDateTime::now_utc(),
         }
@@ -36,6 +40,7 @@ pub struct SceneState {
     pub shortcut: Option<String>,
     pub group: Option<String>,
     pub active: bool,
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

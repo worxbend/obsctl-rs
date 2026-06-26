@@ -2,6 +2,17 @@
 
 A local OBS Studio controller for obs-websocket 5.x, written in Rust with Ratatui.
 
+## TUI
+
+![obsctl-rs TUI](docs/images/tui-screenshot.png)
+
+The TUI provides a real-time dashboard with:
+- **Scenes panel** (`s` to focus) — navigate with `j`/`k` or arrow keys, `Enter` to switch
+- **Audio panel** (`a` to focus) — `m` to mute/unmute, `h`/`l` or `←`/`→` to adjust volume ±5%, cava-style live level bars
+- **Logs panel** — streaming server and OBS event log
+- **Command palette** (`/` or `:`) — `/scene`, `/mute`, `/vol`, `/stream`, `/rec`
+- **Header** — daemon/OBS connection status, active scene, LIVE and REC indicators
+
 ## Architecture
 
 ```

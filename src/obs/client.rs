@@ -35,6 +35,16 @@ pub enum ObsEvent {
         volume_mul: f64,
         volume_db: f64,
     },
+    /// High-frequency (~60 fps) per-input RMS magnitude, linear 0-1 scale.
+    InputVolumeMeters {
+        inputs: Vec<(String, f32)>,
+    },
+    StreamStateChanged {
+        active: bool,
+    },
+    RecordStateChanged {
+        active: bool,
+    },
     Other {
         event_type: String,
         data: Value,
@@ -91,14 +101,15 @@ type WsStream = futures_util::stream::SplitStream<
 >;
 
 /// Complete the WebSocket handshake, spawning the client task.
-/// Returns the client handle on success.
+/// Returns `(client, obs_studio_version, obs_websocket_version, disconnect_rx)`.
+/// `disconnect_rx` resolves when the underlying WebSocket task exits (OBS disconnect).
 pub async fn handshake(
     mut sink: WsSink,
     mut stream: WsStream,
     password: Option<&str>,
     event_tx: mpsc::Sender<ObsEvent>,
     request_timeout_ms: u64,
-) -> Result<(ObsClient, String, String)> {
+) -> Result<(ObsClient, String, String, tokio::sync::oneshot::Receiver<()>)> {
     use crate::obs::protocol::{HelloData, IdentifyData, OPCODE_HELLO, OPCODE_IDENTIFIED};
 
     // 1. Read Hello
@@ -130,7 +141,8 @@ pub async fn handshake(
         d: serde_json::to_value(IdentifyData {
             rpc_version: 1,
             authentication,
-            event_subscriptions: Some(13), // General=1, Scenes=4, Inputs=8
+            // General=1 | Scenes=4 | Inputs=8 | Outputs=64 | InputVolumeMeters=65536
+            event_subscriptions: Some(65613),
         })
         .map_err(|e| ObsctlError::ConnectionFailed(format!("serialize Identify: {e}")))?,
     };
@@ -148,9 +160,11 @@ pub async fn handshake(
     }
 
     // Spawn the client task with a cancel channel for timeout cleanup.
+    // The disconnect_tx is dropped when the task exits, signalling disconnect_rx.
     let (req_tx, req_rx) = mpsc::channel::<ObsClientRequest>(64);
     let (cancel_tx, cancel_rx) = mpsc::channel::<String>(64);
-    tokio::spawn(run_client_task(sink, stream, req_rx, cancel_rx, event_tx));
+    let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(run_client_task(sink, stream, req_rx, cancel_rx, event_tx, disconnect_tx));
 
     let client = ObsClient {
         sender: req_tx,
@@ -166,7 +180,7 @@ pub async fn handshake(
         .unwrap_or("unknown")
         .to_string();
 
-    Ok((client, obs_studio_version, obs_ws_version))
+    Ok((client, obs_studio_version, obs_ws_version, disconnect_rx))
 }
 
 pub(crate) async fn read_ws_message(stream: &mut WsStream) -> Result<ObsMessage> {
@@ -200,6 +214,7 @@ async fn run_client_task(
     mut req_rx: mpsc::Receiver<ObsClientRequest>,
     mut cancel_rx: mpsc::Receiver<String>,
     event_tx: mpsc::Sender<ObsEvent>,
+    _disconnect_tx: tokio::sync::oneshot::Sender<()>,
 ) {
     let mut pending: HashMap<String, oneshot::Sender<Result<Value>>> = HashMap::new();
 
@@ -373,6 +388,46 @@ async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
                 .get("inputVolumeDb")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(f64::NEG_INFINITY),
+        },
+        "InputVolumeMeters" => {
+            let inputs = event_data
+                .get("inputs")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|input| {
+                            let name = input
+                                .get("inputName")
+                                .and_then(|n| n.as_str())?
+                                .to_string();
+                            let levels = input
+                                .get("inputLevelsMul")
+                                .and_then(|l| l.as_array())?;
+                            // Take max magnitude (index 0) across all channels.
+                            let max_mag = levels
+                                .iter()
+                                .filter_map(|ch| {
+                                    ch.as_array()?.first()?.as_f64().map(|v| v as f32)
+                                })
+                                .fold(0.0f32, f32::max);
+                            Some((name, max_mag))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ObsEvent::InputVolumeMeters { inputs }
+        }
+        "StreamStateChanged" => ObsEvent::StreamStateChanged {
+            active: event_data
+                .get("outputActive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        },
+        "RecordStateChanged" => ObsEvent::RecordStateChanged {
+            active: event_data
+                .get("outputActive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         },
         _ => ObsEvent::Other {
             event_type,

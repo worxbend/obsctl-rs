@@ -42,11 +42,11 @@ impl ObsConnectionParams {
 }
 
 /// Connect to OBS WebSocket, complete the handshake, and return a client handle.
-/// Returns `(client, obs_studio_version, obs_websocket_version)`.
+/// Returns `(client, obs_studio_version, obs_websocket_version, disconnect_rx)`.
 pub async fn connect(
     params: &ObsConnectionParams,
     event_tx: mpsc::Sender<ObsEvent>,
-) -> Result<(ObsClient, String, String)> {
+) -> Result<(ObsClient, String, String, tokio::sync::oneshot::Receiver<()>)> {
     let (ws_stream, _) = tokio::time::timeout(
         std::time::Duration::from_millis(params.connect_timeout_ms),
         tokio_tungstenite::connect_async(&params.url),

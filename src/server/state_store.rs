@@ -87,6 +87,9 @@ impl StateStore {
                 s.alias = cfg.alias.clone();
                 s.shortcut = cfg.shortcut.clone();
                 s.group = cfg.group.clone();
+                s.hidden = cfg.hidden;
+            } else {
+                s.hidden = false;
             }
         }
         for a in guard.audio_inputs.iter_mut() {
@@ -171,6 +174,24 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                 false
             }
         }
+        ObsEvent::StreamStateChanged { active } => {
+            if snapshot.streaming == active {
+                return false;
+            }
+            snapshot.streaming = active;
+            snapshot.updated_at = OffsetDateTime::now_utc();
+            true
+        }
+        ObsEvent::RecordStateChanged { active } => {
+            if snapshot.recording == active {
+                return false;
+            }
+            snapshot.recording = active;
+            snapshot.updated_at = OffsetDateTime::now_utc();
+            true
+        }
+        // High-frequency; don't update the snapshot or broadcast.
+        ObsEvent::InputVolumeMeters { .. } => false,
         ObsEvent::Other { .. } => false,
     }
 }
@@ -184,6 +205,8 @@ pub fn build_snapshot(
     inputs_raw: &[(String, Option<bool>, Option<f64>)],
     scene_cfgs: &[SceneConfig],
     audio_cfgs: &[AudioInputConfig],
+    streaming: bool,
+    recording: bool,
 ) -> ObsSnapshot {
     let raw_scenes: Vec<Value> = scenes_raw.as_array().cloned().unwrap_or_default();
 
@@ -198,6 +221,7 @@ pub fn build_snapshot(
                 shortcut: cfg.and_then(|c| c.shortcut.clone()),
                 group: cfg.and_then(|c| c.group.clone()),
                 active: name == current_scene,
+                hidden: cfg.map(|c| c.hidden).unwrap_or(false),
             }
         })
         .collect();
@@ -227,6 +251,8 @@ pub fn build_snapshot(
         current_scene: Some(current_scene.to_string()),
         scenes,
         audio_inputs,
+        streaming,
+        recording,
         last_error: None,
         updated_at: OffsetDateTime::now_utc(),
     }

@@ -55,9 +55,10 @@ async fn connect_to_fake_with_timeout(
         .0;
     let (sink, stream) = futures_util::StreamExt::split(ws_stream);
     let (ev_tx, ev_rx) = mpsc::channel(32);
-    let (client, studio_ver, ws_ver) = handshake(sink, stream, password, ev_tx, request_timeout_ms)
-        .await
-        .expect("handshake");
+    let (client, studio_ver, ws_ver, _disconnect) =
+        handshake(sink, stream, password, ev_tx, request_timeout_ms)
+            .await
+            .expect("handshake");
     (client, studio_ver, ws_ver, ev_rx)
 }
 

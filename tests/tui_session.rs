@@ -24,6 +24,8 @@ fn make_snapshot(connected: bool) -> ObsSnapshot {
             volume_percent: Some(80),
             ..Default::default()
         }],
+        streaming: false,
+        recording: false,
         last_error: None,
         updated_at: OffsetDateTime::now_utc(),
     }

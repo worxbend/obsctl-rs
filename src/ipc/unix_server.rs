@@ -238,8 +238,19 @@ async fn handle_line(
                 };
                 if command_tx.send(dispatch).await.is_ok() {
                     tokio::spawn(async move {
-                        if let Ok(snapshot) = reply_rx.await {
-                            send_encoded(&snapshot, &write_tx).await;
+                        // get_snapshot returns a Response; re-wrap the payload as a
+                        // state Event so next_event() on the client side accepts it.
+                        if let Ok(ServerMessage::Response {
+                            ok: true,
+                            result: Some(data),
+                            ..
+                        }) = reply_rx.await
+                        {
+                            let state_event = ServerMessage::Event {
+                                topic: TOPIC_STATE.to_string(),
+                                data,
+                            };
+                            send_encoded(&state_event, &write_tx).await;
                         }
                     });
                 }

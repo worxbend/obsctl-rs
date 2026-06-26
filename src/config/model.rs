@@ -138,6 +138,8 @@ pub struct SceneConfig {
     pub group: Option<String>,
     #[serde(default)]
     pub stale: bool,
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

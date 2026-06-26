@@ -87,6 +87,8 @@ impl CommandExecutor {
             "reconnect_obs" => self.cmd_reconnect_obs().await,
             "shutdown_server" => self.cmd_shutdown_server().await,
             "dump_config" => self.cmd_dump_config().await,
+            "toggle_stream" => self.cmd_toggle_stream().await,
+            "toggle_record" => self.cmd_toggle_record().await,
             other => Err(ObsctlError::CommandParseError(format!(
                 "unknown command: {other}"
             ))),
@@ -256,6 +258,32 @@ impl CommandExecutor {
             .request(requests::set_input_volume(&obs_name, vol_mul))
             .await?;
         Ok(json!({ "message": format!("volume set to {percent}%: {obs_name}") }))
+    }
+
+    async fn cmd_toggle_stream(&self) -> crate::domain::result::Result<Value> {
+        let client = self.require_obs().await?;
+        let result = client.request(requests::toggle_stream()).await?;
+        let active = result.get("outputActive").and_then(|v| v.as_bool());
+        let state = match active {
+            Some(true) => "started",
+            Some(false) => "stopped",
+            None => "toggled",
+        };
+        info!("Streaming {state}");
+        Ok(json!({ "message": format!("streaming {state}") }))
+    }
+
+    async fn cmd_toggle_record(&self) -> crate::domain::result::Result<Value> {
+        let client = self.require_obs().await?;
+        let result = client.request(requests::toggle_record()).await?;
+        let active = result.get("outputActive").and_then(|v| v.as_bool());
+        let state = match active {
+            Some(true) => "started",
+            Some(false) => "stopped",
+            None => "toggled",
+        };
+        info!("Recording {state}");
+        Ok(json!({ "message": format!("recording {state}") }))
     }
 
     async fn cmd_dump_config(&self) -> crate::domain::result::Result<Value> {

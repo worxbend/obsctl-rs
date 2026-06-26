@@ -1,0 +1,117 @@
+# obsctl configuration example
+# Copy to ~/.config/obsctl/config.yml or point to it with --config / OBSCTL_CONFIG=
+#
+# All fields are optional and fall back to the defaults shown here.
+
+version: 1
+
+# ── Daemon / IPC ──────────────────────────────────────────────────────────────
+server:
+  # Unix socket path. Defaults to $XDG_RUNTIME_DIR/obsctl/obsctl.sock
+  # socket_path: /run/user/1000/obsctl/obsctl.sock
+
+  # PID file written by the daemon (optional, not required for normal use).
+  # pid_file: /run/user/1000/obsctl/obsctl.pid
+
+  # Allow 'obsctl shutdown-server' to stop the daemon remotely.
+  allow_remote_shutdown: false
+
+  # Auto-start the daemon when a CLI/TUI command can't reach it.
+  start_embedded_if_missing: true
+
+# ── OBS WebSocket connection ───────────────────────────────────────────────────
+connection:
+  host: "127.0.0.1"
+  port: 4455
+
+  # Name of the environment variable that holds the OBS WebSocket password.
+  # Leave blank if OBS authentication is disabled.
+  password_env: "OBS_WEBSOCKET_PASSWORD"
+
+  # Alternatively, store the password directly (not recommended — use password_env instead).
+  # password: "your_password_here"
+
+  # How long to wait for the initial TCP+WebSocket connect to succeed (ms).
+  connect_timeout_ms: 3000
+
+  # How long to wait for a single OBS request to respond (ms).
+  request_timeout_ms: 2500
+
+# ── Reconnect policy ──────────────────────────────────────────────────────────
+reconnect:
+  # Enable automatic reconnection when OBS disconnects.
+  enabled: true
+
+  # Keep retrying indefinitely (ignores max_attempts if set).
+  endless: true
+
+  # Delay before the first reconnect attempt (ms).
+  initial_delay_ms: 500
+
+  # Maximum delay between attempts after backoff (ms).
+  max_delay_ms: 10000
+
+  # Backoff multiplier applied to each successive delay.
+  multiplier: 1.8
+
+  # Random jitter added to each delay to avoid thundering herd (ms).
+  jitter_ms: 250
+
+# ── TUI appearance ────────────────────────────────────────────────────────────
+ui:
+  # How often the TUI redraws (ms).
+  refresh_interval_ms: 250
+
+  # Character that opens the command palette in the TUI.
+  command_palette_prefix: "/"
+
+  # Show Unicode icons in the TUI scene/audio lists.
+  show_icons: true
+
+  # Color theme (currently only "default" is supported).
+  theme: "default"
+
+# ── Scene aliases ──────────────────────────────────────────────────────────────
+# Map OBS scene names to short aliases and optional single-key shortcuts.
+# Use 'obsctl dump-config' to auto-populate this list from OBS.
+#
+# Alias resolution order: shortcut → exact alias → exact OBS name →
+#   case-insensitive alias → case-insensitive OBS name.
+# Ambiguous matches (multiple hits) return an error without sending any request.
+scenes:
+  - name: "Main Scene"
+    alias: "main"
+    shortcut: "1"
+  - name: "BRB"
+    alias: "brb"
+    shortcut: "2"
+  # - name: "Starting Soon"
+  #   alias: "start"
+  #   shortcut: "3"
+  #   group: "live"   # informational label, not used for routing
+  # - name: "Helper Overlay"
+  #   alias: "helper"
+  #   hidden: true    # hidden scenes are excluded from the TUI list but still
+  #                   # reachable via alias in commands and the command palette
+
+# ── Audio input aliases ────────────────────────────────────────────────────────
+# Map OBS input names to short aliases and optional shortcuts.
+# Use 'obsctl dump-config' to auto-populate from OBS.
+audio:
+  inputs:
+    - name: "Mic/Aux"
+      alias: "mic"
+      shortcut: "m"
+    - name: "Desktop Audio"
+      alias: "desktop"
+      shortcut: "d"
+    # - name: "Browser"
+    #   alias: "browser"
+
+# ── TUI key bindings ──────────────────────────────────────────────────────────
+# Each binding is a list of key strings. Supported modifiers: ctrl+, shift+.
+keymap:
+  quit: ["q", "ctrl+c"]
+  command_palette: ["/", ":"]
+  reload_config: ["r"]
+  dump_config: ["D"]

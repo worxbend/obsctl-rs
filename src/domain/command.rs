@@ -17,4 +17,6 @@ pub enum Command {
     Unmute { target: String },
     ToggleMute { target: String },
     SetVolume { target: String, percent: u8 },
+    ToggleStream,
+    ToggleRecord,
 }

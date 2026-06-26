@@ -11,9 +11,17 @@ pub struct Cli {
         long,
         global = true,
         value_name = "LEVEL",
-        help = "Log level: debug|info|warn|error"
+        help = "Log level: trace|debug|info|warn|error"
     )]
     pub log_level: Option<String>,
+
+    #[arg(
+        short = 'v',
+        long,
+        global = true,
+        help = "Enable debug logging (shorthand for --log-level debug)"
+    )]
+    pub verbose: bool,
 
     #[arg(
         long,
@@ -66,6 +74,10 @@ pub enum Commands {
     },
     DumpConfig,
     ReloadConfig,
+    #[command(alias = "stream")]
+    ToggleStream,
+    #[command(alias = "record")]
+    ToggleRecord,
     Service {
         #[command(subcommand)]
         action: ServiceAction,

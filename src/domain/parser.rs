@@ -24,6 +24,8 @@ pub fn parse(input: &str) -> Result<Command> {
         "connect" => expect_args(args, 0, "connect", Command::Connect),
         "disconnect" => expect_args(args, 0, "disconnect", Command::Disconnect),
         "shutdown-server" => expect_args(args, 0, "shutdown-server", Command::ShutdownServer),
+        "stream" => expect_args(args, 0, "stream", Command::ToggleStream),
+        "rec" | "record" => expect_args(args, 0, "rec", Command::ToggleRecord),
         "scene" | "set-scene" => {
             if args.len() != 1 {
                 return Err(ObsctlError::CommandParseError(format!(

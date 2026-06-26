@@ -35,6 +35,20 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         Span::raw("")
     };
 
+    let streaming = model.snapshot.as_ref().map(|s| s.streaming).unwrap_or(false);
+    let recording = model.snapshot.as_ref().map(|s| s.recording).unwrap_or(false);
+
+    let stream_span = if streaming {
+        Span::styled("  ● LIVE", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled("  ○ LIVE:off", Style::default().fg(Color::DarkGray))
+    };
+    let rec_span = if recording {
+        Span::styled("  ⏺ REC", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled("  ○ REC:off", Style::default().fg(Color::DarkGray))
+    };
+
     let line = Line::from(vec![
         Span::styled(
             "obsctl",
@@ -47,6 +61,8 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         Span::raw("  "),
         obs_status,
         scene_span,
+        stream_span,
+        rec_span,
     ]);
 
     let block = Block::default().borders(Borders::ALL).title(" obsctl-rs ");

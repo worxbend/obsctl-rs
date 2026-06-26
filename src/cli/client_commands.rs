@@ -151,6 +151,14 @@ impl ProxyCtx {
         self.run_proxy(simple_cmd("reload_config"))
     }
 
+    pub fn toggle_stream(&self) -> i32 {
+        self.run_proxy(simple_cmd("toggle_stream"))
+    }
+
+    pub fn toggle_record(&self) -> i32 {
+        self.run_proxy(simple_cmd("toggle_record"))
+    }
+
     pub fn validate_config(&self) -> i32 {
         self.run_proxy(simple_cmd("validate_config"))
     }

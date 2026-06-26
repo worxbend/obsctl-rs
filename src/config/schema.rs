@@ -75,8 +75,8 @@ pub fn validate(config: &Config) -> Result<Vec<ValidationWarning>> {
     if !config.connection.password_env.is_empty()
         && std::env::var(&config.connection.password_env).is_err()
     {
-        return Err(ObsctlError::ConfigInvalid(format!(
-            "password_env {} is not set",
+        warnings.push(ValidationWarning(format!(
+            "password_env {} is not set; will connect without a password",
             config.connection.password_env
         )));
     }
@@ -245,11 +245,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_password_env_var() {
+    fn missing_password_env_warns_but_does_not_fail() {
         let mut c = Config::default();
-        // Use a very unlikely env var name that definitely won't be set
         c.connection.password_env = "OBSCTL_SCHEMA_TEST_NONEXISTENT_VAR_F7D3C2A1B0".to_string();
-        assert!(validate(&c).is_err());
+        let warnings = validate(&c).unwrap();
+        assert!(!warnings.is_empty());
+        assert!(warnings.iter().any(|w| w.0.contains("not set")));
     }
 
     #[test]

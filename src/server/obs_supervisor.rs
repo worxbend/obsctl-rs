@@ -58,7 +58,7 @@ impl ObsSupervisor {
             let mut policy = ReconnectPolicy::new(reconnect_cfg);
 
             match self.attempt_connect(&params).await {
-                Ok((client, obs_version, ws_version)) => {
+                Ok((client, obs_version, ws_version, disconnect_rx)) => {
                     info!("OBS connected: studio={obs_version} ws={ws_version}");
                     self.publish_log(
                         LogLevel::Info,
@@ -77,7 +77,7 @@ impl ObsSupervisor {
                     *self.obs_handle.lock().await = Some(client);
 
                     // Wait until OBS disconnects or reconnect/shutdown is requested
-                    let reason = self.wait_for_disconnect().await;
+                    let reason = self.wait_for_disconnect(disconnect_rx).await;
                     *self.obs_handle.lock().await = None;
 
                     match reason {
@@ -95,6 +95,13 @@ impl ObsSupervisor {
                                 .mark_disconnected(Some("reconnect requested".to_string()))
                                 .await;
                             continue;
+                        }
+                        DisconnectReason::ObsDisconnected => {
+                            self.publish_log(LogLevel::Warn, "OBS WebSocket closed");
+                            self.state
+                                .mark_disconnected(Some("OBS disconnected".to_string()))
+                                .await;
+                            // Fall through to the reconnect delay loop below.
                         }
                     }
                 }
@@ -148,13 +155,15 @@ impl ObsSupervisor {
     async fn attempt_connect(
         &self,
         params: &ObsConnectionParams,
-    ) -> crate::domain::result::Result<(ObsClient, String, String)> {
+    ) -> crate::domain::result::Result<(ObsClient, String, String, tokio::sync::oneshot::Receiver<()>)> {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ObsEvent>(64);
         let state_clone = self.state.clone();
         let hub = Arc::clone(&self.hub);
 
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
+                // Log notable remote OBS changes before applying them.
+                log_obs_event(&hub, &event);
                 state_clone.apply_event(event.clone()).await;
                 if let Some(payload) = normalize_obs_event(&event) {
                     hub.publish_obs_event(payload);
@@ -215,6 +224,20 @@ impl ObsSupervisor {
             inputs.push((name.clone(), muted, vol));
         }
 
+        let streaming = client
+            .request(requests::get_stream_status())
+            .await
+            .ok()
+            .and_then(|v| v.get("outputActive").and_then(|b| b.as_bool()))
+            .unwrap_or(false);
+
+        let recording = client
+            .request(requests::get_record_status())
+            .await
+            .ok()
+            .and_then(|v| v.get("outputActive").and_then(|b| b.as_bool()))
+            .unwrap_or(false);
+
         let cfg = self.config.lock().await;
         let snapshot = build_snapshot(
             obs_version,
@@ -224,6 +247,8 @@ impl ObsSupervisor {
             &inputs,
             &cfg.scenes,
             &cfg.audio.inputs,
+            streaming,
+            recording,
         );
         drop(cfg);
 
@@ -231,12 +256,15 @@ impl ObsSupervisor {
         Ok(())
     }
 
-    async fn wait_for_disconnect(&mut self) -> DisconnectReason {
-        // We detect OBS disconnect indirectly: the client task drops its channel
-        // when the WebSocket closes. We poll for shutdown or explicit reconnect
-        // requests here. A more complete impl would use a health check ticker.
+    async fn wait_for_disconnect(
+        &mut self,
+        mut disconnect: tokio::sync::oneshot::Receiver<()>,
+    ) -> DisconnectReason {
         loop {
             tokio::select! {
+                _ = &mut disconnect => {
+                    return DisconnectReason::ObsDisconnected;
+                }
                 _ = self.shutdown.changed() => {
                     if *self.shutdown.borrow() {
                         return DisconnectReason::Shutdown;
@@ -259,4 +287,48 @@ impl ObsSupervisor {
 enum DisconnectReason {
     Shutdown,
     ReconnectRequested,
+    ObsDisconnected,
+}
+
+fn log_obs_event(hub: &BroadcastHub, event: &ObsEvent) {
+    use crate::obs::client::ObsEvent::*;
+    let msg: Option<String> = match event {
+        CurrentProgramSceneChanged { scene_name } => {
+            Some(format!("OBS: scene changed → {scene_name}"))
+        }
+        SceneListChanged => Some("OBS: scene list changed".to_string()),
+        InputCreated { input_name } => Some(format!("OBS: input created: {input_name}")),
+        InputRemoved { input_name } => Some(format!("OBS: input removed: {input_name}")),
+        InputMuteStateChanged { input_name, muted } => {
+            let state = if *muted { "muted" } else { "unmuted" };
+            Some(format!("OBS: {input_name} {state}"))
+        }
+        InputVolumeChanged {
+            input_name,
+            volume_db,
+            ..
+        } => {
+            let db = if volume_db.is_finite() {
+                format!("{volume_db:.1} dB")
+            } else {
+                "-∞ dB".to_string()
+            };
+            Some(format!("OBS: volume changed: {input_name} → {db}"))
+        }
+        StreamStateChanged { active } => {
+            let state = if *active { "started" } else { "stopped" };
+            Some(format!("OBS: streaming {state}"))
+        }
+        RecordStateChanged { active } => {
+            let state = if *active { "started" } else { "stopped" };
+            Some(format!("OBS: recording {state}"))
+        }
+        // High-frequency or uninteresting — don't flood the log.
+        InputVolumeMeters { .. } | Other { .. } => None,
+    };
+    if let Some(m) = msg {
+        hub.publish_log(
+            LogEvent::new(LogLevel::Info, m).with_target("obsctl_rs::server::obs_supervisor"),
+        );
+    }
 }

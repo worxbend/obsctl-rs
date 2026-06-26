@@ -436,7 +436,7 @@ async fn obs_command_timeout_returns_request_timeout_ipc_code_and_exit_4() {
     cfg.connection.request_timeout_ms = TIMEOUT_MS;
     let params = ObsConnectionParams::from_config(&cfg.connection);
     let (event_tx, _event_rx) = mpsc::channel(8);
-    let (obs_client, _, _) = connect(&params, event_tx).await.unwrap();
+    let (obs_client, _, _, _disconnect) = connect(&params, event_tx).await.unwrap();
 
     let snapshot = ObsSnapshot {
         connected: true,

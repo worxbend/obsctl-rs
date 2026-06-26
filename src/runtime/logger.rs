@@ -48,9 +48,10 @@ pub fn init_server(level: &str, log_file: Option<PathBuf>) {
         .try_init();
 }
 
-/// Minimal tracing init for CLI/TUI mode (stderr only, info level).
-pub fn init_cli() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+/// Minimal tracing init for CLI/TUI mode (stderr only).
+/// `level` is an `EnvFilter`-compatible string such as "debug" or "warn".
+pub fn init_cli(level: &str) {
+    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("warn"));
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_writer(std::io::stderr).with_ansi(true))

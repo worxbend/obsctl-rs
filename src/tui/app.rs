@@ -16,7 +16,7 @@ use crate::{
         event_applier::apply_server_message,
         input::{TuiAction, handle_key},
         layout,
-        model::TuiModel,
+        model::{FocusPanel, TuiModel},
         session::{TuiEventSession, send_command},
         widgets,
     },
@@ -83,19 +83,21 @@ async fn run_loop(
             }
 
             maybe_ipc = ipc_rx.recv() => {
-                match maybe_ipc {
-                    Some(Ok(msg)) => {
-                        apply_server_message(&mut model, msg);
-                    }
+                let needs_redraw = match maybe_ipc {
+                    Some(Ok(msg)) => apply_server_message(&mut model, msg),
                     Some(Err(e)) => {
                         model.connected_to_daemon = false;
                         model.last_result = Some(format!("Daemon disconnected: {e}"));
+                        true
                     }
                     None => {
                         model.connected_to_daemon = false;
+                        true
                     }
+                };
+                if needs_redraw {
+                    terminal.draw(|f| render(f, &model))?;
                 }
-                terminal.draw(|f| render(f, &model))?;
             }
 
             maybe_event = events.next() => {
@@ -136,6 +138,61 @@ async fn run_loop(
                                 TuiAction::DumpConfig => {
                                     let result = send_simple(socket_path, "dump_config").await;
                                     model.last_result = Some(result);
+                                }
+                                TuiAction::FocusScenes => {
+                                    model.focus = FocusPanel::Scenes;
+                                }
+                                TuiAction::FocusAudio => {
+                                    model.focus = FocusPanel::Audio;
+                                }
+                                TuiAction::NavUp => {
+                                    model.move_up();
+                                }
+                                TuiAction::NavDown => {
+                                    model.move_down();
+                                }
+                                TuiAction::ActivateScene => {
+                                    if let Some(name) =
+                                        model.focused_scene().map(|s| s.name.clone())
+                                    {
+                                        let result =
+                                            send_simple_with_target(socket_path, "set_scene", &name)
+                                                .await;
+                                        model.last_result = Some(result);
+                                    }
+                                }
+                                TuiAction::ToggleMute => {
+                                    if let Some(name) =
+                                        model.focused_audio().map(|a| a.name.clone())
+                                    {
+                                        let result = send_simple_with_target(
+                                            socket_path,
+                                            "toggle_mute",
+                                            &name,
+                                        )
+                                        .await;
+                                        model.last_result = Some(result);
+                                    }
+                                }
+                                TuiAction::VolumeDown => {
+                                    if let Some(a) = model.focused_audio() {
+                                        let name = a.name.clone();
+                                        let current = a.volume_percent.unwrap_or(50);
+                                        let new_vol = current.saturating_sub(5);
+                                        let result =
+                                            send_set_volume(socket_path, &name, new_vol).await;
+                                        model.last_result = Some(result);
+                                    }
+                                }
+                                TuiAction::VolumeUp => {
+                                    if let Some(a) = model.focused_audio() {
+                                        let name = a.name.clone();
+                                        let current = a.volume_percent.unwrap_or(50);
+                                        let new_vol = (current + 5).min(100);
+                                        let result =
+                                            send_set_volume(socket_path, &name, new_vol).await;
+                                        model.last_result = Some(result);
+                                    }
                                 }
                                 TuiAction::RetryConnect => {
                                     match TuiEventSession::connect(socket_path).await {
@@ -246,8 +303,9 @@ async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
         Err(e) => format!("error: {e}"),
         Ok(Command::Quit) => "quit".to_string(),
         Ok(Command::Help) => {
-            "Commands: /scene /mute /unmute /toggle-mute /vol /status /obs-status \
-             /server-status /reload-config /dump-config /validate-config /reconnect /quit"
+            "Commands: /scene /mute /unmute /toggle-mute /vol /stream /rec /status \
+             /obs-status /server-status /reload-config /dump-config /validate-config \
+             /reconnect /quit"
                 .to_string()
         }
         Ok(cmd) => {
@@ -296,11 +354,67 @@ fn command_to_payload(cmd: Command) -> CommandPayload {
             "set_volume",
             serde_json::json!({ "target": target, "percent": percent }),
         ),
+        Command::ToggleStream => ("toggle_stream", serde_json::Value::Null),
+        Command::ToggleRecord => ("toggle_record", serde_json::Value::Null),
         Command::Help | Command::Quit => unreachable!("handled before"),
     };
     CommandPayload {
         name: name.to_string(),
         args,
+    }
+}
+
+async fn send_simple_with_target(socket_path: &Path, name: &str, target: &str) -> String {
+    let payload = CommandPayload {
+        name: name.to_string(),
+        args: serde_json::json!({ "target": target }),
+    };
+    match send_command(socket_path, payload).await {
+        Ok(ServerMessage::Response {
+            ok, result, error, ..
+        }) => {
+            if ok {
+                result
+                    .as_ref()
+                    .and_then(|v| v.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "ok".to_string())
+            } else {
+                error
+                    .map(|e| format!("error [{}]: {}", e.code, e.message))
+                    .unwrap_or_else(|| "error".to_string())
+            }
+        }
+        Ok(_) => "unexpected response".to_string(),
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+async fn send_set_volume(socket_path: &Path, target: &str, percent: u8) -> String {
+    let payload = CommandPayload {
+        name: "set_volume".to_string(),
+        args: serde_json::json!({ "target": target, "percent": percent }),
+    };
+    match send_command(socket_path, payload).await {
+        Ok(ServerMessage::Response {
+            ok, result, error, ..
+        }) => {
+            if ok {
+                result
+                    .as_ref()
+                    .and_then(|v| v.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("volume → {percent}%"))
+            } else {
+                error
+                    .map(|e| format!("error [{}]: {}", e.code, e.message))
+                    .unwrap_or_else(|| "error".to_string())
+            }
+        }
+        Ok(_) => "unexpected response".to_string(),
+        Err(e) => format!("error: {e}"),
     }
 }
 

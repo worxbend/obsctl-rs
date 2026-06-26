@@ -1,203 +1,436 @@
-# obsctl-rs Plan
+# obsctl-rs Refactoring Plan
 
-## Current Status
+Concrete, actionable improvements grouped by theme. Each item names the file, the function/lines
+affected, the problem, and the fix. Priority is H/M/L.
 
-`obsctl-rs` is a Rust + Tokio + Ratatui OBS Studio controller with the intended daemon-first architecture:
+---
 
-```text
-OBS Studio <---- obs-websocket 5.x ----> obsctl server <---- Unix socket IPC ----> obsctl tui
-                                                               <---- Unix socket IPC ----> obsctl CLI
+## 1. Duplication — extract repeated patterns
+
+### H — `tui/app.rs`: duplicated session-forwarder spawn block
+`run_loop` lines 54–68 and `TuiAction::RetryConnect` lines 203–217 are identical
+`tokio::spawn` loops that forward `TuiEventSession` events into `ipc_tx`.
+```rust
+// extract to:
+fn spawn_session_forwarder(
+    mut session: TuiEventSession,
+    tx: mpsc::Sender<Result<ServerMessage, String>>,
+)
+```
+Both call sites become one line.
+
+### H — `tui/app.rs`: triplicated response-message extractor
+`send_simple` (line 421), `send_simple_with_target` (line 367), `send_set_volume` (line 394)
+all contain the same match arm:
+```rust
+Ok(ServerMessage::Response { ok, result, error, .. }) => {
+    if ok { result.get("message")... } else { error.map(...)... }
+}
+Ok(_) => "unexpected response"
+Err(e) => format!("error: {e}")
+```
+Extract:
+```rust
+fn format_ipc_response(res: Result<ServerMessage, impl Display>) -> String
+```
+Callers become 1–2 lines each.
+
+### H — `server/command_executor.rs`: repeated `AliasEntry` collection
+`cmd_set_scene` (line 150), `cmd_set_mute` (line 180), `cmd_toggle_mute` (line 206),
+`cmd_set_volume` (line 242) each build a `Vec<AliasEntry>` from the snapshot with identical
+`.iter().map(|x| AliasEntry { name: x.name.clone(), alias: x.alias.clone(), shortcut: x.shortcut.clone() }).collect()`.
+Extract two helpers on `ObsSnapshot` or `CommandExecutor`:
+```rust
+fn scene_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry>
+fn audio_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry>
 ```
 
-The normal-mode ownership rule remains mandatory: only `obsctl server` connects directly to OBS. CLI and TUI commands must stay thin IPC clients.
-
-Implemented and verified:
-
-- Config load/write/validation, legacy reconnect migration, dump-config merge, backups, and atomic writes.
-- Shared command parser, alias/shortcut resolution, and volume conversion.
-- Unix socket newline-delimited JSON IPC with typed request/response/event envelopes.
-- OBS WebSocket 5.x handshake, auth, request/response correlation, event dispatch, and configured request timeout.
-- Server daemon, state store, command executor, reconnect loop, IPC sessions, and systemd user service management.
-- CLI local/proxy commands, server-unavailable UX, and stable proxy `--json` envelopes.
-- Centralized public IPC error code taxonomy with documented CLI exit-code mapping.
-- `REQUEST_TIMEOUT` is distinct from `OBS_UNAVAILABLE` in server IPC responses, CLI mapping, tests, and README docs.
-- Ratatui TUI model/session/widgets with typed state and typed server log rendering.
-- Typed IPC `LogEvent` contract with `level`, `message`, optional `target`, and RFC3339 `timestamp`.
-- Explicit server-side typed log publication for selected daemon, supervisor, and command-executor events.
-- Normalized typed OBS event IPC payloads for known scene and audio events on the `events` topic while state updates continue on `state`.
-- Shared best-effort redaction policy for IPC error/log messages, CLI proxy output, and structured JSON secret fields.
-
-Latest verification:
-
-- `cargo fmt --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all-targets --all-features` with 225 tests passing
-
-## Review Findings From Latest Iteration
-
-Fully implemented:
-
-- OBS-to-public-event conversion now lives in `server::obs_event_adapter`; the `domain::events` cross-layer adapter was removed.
-- `ObsSupervisor` owns the conversion boundary: it applies the internal `ObsEvent` to state, then publishes an already-normalized `ObsEventPayload` only when the event is part of the public contract.
-- Dependency-boundary tests now cover all production IPC modules for OBS implementation imports and all production domain modules for IPC protocol or OBS-client imports.
-- Boundary guard matcher tests cover direct, package-qualified, bare, and grouped import forms such as `crate::obs::{client::ObsEvent}` and `obsctl_rs::{ipc::{protocol::ServerMessage}}`.
-- Server-path event coverage now exercises every public `ObsEventPayload` variant through fake OBS broadcasts: `CurrentProgramSceneChanged`, `SceneListChanged`, `InputCreated`, `InputRemoved`, `InputMuteStateChanged`, and `InputVolumeChanged`.
-- Unknown OBS events are covered through the real fake-OBS-to-IPC path and do not reach `events` subscribers before a subsequent known-event barrier.
-- The event-routing log negative assertion no longer uses a fixed quiet window; the test drains log events until an injected marker and checks the drained set.
-- Verification passes: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with 225 tests.
-
-Partial or incomplete:
-
-- The new boundary scanner only inspects `use` imports. Fully-qualified production references such as `crate::obs::client::ObsEvent` in type signatures or call sites can still bypass the guard.
-- Boundary-scanning code is duplicated across `tests/architecture_boundaries.rs` and `tests/dependency_boundaries.rs`, while an older literal-string thin-client check remains in `tests/server_integration.rs`.
-- The server-path event test is now broad but too monolithic; one long scenario covers every event, log routing, state routing, and unknown-event behavior, which makes future failures harder to localize.
-- `SceneListChanged` state handling remains weak: `StateStore::apply_event` returns `true` and broadcasts, but it does not refresh or update the scene list and does not update `updated_at`. The new test only checks that a state broadcast arrives with the old current scene, so stale scene-list data would pass.
-- `InputCreated` is treated as an audio input without using OBS input kind/type data. If OBS emits `InputCreated` for a non-audio source, the server can add it to `audio_inputs` incorrectly.
-- Unknown-event drop coverage uses a subsequent known event as the synchronization barrier. That is a reasonable deterministic improvement over sleeps, but the fake OBS/server path still lacks an explicit "event processed" acknowledgment.
-- Several older server and IPC integration helpers still use fixed sleeps for readiness and shutdown, and background tasks are still not joined or aborted deterministically.
-- The public event payload still intentionally lacks timestamps, raw OBS event names, mutation reasons, and stable event IDs. That is acceptable only if the current narrow contract is treated as deliberate compatibility surface.
-- Log broadcasting is still manual and sparse. Ordinary `tracing` records are not bridged to IPC, so the TUI log panel is not yet the full server log stream.
-- `reload_config` updates command execution config and snapshot metadata, but changed OBS host/password/reconnect settings still need reconnect-path coverage. `dump-config` still does not reuse the same reload-and-rebroadcast path after writing.
-- OBS supervisor still does not detect passive OBS disconnects by itself; it waits for shutdown or explicit reconnect while stale `ObsClient` handles can remain available until a later request fails.
-
-Regressions or compatibility risks:
-
-- The `events` topic is now a real public compatibility contract. Any payload shape change, dropped/added variant, or timestamp/reason addition needs tests and README changes in the same iteration.
-- The current state path can broadcast stale data for OBS scene-list mutations, making `state` subscribers believe the cache is fresh when it has not been refreshed.
-- The current input event model can conflate all OBS inputs with audio inputs, which risks incorrect TUI/CLI state after non-audio source creation/removal.
-- Import-boundary tests are stronger than before but can still miss fully-qualified references outside import lists, so they should not be treated as complete architecture enforcement yet.
-- Unknown OBS events are deliberately not observable to clients. This keeps the public contract small but means clients cannot inspect vendor or newly introduced OBS events until the project adds explicit variants.
-- Background test tasks and fake IPC/OBS servers still lack deterministic shutdown/join handles in several helpers, which can hide races or leak tasks across tests.
-- The repository still contains orchestration/planning artifacts whose ownership is unclear, including lowercase `plan.md` and JSONL telemetry files.
-
-## Next Iteration Priorities
-
-### P0: Make Event State Semantics Honest
-
-1. Refresh state after scene-list mutations.
-   - When `ObsEvent::SceneListChanged` arrives, have `ObsSupervisor` fetch a full snapshot from OBS before broadcasting state, or introduce an explicit stale/refresh-pending state if refresh fails.
-   - Ensure `updated_at` changes only when the snapshot is actually refreshed or intentionally marked stale.
-   - Add fake-OBS-to-IPC coverage proving a created/removed/renamed scene is reflected in the `state` snapshot, not just in the `events` topic.
-
-2. Correct input-created/input-removed state semantics.
-   - Use OBS input kind/type data or a full input-list refresh before adding new entries to `audio_inputs`.
-   - Decide whether the public `InputCreated`/`InputRemoved` payloads are all OBS inputs or audio-only inputs; update README and tests accordingly.
-   - Add coverage for a non-audio input creation so it does not silently appear as an audio input.
-
-3. Split and strengthen event routing integration tests.
-   - Separate positive event payload tests from state-cache tests and unknown-event negative tests.
-   - Keep marker/barrier synchronization, but prefer explicit fake-OBS/server acknowledgments where practical.
-   - Assert full state predicates for each event class so stale broadcasts cannot satisfy the test.
-
-### P0: Finish Architecture Guard Hardening
-
-4. Consolidate boundary guard implementation.
-   - Move duplicate source-scanning helpers from `tests/architecture_boundaries.rs` and `tests/dependency_boundaries.rs` into a shared test helper.
-   - Remove the older literal-string boundary test from `tests/server_integration.rs` once the dedicated boundary tests cover the same rule.
-   - Add self-tests for comments, strings, test-only modules, grouped imports, multiline imports, and fully-qualified production references.
-
-5. Catch fully-qualified boundary violations.
-   - Extend the guard to scan production source for forbidden paths outside `use` statements, or switch to a Rust parser-based approach if the string scanner keeps growing.
-   - Enforce at least these production boundaries: IPC must not reference `crate::obs`/`obsctl_rs::obs`; domain must not reference IPC protocol or OBS client implementation; CLI/TUI must not reference OBS implementation modules.
-
-### P1: Server Runtime Robustness
-
-6. Detect passive OBS disconnects in `ObsSupervisor`.
-   - Add an explicit connection-closed signal from the `ObsClient` task to supervisor.
-   - Clear `obs_handle`, mark state disconnected, publish a typed log event, and enter reconnect delay without waiting for another command.
-   - Add fake OBS server lifecycle coverage proving state changes when OBS closes the socket silently.
-
-7. Harden request-timeout cleanup.
-   - Cover multiple concurrent timeouts with late responses arriving out of order.
-   - Cover disconnect during an in-flight timeout and prove pending requests complete promptly.
-   - Update the fake OBS delayed-response path so one delayed response does not block reads for unrelated requests unless the test explicitly needs that behavior.
-   - Avoid blocking `ObsClient::request` on cancellation bookkeeping if the client task is already gone.
-
-8. Complete reload/dump refresh semantics.
-   - After `dump-config`, reload config through the same path used by `reload_config_from_disk`.
-   - Merge aliases/shortcuts into the current snapshot and rebroadcast state after dump.
-   - Add tests for changed scene/audio aliases after dump and changed reconnect settings after reload plus explicit reconnect.
-
-### P1: Logging Completeness
-
-9. Bridge `tracing` to typed IPC log events.
-   - Add a bounded, redacting tracing layer or server-local log sink that publishes `LogEvent`.
-   - Keep manual high-value lifecycle events only where they add user-facing clarity.
-   - Prevent log broadcast loops and avoid blocking tracing on slow IPC subscribers.
-   - Add tests proving warnings/errors emitted through tracing reach `logs` subscribers and secrets are redacted.
-
-10. Improve TUI log rendering ergonomics.
-   - Truncate or elide long targets/messages so logs do not dominate narrow panels.
-   - Consider hiding module targets by default or showing them only in debug mode.
-   - Add widget assertions for long target names and mixed severity ordering.
-
-### P2: Test and Repository Hygiene
-
-11. Replace sleep-based test server readiness.
-    - Add explicit readiness channels and shutdown handles for fake IPC and server integration helpers.
-    - Join or abort background tasks/threads deterministically.
-    - Remove duplicate test server setup where a shared helper can stay simple.
-
-12. Clean planning and telemetry files.
-    - Remove or intentionally document the untracked lowercase `plan.md`.
-    - Decide whether `ALTERNATIVES.jsonl`, `SCORES.jsonl`, and similar orchestration artifacts belong in the repo.
-    - Keep `PLAN.md`, `IMPLEMENTATION_CHECK_PLAN.md`, `AGENT_LOG.md`, and `MEMORY.md` roles distinct.
-
-### P3: Product Expansion After Hardening
-
-13. Recording control.
-    - Add OBS requests: `StartRecord`, `StopRecord`, `PauseRecord`, `ResumeRecord`, `GetRecordStatus`.
-    - Add CLI commands: `obsctl record start|stop|pause|resume|status`.
-    - Add IPC command names and TUI header recording indicator.
-
-14. Streaming control.
-    - Add OBS requests: `StartStream`, `StopStream`, `GetStreamStatus`.
-    - Add CLI commands and TUI status indicator.
-
-15. Scene transition support.
-    - Add transition list/status/set commands and state fields.
-    - Preserve daemon-owned OBS access and typed IPC boundaries.
-
-## Build Gates
-
-Every implementation iteration must pass:
-
-```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+### M — `config/dump.rs`: near-identical duplicate validation fns
+`validate_scene_duplicates` and `validate_audio_duplicates` (lines 138–180) share 95% of their
+body. Merge into a single generic:
+```rust
+fn validate_no_duplicates(
+    label: &str,
+    items: impl Iterator<Item = (Option<&str>, Option<&str>)>, // (alias, shortcut)
+) -> Result<()>
 ```
 
-Before release candidates:
-
-```sh
-cargo build --release
+### M — `config/schema.rs`: same alias/shortcut uniqueness loop duplicated for scenes and audio
+`validate` (lines ~89–131) iterates scenes and audio inputs checking for duplicate aliases and
+shortcuts with near-identical code. Extract:
+```rust
+fn check_unique_aliases_shortcuts(
+    kind: &str,
+    items: &[impl HasAliasShortcut],
+) -> Vec<ConfigWarning>
 ```
 
-Manual smoke test with OBS Studio:
+### M — `obs/requests.rs`: verbose `RequestData` constructors
+Every function builds `RequestData { request_type: "X".to_string(), request_id: next_id(), request_data: None }`.
+Add two package-private helpers:
+```rust
+fn req(type_: &str) -> RequestData
+fn req_with(type_: &str, data: Value) -> RequestData
+```
+Reduces each public fn to 1 line.
 
-```sh
-cargo build
-target/debug/obsctl init --force
-export OBS_WEBSOCKET_PASSWORD='your password'
-target/debug/obsctl validate-config
-target/debug/obsctl server --headless
-target/debug/obsctl server-status
-target/debug/obsctl obs-status
-target/debug/obsctl dump-config
-target/debug/obsctl scene '<configured-alias-or-scene>'
-target/debug/obsctl mute '<configured-audio>'
-target/debug/obsctl unmute '<configured-audio>'
-target/debug/obsctl vol '<configured-audio>' 70
-target/debug/obsctl tui
+---
+
+## 2. Architecture / separation of concerns
+
+### H — `tui/app.rs`: command dispatch spread across `run_loop`
+The `match action { ... }` arm (lines 108–225) is 120 lines of inline command dispatch inside the
+event loop. Move it to a dedicated `fn handle_action(action: TuiAction, model: &mut TuiModel, socket_path: &Path) -> impl Future<...>` so `run_loop` stays a pure event router.
+
+### M — `server/command_executor.rs`: two consecutive `state.read().await` in `cmd_server_status`
+Lines 122 and 124 each acquire a read lock independently, risking a race window. Read once:
+```rust
+let snap = self.state.read().await;
+let last_error = snap.last_error.clone();
+let obs_connected = snap.connected;
 ```
 
-## Durable Architecture Rules
+### M — `domain/command.rs`: `Disconnect` variant is dead
+`Command::Disconnect` is parsed (parser.rs) and mapped to `"reconnect_obs"` in `app.rs`
+`command_to_payload` — same target as `Command::Reconnect`. Either remove `Disconnect` or give it
+distinct semantics. As-is it is misleading dead weight.
 
-- CLI and TUI must not import or call OBS WebSocket client code.
-- Ratatui widgets render from `tui::TuiModel` only; no IPC or OBS work in widgets.
-- Server command executor remains the only IPC-command-to-OBS-action path.
-- Secrets must not appear in logs, errors, tests, snapshots, docs, or TUI panels.
-- IPC contracts should be typed at the boundary and covered by wire-format tests before feature breadth expands.
-- Cross-layer adapters should live in server/application modules or use pure domain types; the domain layer should not become a dumping ground for IPC-to-OBS coupling.
-- Public CLI/IPC behavior is a compatibility surface: changes to error codes, JSON envelopes, or topic payload shapes need docs and representative tests in the same iteration.
+### M — `tui/model.rs`: `scenes()` allocates on every call
+`scenes()` returns `Vec<&'_ SceneState>` built fresh each call. For the TUI's render path this runs
+multiple times per frame. Two options:
+1. Cache the filtered list in `TuiModel` and rebuild it only when `clamp_cursors()` is called
+   (i.e., after a snapshot update).
+2. Return an iterator instead of allocating a `Vec`.
+
+### L — `tui/event_applier.rs`: `TOPIC_EVENTS` variants other than `InputVolumeMeters` silently dropped
+The wildcard `_ => {}` on line ~40 ignores all non-meter event payloads. Add a `tracing::debug!`
+for unhandled variants so future additions are easier to discover.
+
+### L — `obs/client.rs`: magic number `65613` for event subscription bitmask
+The value is explained in a comment, but it is easy to corrupt on future additions. Define named
+constants and combine them:
+```rust
+const ES_GENERAL: u32 = 1;
+const ES_SCENES: u32 = 4;
+const ES_INPUTS: u32 = 8;
+const ES_OUTPUTS: u32 = 64;
+const ES_INPUT_VOLUME_METERS: u32 = 65536;
+const EVENT_SUBSCRIPTIONS: u32 =
+    ES_GENERAL | ES_SCENES | ES_INPUTS | ES_OUTPUTS | ES_INPUT_VOLUME_METERS;
+```
+
+---
+
+## 3. Rust idioms
+
+### M — `server/command_executor.rs`: `.map(|s| s.to_string())` on `as_str()` result
+`required_string` (line 448):
+```rust
+args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+```
+Replace with:
+```rust
+args.get(key).and_then(|v| v.as_str()).map(str::to_owned)
+```
+
+### M — `config/dump.rs` / `config/schema.rs`: redundant `.clone()` when inserting into `HashSet<String>`
+Strings are already owned; inserting a clone and then dropping the original wastes an allocation.
+Pattern: `seen.insert(alias.clone())` where `alias: String`. Use `seen.insert(alias)` and move,
+or keep the variable for re-use and use `seen.insert(alias.clone())` only when the value is
+genuinely reused.
+
+### M — `domain/parser.rs`: `current.clone()` then `current.clear()`
+The loop (lines ~130) does `tokens.push(current.clone()); current.clear()`. This clones and then
+clears. Use `std::mem::take` instead:
+```rust
+tokens.push(std::mem::take(&mut current));
+```
+Avoids the allocation of a second `String`.
+
+### M — `ipc/unix_server.rs` / `ipc/protocol.rs`: `TOPIC_*.to_string()` on `&'static str` constants
+`TOPIC_STATE`, `TOPIC_EVENTS`, `TOPIC_LOGS` are `&'static str`. Sites that call `.to_string()` on
+them in hot paths (subscribe message handling) allocate unnecessarily. Either:
+- Change the topic fields in the relevant structs to `Cow<'static, str>` and use `Cow::Borrowed`,
+- Or accept `&str` comparisons directly where the only use is equality checking.
+
+### L — `cli/router.rs`: unnecessary `level.clone()` on returned `String`
+Line ~62: `return level.clone()` where `level` is a local `String` that is not used after the
+return. Remove `.clone()` and move.
+
+### L — `tui/widgets/scenes.rs`, `audio.rs`: `s.name.clone()` for ratatui `Span::raw`
+`Span::raw` accepts `Into<Cow<'_, str>>` — pass a reference `s.name.as_str()` instead of cloning.
+Same applies to alias/shortcut spans in both widgets.
+
+---
+
+## 4. Code organisation
+
+### M — `tui/app.rs`: `render_unavailable` is inline in `app.rs`
+This is a standalone UI widget; move it to `tui/widgets/connection.rs` (which already handles the
+connected-but-OBS-unavailable case) or a new `tui/widgets/unavailable.rs`, keeping `app.rs` as a
+pure loop.
+
+### M — `server/command_executor.rs`: `CommandExecutor::new` takes 9 arguments
+Use a builder or a dedicated `CommandExecutorConfig` struct:
+```rust
+pub struct CommandExecutorConfig {
+    pub state: StateStore,
+    pub obs: Arc<Mutex<Option<ObsClient>>>,
+    pub config: Arc<Mutex<Config>>,
+    pub config_path: Option<PathBuf>,
+    pub socket_path: PathBuf,
+    pub registry: ClientRegistry,
+    pub reconnect_tx: mpsc::Sender<()>,
+    pub shutdown_tx: watch::Sender<bool>,
+    pub hub: Arc<BroadcastHub>,
+}
+```
+Removes the `#[allow(clippy::too_many_arguments)]` suppression.
+
+### L — `tui/model.rs`: `MAX_TUI_LOG_ENTRIES` is a module-level constant not tied to `TuiModel`
+Move it inside `impl TuiModel` as an associated constant:
+```rust
+impl TuiModel {
+    pub const MAX_LOG_ENTRIES: usize = 200;
+}
+```
+
+### L — `config/model.rs`: `SceneConfig` and `AudioInputConfig` share `alias`/`shortcut`/`stale` fields
+Consider a shared `ResourceMetadata { alias, shortcut, group, stale, hidden }` type or a trait
+`HasAlias` to unify validation and alias-resolution code. Not urgent but removes friction when
+adding future per-resource fields.
+
+---
+
+## 5. Error handling
+
+### M — `server/command_executor.rs`: `cmd_dump_config` silently succeeds when `config_path` is `None`
+Line 353: the `else` branch logs a warning and then the function returns success with scene/input
+counts. A caller invoking `dump_config` without a config path will get an `ok` response but nothing
+was written. Return `Err(ObsctlError::ConfigInvalid("no config path"))` instead.
+
+### M — `server/state_store.rs`: `serde_json::to_value` failure silently ignored in `replace`
+`build_snapshot` is infallible but callers that derive a snapshot from OBS data use
+`serde_json::to_value` internally and discard errors with `unwrap_or_default`. Propagate with `?`
+and surface to the supervisor log.
+
+### L — `tui/app.rs`: daemon connection error stored in `last_result` not `logs`
+When the initial connection fails (line 72), the error goes to `model.last_result` which is a
+one-line status bar. It should also be pushed to `model.logs` so it persists in the log panel after
+the user interacts with the command palette.
+
+---
+
+## 6. Test quality
+
+### M — `ipc/protocol.rs`: `obs_event_wire_json_covers_public_payload_variants` should enumerate all variants
+The test explicitly lists variants but doesn't assert that the list is exhaustive. If a new
+`ObsEventPayload` variant is added without a test case, the gap goes unnoticed. Add a compile-time
+check (e.g. a `const _: () = assert!(VARIANT_COUNT == 6)` pattern or a `#[deny(unused_variables)]`
+match to force exhaustion).
+
+### M — `config/schema.rs` / `domain/errors.rs`: hardcoded variant counts as `usize` constants
+`OBSCTL_ERROR_VARIANT_COUNT` and similar are manually maintained. These are correct today but will
+silently rot. Replace with a `strum::EnumCount` derive or a compile-time exhaustive match that will
+fail to compile if a variant is added.
+
+### L — `server/command_executor.rs`: `cmd_toggle_stream` / `cmd_toggle_record` not unit tested
+The new toggle commands have no unit tests. Add tests in the same pattern as
+`apply_event_scene_change` in `state_store.rs`: mock an `ObsClient`, verify the correct
+`RequestData` is sent and the returned message matches the active state.
+
+### L — `tui/model.rs`: `scenes()` filter not covered by a test
+The `hidden: true` filter in `scenes()` has no dedicated test. Add a unit test that verifies hidden
+scenes are excluded from the returned list and that cursor math stays valid when all visible scenes
+are hidden.
+
+---
+
+## 7. Feature — Command Palette autocompletion
+
+### Overview
+
+Two-phase completion triggered by `Tab` / `Shift+Tab` while the palette is active:
+
+1. **Command completion** — user types `/sc` → candidates are `/scene`; `/m` → `/mute`, `/mute`; empty or `/` → all commands listed.
+2. **Argument completion** — user types `/scene <prefix>` → scene names and aliases matching prefix; `/mute <prefix>` / `/vol <prefix>` → audio input names and aliases matching prefix.
+
+Completing a candidate writes it back into the input buffer so the user can keep typing.
+Pressing `Enter` submits as usual; `Esc` closes the palette and discards the suggestion row.
+
+---
+
+### New file: `tui/completion.rs`
+
+Single public function with no side effects — pure computation from input + model snapshot:
+
+```rust
+pub fn compute(input: &str, model: &TuiModel) -> Vec<String>
+```
+
+**Phase 1 — command prefix** (no space yet after the command word):
+```
+ALL_COMMANDS = ["/scene", "/mute", "/unmute", "/toggle-mute", "/vol",
+                "/stream", "/rec", "/status", "/obs-status",
+                "/reload-config", "/dump-config", "/reconnect", "/quit"]
+```
+Filter to those that start with `input` (case-insensitive). Return the filtered list.
+
+**Phase 2 — argument prefix** (input contains a space after a recognised command):
+- Split on first space → `(cmd, arg_prefix)`.
+- `/scene <prefix>` → iterate `model.scenes()`, collect names and aliases, filter by `starts_with(arg_prefix)` (case-insensitive), de-duplicate, return as `"/scene <candidate>"` strings.
+- `/mute`, `/unmute`, `/toggle-mute`, `/vol <prefix>` → same pattern over `model.audio_inputs()`.
+- Any other command → empty list (no argument completion defined).
+
+**Tie-breaking / ordering:** exact-prefix matches first, then alphabetical.
+
+---
+
+### State changes: `tui/model.rs` — `CommandPaletteState`
+
+```rust
+#[derive(Debug, Clone, Default)]
+pub struct CommandPaletteState {
+    pub active: bool,
+    pub input: String,
+    pub completions: Vec<String>,   // current candidates
+    pub completion_idx: Option<usize>, // Tab-cycle cursor into completions
+}
+```
+
+Add two methods:
+```rust
+impl CommandPaletteState {
+    /// Advance to next completion and write it into `input`.
+    pub fn cycle_next(&mut self);
+    /// Step back to previous completion.
+    pub fn cycle_prev(&mut self);
+}
+```
+`cycle_next` sets `input` to `completions[idx]` and advances `idx` (wrapping).  
+Reset `completion_idx` to `None` whenever `input` is mutated by a keystroke (not by a cycle).
+
+---
+
+### Input changes: `tui/input.rs`
+
+Add two `TuiAction` variants:
+```rust
+TuiAction::CompleteNext,   // Tab
+TuiAction::CompletePrev,   // Shift+Tab
+```
+
+In `handle_key`, inside the `palette.active` branch, add before the catch-all:
+```rust
+KeyCode::Tab => Some(TuiAction::CompleteNext),
+KeyCode::BackTab => Some(TuiAction::CompletePrev),  // crossterm BackTab = Shift+Tab
+```
+
+---
+
+### App changes: `tui/app.rs`
+
+After every action that mutates `input` (`PaletteChar`, `PaletteBackspace`, `OpenPalette`), recompute:
+```rust
+model.command_palette.completions =
+    completion::compute(&model.command_palette.input, &model);
+model.command_palette.completion_idx = None;
+```
+
+Handle the two new actions:
+```rust
+TuiAction::CompleteNext => model.command_palette.cycle_next(),
+TuiAction::CompletePrev => model.command_palette.cycle_prev(),
+```
+Both trigger a redraw.
+
+On `ClosePalette`, clear completions along with input.
+
+---
+
+### Widget changes: `tui/widgets/command_palette.rs`
+
+When `palette.active && !completions.is_empty()`, render a third line of suggestion chips directly
+below the prompt. Each chip is `[ /scene ]`; the currently selected chip (if any) is highlighted
+cyan/bold; others are DarkGray:
+
+```
+> /scene m█
+  [/scene main] [/scene cam] [/scene brb]
+```
+
+If `completions` is empty, the third line is either blank or shows a dim "no completions" hint.
+
+The command palette block height in `tui/layout.rs` should be at least **4 lines** to accommodate:
+- Line 1: last result / status
+- Line 2: input prompt
+- Line 3: completion chips
+- Border
+
+Adjust `layout::compute` to allocate 4 lines minimum for the palette area instead of the current 3.
+
+---
+
+### Priority: H (user-visible feature, self-contained, well-scoped)
+Files touched: `tui/completion.rs` (new), `tui/model.rs`, `tui/input.rs`, `tui/app.rs`,
+`tui/widgets/command_palette.rs`, `tui/layout.rs`.  
+No server-side or IPC changes required — all data comes from the existing `TuiModel` snapshot.
+
+---
+
+## Summary by priority
+
+| Pri | Count | Theme |
+|-----|-------|-------|
+| H   | 3     | Duplication (session forwarder, response extractor, alias entries) |
+| H   | 1     | Architecture (action dispatch in run_loop) |
+| H   | 1     | Feature — command palette autocompletion (Tab/Shift+Tab, two-phase) |
+| M   | 12    | Duplication, idioms, organisation, error handling, tests |
+| L   | 8     | Polish, minor idioms, test coverage |
+
+---
+
+## Agent Loop Tasks
+
+Implementation queue derived from the plan. Tasks are ordered by dependency and risk.
+Full task details in `.agent-loop/tasks.json`.
+
+| ID   | Title                                               | Type        | Pri | Status  |
+|------|-----------------------------------------------------|-------------|-----|---------|
+| T001 | Fix failing state_event_wire_json_is_stable test    | fix         | 1   | **done** |
+| T002 | Extract spawn_session_forwarder in tui/app.rs       | improvement | 2   | pending |
+| T003 | Extract format_ipc_response in tui/app.rs           | improvement | 3   | pending |
+| T004 | Extract scene/audio alias entry helpers             | improvement | 4   | pending |
+| T005 | CHECKPOINT: build+test after H dedup refactors      | validation  | 5   | pending |
+| T006 | Extract handle_action dispatch from run_loop        | improvement | 6   | pending |
+| T007 | Fix double read-lock race in cmd_server_status      | fix         | 7   | pending |
+| T008 | Remove/fix Command::Disconnect dead variant         | fix         | 8   | pending |
+| T009 | Return error from cmd_dump_config when path is None | fix         | 9   | pending |
+| T010 | Push connection error to model.logs                 | fix         | 10  | pending |
+| T011 | CHECKPOINT: build+test after arch/error fixes       | validation  | 11  | pending |
+| T012 | Merge validate_scene/audio_duplicates in dump.rs    | improvement | 12  | pending |
+| T013 | Extract check_unique_aliases_shortcuts in schema.rs | improvement | 13  | pending |
+| T014 | Add fn req/req_with helpers in obs/requests.rs      | improvement | 14  | pending |
+| T015 | Fix required_string idiom (str::to_owned)           | improvement | 15  | pending |
+| T016 | Fix redundant .clone() on HashSet inserts           | improvement | 16  | pending |
+| T017 | Fix parser.rs clone()+clear() → mem::take          | improvement | 17  | pending |
+| T018 | Eliminate TOPIC_*.to_string() hot-path allocs       | improvement | 18  | pending |
+| T019 | Remove unnecessary level.clone() in cli/router.rs   | improvement | 19  | pending |
+| T020 | Fix Span::raw clones in widgets/scenes+audio        | improvement | 20  | pending |
+| T021 | Add tracing::debug for unhandled TOPIC_EVENTS vars  | improvement | 21  | pending |
+| T022 | Define ES_* event subscription constants            | improvement | 22  | pending |
+| T023 | CHECKPOINT: build+test+clippy after idioms          | validation  | 23  | pending |
+| T024 | Reduce per-call allocation in TuiModel::scenes()    | improvement | 24  | pending |
+| T025 | Introduce CommandExecutorConfig struct              | improvement | 25  | pending |
+| T026 | Move render_unavailable to widgets module           | improvement | 26  | pending |
+| T027 | Move MAX_TUI_LOG_ENTRIES to impl TuiModel const     | improvement | 27  | pending |
+| T028 | CHECKPOINT: build+test after org changes            | validation  | 28  | pending |
+| T029 | Fix variant exhaustiveness checks (compile-time)    | improvement | 29  | pending |
+| T030 | Add tests for cmd_toggle_stream/toggle_record       | improvement | 30  | pending |
+| T031 | Add test for TuiModel::scenes() hidden filter       | improvement | 31  | pending |
+| T032 | Complete CommandPaletteState completions+cycling    | feature     | 32  | pending |
+| T033 | Add TuiAction::CompleteNext/Prev + Tab keys         | feature     | 33  | pending |
+| T034 | Create tui/completion.rs with compute fn            | feature     | 34  | pending |
+| T035 | Wire completions into tui/app.rs event loop         | feature     | 35  | pending |
+| T036 | Render completion chips in command_palette widget   | feature     | 36  | pending |
+| T037 | FINAL VALIDATION: cargo check + test + clippy       | validation  | 37  | pending |

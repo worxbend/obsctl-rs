@@ -30,6 +30,7 @@ fn snap_connected() -> ObsSnapshot {
                 shortcut: Some("1".into()),
                 group: None,
                 active: true,
+                hidden: false,
             },
             SceneState {
                 name: "Cam".into(),
@@ -37,6 +38,7 @@ fn snap_connected() -> ObsSnapshot {
                 shortcut: None,
                 group: None,
                 active: false,
+                hidden: false,
             },
         ],
         audio_inputs: vec![
@@ -61,6 +63,8 @@ fn snap_connected() -> ObsSnapshot {
                 volume_db: None,
             },
         ],
+        streaming: false,
+        recording: false,
         last_error: None,
         updated_at: OffsetDateTime::now_utc(),
     }
@@ -74,6 +78,8 @@ fn snap_disconnected_with_error() -> ObsSnapshot {
         current_scene: None,
         scenes: Vec::new(),
         audio_inputs: Vec::new(),
+        streaming: false,
+        recording: false,
         last_error: Some("connection refused".into()),
         updated_at: OffsetDateTime::now_utc(),
     }
@@ -99,6 +105,7 @@ fn model_connected() -> TuiModel {
         command_palette: CommandPaletteState::default(),
         last_result: None,
         connected_to_daemon: true,
+        ..Default::default()
     }
 }
 
@@ -110,6 +117,7 @@ fn model_daemon_disconnected() -> TuiModel {
         command_palette: CommandPaletteState::default(),
         last_result: None,
         connected_to_daemon: false,
+        ..Default::default()
     }
 }
 

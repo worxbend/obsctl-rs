@@ -238,6 +238,7 @@ mod tests {
                     shortcut: Some("m".to_string()),
                     group: Some("live".to_string()),
                     stale: false,
+                    hidden: false,
                 },
                 SceneConfig {
                     name: "OldScene".to_string(),
@@ -245,6 +246,7 @@ mod tests {
                     shortcut: None,
                     group: None,
                     stale: false,
+                    hidden: false,
                 },
             ],
             audio: AudioConfig {
