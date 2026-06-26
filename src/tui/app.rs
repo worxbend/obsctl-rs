@@ -250,6 +250,14 @@ async fn handle_action(
                 Err(e) => (false, Some(format!("Retry failed: {e}"))),
             }
         }
+        TuiAction::CompleteNext => {
+            model.command_palette.cycle_next();
+            (false, None)
+        }
+        TuiAction::CompletePrev => {
+            model.command_palette.cycle_prev();
+            (false, None)
+        }
     }
 }
 

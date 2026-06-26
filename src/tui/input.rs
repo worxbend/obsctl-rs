@@ -24,6 +24,9 @@ pub enum TuiAction {
     ToggleMute,
     VolumeDown,
     VolumeUp,
+    // Palette completion
+    CompleteNext,
+    CompletePrev,
 }
 
 pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
@@ -35,6 +38,8 @@ pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
             }
             KeyCode::Enter => Some(TuiAction::PaletteSubmit),
             KeyCode::Backspace => Some(TuiAction::PaletteBackspace),
+            KeyCode::Tab => Some(TuiAction::CompleteNext),
+            KeyCode::BackTab => Some(TuiAction::CompletePrev),
             KeyCode::Char(c) => Some(TuiAction::PaletteChar(c)),
             _ => None,
         };

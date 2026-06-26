@@ -428,8 +428,8 @@ Full task details in `.agent-loop/tasks.json`.
 | T029 | Fix variant exhaustiveness checks (compile-time)    | improvement | 29  | completed |
 | T030 | Add tests for cmd_toggle_stream/toggle_record       | improvement | 30  | completed |
 | T031 | Add test for TuiModel::scenes() hidden filter       | improvement | 31  | completed |
-| T032 | Complete CommandPaletteState completions+cycling    | feature     | 32  | pending |
-| T033 | Add TuiAction::CompleteNext/Prev + Tab keys         | feature     | 33  | pending |
+| T032 | Complete CommandPaletteState completions+cycling    | feature     | 32  | completed |
+| T033 | Add TuiAction::CompleteNext/Prev + Tab keys         | feature     | 33  | completed |
 | T034 | Create tui/completion.rs with compute fn            | feature     | 34  | pending |
 | T035 | Wire completions into tui/app.rs event loop         | feature     | 35  | pending |
 | T036 | Render completion chips in command_palette widget   | feature     | 36  | pending |
