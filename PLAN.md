@@ -416,8 +416,8 @@ Full task details in `.agent-loop/tasks.json`.
 | T017 | Fix parser.rs clone()+clear() → mem::take          | improvement | 17  | completed |
 | T018 | Eliminate TOPIC_*.to_string() hot-path allocs       | improvement | 18  | completed |
 | T019 | Remove unnecessary level.clone() in cli/router.rs   | improvement | 19  | completed |
-| T020 | Fix Span::raw clones in widgets/scenes+audio        | improvement | 20  | pending |
-| T021 | Add tracing::debug for unhandled TOPIC_EVENTS vars  | improvement | 21  | pending |
+| T020 | Fix Span::raw clones in widgets/scenes+audio        | improvement | 20  | completed |
+| T021 | Add tracing::debug for unhandled TOPIC_EVENTS vars  | improvement | 21  | completed |
 | T022 | Define ES_* event subscription constants            | improvement | 22  | pending |
 | T023 | CHECKPOINT: build+test+clippy after idioms          | validation  | 23  | pending |
 | T024 | Reduce per-call allocation in TuiModel::scenes()    | improvement | 24  | pending |

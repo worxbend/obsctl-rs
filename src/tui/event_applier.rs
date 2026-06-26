@@ -26,13 +26,16 @@ pub fn apply_server_message(model: &mut TuiModel, msg: ServerMessage) -> bool {
                 return true;
             }
             Topic::Events => {
-                if let Ok(ObsEventPayload::InputVolumeMeters { inputs }) =
-                    serde_json::from_value::<ObsEventPayload>(data)
-                {
-                    for entry in inputs {
-                        model.meter_levels.insert(entry.name, entry.level);
+                match serde_json::from_value::<ObsEventPayload>(data) {
+                    Ok(ObsEventPayload::InputVolumeMeters { inputs }) => {
+                        for entry in inputs {
+                            model.meter_levels.insert(entry.name, entry.level);
+                        }
+                        return false; // let the ticker redraw at normal rate
                     }
-                    return false; // let the ticker redraw at normal rate
+                    _ => {
+                        tracing::debug!("unhandled TOPIC_EVENTS payload variant");
+                    }
                 }
                 return true;
             }
