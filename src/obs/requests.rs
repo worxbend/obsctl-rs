@@ -11,117 +11,57 @@ fn next_id() -> String {
     format!("obs-{n:06}")
 }
 
-pub fn get_version() -> RequestData {
+fn req(type_: &str) -> RequestData {
+    RequestData { request_type: type_.to_string(), request_id: next_id(), request_data: None }
+}
+
+fn req_with(type_: &str, data: serde_json::Value) -> RequestData {
     RequestData {
-        request_type: "GetVersion".to_string(),
+        request_type: type_.to_string(),
         request_id: next_id(),
-        request_data: None,
+        request_data: Some(data),
     }
 }
 
-pub fn get_scene_list() -> RequestData {
-    RequestData {
-        request_type: "GetSceneList".to_string(),
-        request_id: next_id(),
-        request_data: None,
-    }
-}
+pub fn get_version() -> RequestData { req("GetVersion") }
 
-pub fn get_current_program_scene() -> RequestData {
-    RequestData {
-        request_type: "GetCurrentProgramScene".to_string(),
-        request_id: next_id(),
-        request_data: None,
-    }
-}
+pub fn get_scene_list() -> RequestData { req("GetSceneList") }
+
+pub fn get_current_program_scene() -> RequestData { req("GetCurrentProgramScene") }
 
 pub fn set_current_program_scene(scene_name: &str) -> RequestData {
-    RequestData {
-        request_type: "SetCurrentProgramScene".to_string(),
-        request_id: next_id(),
-        request_data: Some(json!({ "sceneName": scene_name })),
-    }
+    req_with("SetCurrentProgramScene", json!({ "sceneName": scene_name }))
 }
 
-pub fn get_input_list() -> RequestData {
-    RequestData {
-        request_type: "GetInputList".to_string(),
-        request_id: next_id(),
-        request_data: None,
-    }
-}
+pub fn get_input_list() -> RequestData { req("GetInputList") }
 
 pub fn get_input_mute(input_name: &str) -> RequestData {
-    RequestData {
-        request_type: "GetInputMute".to_string(),
-        request_id: next_id(),
-        request_data: Some(json!({ "inputName": input_name })),
-    }
+    req_with("GetInputMute", json!({ "inputName": input_name }))
 }
 
 pub fn set_input_mute(input_name: &str, muted: bool) -> RequestData {
-    RequestData {
-        request_type: "SetInputMute".to_string(),
-        request_id: next_id(),
-        request_data: Some(json!({ "inputName": input_name, "inputMuted": muted })),
-    }
+    req_with("SetInputMute", json!({ "inputName": input_name, "inputMuted": muted }))
 }
 
 pub fn toggle_input_mute(input_name: &str) -> RequestData {
-    RequestData {
-        request_type: "ToggleInputMute".to_string(),
-        request_id: next_id(),
-        request_data: Some(json!({ "inputName": input_name })),
-    }
+    req_with("ToggleInputMute", json!({ "inputName": input_name }))
 }
 
 pub fn get_input_volume(input_name: &str) -> RequestData {
-    RequestData {
-        request_type: "GetInputVolume".to_string(),
-        request_id: next_id(),
-        request_data: Some(json!({ "inputName": input_name })),
-    }
+    req_with("GetInputVolume", json!({ "inputName": input_name }))
 }
 
 pub fn set_input_volume(input_name: &str, volume_mul: f64) -> RequestData {
-    RequestData {
-        request_type: "SetInputVolume".to_string(),
-        request_id: next_id(),
-        request_data: Some(json!({ "inputName": input_name, "inputVolumeMul": volume_mul })),
-    }
+    req_with("SetInputVolume", json!({ "inputName": input_name, "inputVolumeMul": volume_mul }))
 }
 
-pub fn get_stream_status() -> RequestData {
-    RequestData {
-        request_type: "GetStreamStatus".to_string(),
-        request_id: next_id(),
-        request_data: None,
-    }
-}
+pub fn get_stream_status() -> RequestData { req("GetStreamStatus") }
 
-pub fn get_record_status() -> RequestData {
-    RequestData {
-        request_type: "GetRecordStatus".to_string(),
-        request_id: next_id(),
-        request_data: None,
-    }
-}
+pub fn get_record_status() -> RequestData { req("GetRecordStatus") }
 
-pub fn toggle_stream() -> RequestData {
-    RequestData {
-        request_type: "ToggleStream".to_string(),
-        request_id: next_id(),
-        request_data: None,
-    }
-}
+pub fn toggle_stream() -> RequestData { req("ToggleStream") }
 
-pub fn toggle_record() -> RequestData {
-    RequestData {
-        request_type: "ToggleRecord".to_string(),
-        request_id: next_id(),
-        request_data: None,
-    }
-}
+pub fn toggle_record() -> RequestData { req("ToggleRecord") }
 
 #[cfg(test)]
 mod tests {
