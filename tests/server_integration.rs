@@ -29,8 +29,10 @@ use obsctl_rs::{
         state::{ObsSnapshot, SceneState},
     },
     server::{
-        client_registry::ClientRegistry, command_executor::CommandExecutor,
-        obs_supervisor::ObsSupervisor, state_store::StateStore,
+        client_registry::ClientRegistry,
+        command_executor::{CommandExecutor, CommandExecutorConfig},
+        obs_supervisor::ObsSupervisor,
+        state_store::StateStore,
     },
 };
 use support::fake_obs_server::{PreparedResponse, spawn_fake_obs};
@@ -82,17 +84,17 @@ async fn start_test_server_with_config(
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
     let state_clone = state.clone();
-    let executor = CommandExecutor::new(
+    let executor = CommandExecutor::new(CommandExecutorConfig {
         state,
-        obs_handle,
+        obs: obs_handle,
         config,
-        Some(config_path.to_path_buf()),
-        socket_path.clone(),
+        config_path: Some(config_path.to_path_buf()),
+        socket_path: socket_path.clone(),
         registry,
         reconnect_tx,
-        shutdown_tx.clone(),
-        Arc::clone(&hub),
-    );
+        shutdown_tx: shutdown_tx.clone(),
+        hub: Arc::clone(&hub),
+    });
 
     let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
     tokio::spawn(executor.run(cmd_rx));
@@ -118,17 +120,17 @@ async fn start_test_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>) {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
-    let executor = CommandExecutor::new(
+    let executor = CommandExecutor::new(CommandExecutorConfig {
         state,
-        obs_handle,
+        obs: obs_handle,
         config,
-        None, // no config_path in tests
-        socket_path.clone(),
+        config_path: None,
+        socket_path: socket_path.clone(),
         registry,
         reconnect_tx,
-        shutdown_tx.clone(),
-        Arc::clone(&hub),
-    );
+        shutdown_tx: shutdown_tx.clone(),
+        hub: Arc::clone(&hub),
+    });
 
     let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
     tokio::spawn(executor.run(cmd_rx));
@@ -158,17 +160,17 @@ async fn start_test_server_with_obs_client(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
-    let executor = CommandExecutor::new(
+    let executor = CommandExecutor::new(CommandExecutorConfig {
         state,
-        obs_handle,
+        obs: obs_handle,
         config,
-        None,
-        socket_path.clone(),
+        config_path: None,
+        socket_path: socket_path.clone(),
         registry,
         reconnect_tx,
-        shutdown_tx.clone(),
-        Arc::clone(&hub),
-    );
+        shutdown_tx: shutdown_tx.clone(),
+        hub: Arc::clone(&hub),
+    });
 
     let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
     tokio::spawn(executor.run(cmd_rx));
@@ -195,17 +197,17 @@ async fn start_test_server_with_obs_supervisor(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
-    let executor = CommandExecutor::new(
-        state.clone(),
-        Arc::clone(&obs_handle),
-        Arc::clone(&config),
-        None,
-        socket_path.clone(),
+    let executor = CommandExecutor::new(CommandExecutorConfig {
+        state: state.clone(),
+        obs: Arc::clone(&obs_handle),
+        config: Arc::clone(&config),
+        config_path: None,
+        socket_path: socket_path.clone(),
         registry,
         reconnect_tx,
-        shutdown_tx.clone(),
-        Arc::clone(&hub),
-    );
+        shutdown_tx: shutdown_tx.clone(),
+        hub: Arc::clone(&hub),
+    });
     let supervisor = ObsSupervisor::new(
         Arc::clone(&config),
         state.clone(),
@@ -818,17 +820,17 @@ async fn socket_file_exists_while_server_runs() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
-    let executor = CommandExecutor::new(
+    let executor = CommandExecutor::new(CommandExecutorConfig {
         state,
-        obs_handle,
+        obs: obs_handle,
         config,
-        None,
-        socket_path.clone(),
+        config_path: None,
+        socket_path: socket_path.clone(),
         registry,
         reconnect_tx,
-        shutdown_tx.clone(),
-        Arc::clone(&hub),
-    );
+        shutdown_tx: shutdown_tx.clone(),
+        hub: Arc::clone(&hub),
+    });
 
     let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
     tokio::spawn(executor.run(cmd_rx));
@@ -861,17 +863,17 @@ async fn server_handles_multiple_sequential_clients() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
-    let executor = CommandExecutor::new(
+    let executor = CommandExecutor::new(CommandExecutorConfig {
         state,
-        obs_handle,
+        obs: obs_handle,
         config,
-        None,
-        socket_path.clone(),
+        config_path: None,
+        socket_path: socket_path.clone(),
         registry,
         reconnect_tx,
-        shutdown_tx.clone(),
-        Arc::clone(&hub),
-    );
+        shutdown_tx: shutdown_tx.clone(),
+        hub: Arc::clone(&hub),
+    });
 
     let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
     tokio::spawn(executor.run(cmd_rx));
