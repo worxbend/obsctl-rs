@@ -13,6 +13,14 @@ use crate::obs::protocol::{
     RequestData, RequestResponseData,
 };
 
+const ES_GENERAL: u32 = 1;
+const ES_SCENES: u32 = 4;
+const ES_INPUTS: u32 = 8;
+const ES_OUTPUTS: u32 = 64;
+const ES_INPUT_VOLUME_METERS: u32 = 65536;
+const EVENT_SUBSCRIPTIONS: u32 =
+    ES_GENERAL | ES_SCENES | ES_INPUTS | ES_OUTPUTS | ES_INPUT_VOLUME_METERS;
+
 /// Events emitted by the OBS client to its supervisor.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObsEvent {
@@ -141,8 +149,7 @@ pub async fn handshake(
         d: serde_json::to_value(IdentifyData {
             rpc_version: 1,
             authentication,
-            // General=1 | Scenes=4 | Inputs=8 | Outputs=64 | InputVolumeMeters=65536
-            event_subscriptions: Some(65613),
+            event_subscriptions: Some(EVENT_SUBSCRIPTIONS),
         })
         .map_err(|e| ObsctlError::ConnectionFailed(format!("serialize Identify: {e}")))?,
     };

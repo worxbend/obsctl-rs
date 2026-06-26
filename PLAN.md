@@ -418,7 +418,7 @@ Full task details in `.agent-loop/tasks.json`.
 | T019 | Remove unnecessary level.clone() in cli/router.rs   | improvement | 19  | completed |
 | T020 | Fix Span::raw clones in widgets/scenes+audio        | improvement | 20  | completed |
 | T021 | Add tracing::debug for unhandled TOPIC_EVENTS vars  | improvement | 21  | completed |
-| T022 | Define ES_* event subscription constants            | improvement | 22  | pending |
+| T022 | Define ES_* event subscription constants            | improvement | 22  | completed |
 | T023 | CHECKPOINT: build+test+clippy after idioms          | validation  | 23  | pending |
 | T024 | Reduce per-call allocation in TuiModel::scenes()    | improvement | 24  | pending |
 | T025 | Introduce CommandExecutorConfig struct              | improvement | 25  | pending |
