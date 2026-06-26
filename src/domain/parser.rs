@@ -129,8 +129,7 @@ fn tokenize(input: &str) -> Result<Vec<String>> {
             }
             ' ' | '\t' if !in_quotes => {
                 if !current.is_empty() {
-                    tokens.push(current.clone());
-                    current.clear();
+                    tokens.push(std::mem::take(&mut current));
                 }
             }
             _ => current.push(c),
