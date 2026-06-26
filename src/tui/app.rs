@@ -355,22 +355,16 @@ fn command_to_payload(cmd: Command) -> CommandPayload {
     }
 }
 
-async fn send_simple_with_target(socket_path: &Path, name: &str, target: &str) -> String {
-    let payload = CommandPayload {
-        name: name.to_string(),
-        args: serde_json::json!({ "target": target }),
-    };
-    match send_command(socket_path, payload).await {
-        Ok(ServerMessage::Response {
-            ok, result, error, ..
-        }) => {
+fn format_ipc_response(res: Result<ServerMessage>, ok_fallback: &str) -> String {
+    match res {
+        Ok(ServerMessage::Response { ok, result, error, .. }) => {
             if ok {
                 result
                     .as_ref()
                     .and_then(|v| v.get("message"))
                     .and_then(|m| m.as_str())
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| "ok".to_string())
+                    .unwrap_or_else(|| ok_fallback.to_string())
             } else {
                 error
                     .map(|e| format!("error [{}]: {}", e.code, e.message))
@@ -380,6 +374,14 @@ async fn send_simple_with_target(socket_path: &Path, name: &str, target: &str) -
         Ok(_) => "unexpected response".to_string(),
         Err(e) => format!("error: {e}"),
     }
+}
+
+async fn send_simple_with_target(socket_path: &Path, name: &str, target: &str) -> String {
+    let payload = CommandPayload {
+        name: name.to_string(),
+        args: serde_json::json!({ "target": target }),
+    };
+    format_ipc_response(send_command(socket_path, payload).await, "ok")
 }
 
 async fn send_set_volume(socket_path: &Path, target: &str, percent: u8) -> String {
@@ -387,26 +389,10 @@ async fn send_set_volume(socket_path: &Path, target: &str, percent: u8) -> Strin
         name: "set_volume".to_string(),
         args: serde_json::json!({ "target": target, "percent": percent }),
     };
-    match send_command(socket_path, payload).await {
-        Ok(ServerMessage::Response {
-            ok, result, error, ..
-        }) => {
-            if ok {
-                result
-                    .as_ref()
-                    .and_then(|v| v.get("message"))
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("volume → {percent}%"))
-            } else {
-                error
-                    .map(|e| format!("error [{}]: {}", e.code, e.message))
-                    .unwrap_or_else(|| "error".to_string())
-            }
-        }
-        Ok(_) => "unexpected response".to_string(),
-        Err(e) => format!("error: {e}"),
-    }
+    format_ipc_response(
+        send_command(socket_path, payload).await,
+        &format!("volume → {percent}%"),
+    )
 }
 
 async fn send_simple(socket_path: &Path, name: &str) -> String {
@@ -414,24 +400,5 @@ async fn send_simple(socket_path: &Path, name: &str) -> String {
         name: name.to_string(),
         args: serde_json::Value::Null,
     };
-    match send_command(socket_path, payload).await {
-        Ok(ServerMessage::Response {
-            ok, result, error, ..
-        }) => {
-            if ok {
-                result
-                    .as_ref()
-                    .and_then(|v| v.get("message"))
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "ok".to_string())
-            } else {
-                error
-                    .map(|e| format!("error [{}]: {}", e.code, e.message))
-                    .unwrap_or_else(|| "error".to_string())
-            }
-        }
-        Ok(_) => "unexpected response".to_string(),
-        Err(e) => format!("error: {e}"),
-    }
+    format_ipc_response(send_command(socket_path, payload).await, "ok")
 }

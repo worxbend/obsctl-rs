@@ -399,7 +399,7 @@ Full task details in `.agent-loop/tasks.json`.
 |------|-----------------------------------------------------|-------------|-----|---------|
 | T001 | Fix failing state_event_wire_json_is_stable test    | fix         | 1   | **done** |
 | T002 | Extract spawn_session_forwarder in tui/app.rs       | improvement | 2   | **done** |
-| T003 | Extract format_ipc_response in tui/app.rs           | improvement | 3   | pending |
+| T003 | Extract format_ipc_response in tui/app.rs           | improvement | 3   | **done** |
 | T004 | Extract scene/audio alias entry helpers             | improvement | 4   | pending |
 | T005 | CHECKPOINT: build+test after H dedup refactors      | validation  | 5   | pending |
 | T006 | Extract handle_action dispatch from run_loop        | improvement | 6   | pending |
