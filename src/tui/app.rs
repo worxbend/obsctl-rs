@@ -1,5 +1,7 @@
 use std::{io::stdout, path::Path, time::Duration};
 
+use time::OffsetDateTime;
+
 use crossterm::{
     event::{Event, EventStream, KeyEventKind},
     execute,
@@ -11,12 +13,12 @@ use tokio::sync::mpsc;
 
 use crate::{
     domain::{command::Command, parser, result::Result},
-    ipc::protocol::{CommandPayload, ServerMessage},
+    ipc::protocol::{CommandPayload, LogLevel, ServerMessage},
     tui::{
         event_applier::apply_server_message,
         input::{TuiAction, handle_key},
         layout,
-        model::{FocusPanel, TuiModel},
+        model::{FocusPanel, TuiLogEntry, TuiModel},
         session::{TuiEventSession, send_command},
         widgets,
     },
@@ -54,7 +56,14 @@ async fn run_loop(
         }
         Err(e) => {
             model.connected_to_daemon = false;
-            model.last_result = Some(format!("Cannot connect to daemon: {e}"));
+            let msg = format!("Cannot connect to daemon: {e}");
+            model.last_result = Some(msg.clone());
+            model.push_log(TuiLogEntry {
+                level: LogLevel::Error,
+                message: msg,
+                target: None,
+                timestamp: OffsetDateTime::now_utc(),
+            });
         }
     }
 
