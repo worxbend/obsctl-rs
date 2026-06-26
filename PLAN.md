@@ -427,7 +427,7 @@ Full task details in `.agent-loop/tasks.json`.
 | T028 | CHECKPOINT: build+test after org changes            | validation  | 28  | completed |
 | T029 | Fix variant exhaustiveness checks (compile-time)    | improvement | 29  | completed |
 | T030 | Add tests for cmd_toggle_stream/toggle_record       | improvement | 30  | completed |
-| T031 | Add test for TuiModel::scenes() hidden filter       | improvement | 31  | pending |
+| T031 | Add test for TuiModel::scenes() hidden filter       | improvement | 31  | completed |
 | T032 | Complete CommandPaletteState completions+cycling    | feature     | 32  | pending |
 | T033 | Add TuiAction::CompleteNext/Prev + Tab keys         | feature     | 33  | pending |
 | T034 | Create tui/completion.rs with compute fn            | feature     | 34  | pending |

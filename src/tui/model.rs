@@ -135,3 +135,53 @@ impl TuiModel {
         self.audio_inputs().get(self.audio_cursor)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::obs::state::{ObsSnapshot, SceneState};
+
+    fn make_scene(name: &str, hidden: bool) -> SceneState {
+        SceneState {
+            name: name.to_string(),
+            hidden,
+            ..Default::default()
+        }
+    }
+
+    fn model_with_scenes(scenes: Vec<SceneState>) -> TuiModel {
+        let mut model = TuiModel::default();
+        model.snapshot = Some(ObsSnapshot {
+            scenes,
+            ..Default::default()
+        });
+        model.clamp_cursors();
+        model
+    }
+
+    #[test]
+    fn scenes_excludes_hidden() {
+        let model = model_with_scenes(vec![
+            make_scene("visible_a", false),
+            make_scene("hidden_x", true),
+            make_scene("visible_b", false),
+            make_scene("hidden_y", true),
+        ]);
+
+        let visible: Vec<&str> = model.scenes().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(visible, vec!["visible_a", "visible_b"]);
+    }
+
+    #[test]
+    fn cursor_stays_zero_when_all_scenes_hidden() {
+        let mut model = model_with_scenes(vec![
+            make_scene("hidden_a", true),
+            make_scene("hidden_b", true),
+        ]);
+        model.scene_cursor = 5; // set an out-of-bounds cursor before clamping
+        model.clamp_cursors();
+
+        assert_eq!(model.scenes().len(), 0);
+        assert_eq!(model.scene_cursor, 0);
+    }
+}
