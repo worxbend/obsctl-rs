@@ -45,7 +45,7 @@ fn scene_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry>
 fn audio_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry>
 ```
 
-### M — `config/dump.rs`: near-identical duplicate validation fns
+### M — `config/dump.rs`: near-identical duplicate validation fns [DONE T012]
 `validate_scene_duplicates` and `validate_audio_duplicates` (lines 138–180) share 95% of their
 body. Merge into a single generic:
 ```rust

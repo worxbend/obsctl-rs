@@ -77,7 +77,12 @@ fn merge_scenes(existing: &[SceneConfig], obs_names: &[String]) -> Result<Vec<Sc
         }
     }
 
-    validate_scene_duplicates(&merged)?;
+    validate_no_duplicates(
+        "scene",
+        merged
+            .iter()
+            .map(|sc| (sc.alias.as_deref(), sc.shortcut.as_deref())),
+    )?;
     Ok(merged)
 }
 
@@ -131,48 +136,34 @@ fn merge_inputs(
         }
     }
 
-    validate_audio_duplicates(&merged)?;
+    validate_no_duplicates(
+        "audio",
+        merged
+            .iter()
+            .map(|ai| (ai.alias.as_deref(), ai.shortcut.as_deref())),
+    )?;
     Ok(merged)
 }
 
-fn validate_scene_duplicates(scenes: &[SceneConfig]) -> Result<()> {
-    let mut aliases = HashSet::new();
-    let mut shortcuts = HashSet::new();
-    for sc in scenes {
-        if let Some(alias) = &sc.alias
-            && !aliases.insert(alias.clone())
+fn validate_no_duplicates<'a>(
+    label: &str,
+    items: impl Iterator<Item = (Option<&'a str>, Option<&'a str>)>,
+) -> Result<()> {
+    let mut aliases: HashSet<&str> = HashSet::new();
+    let mut shortcuts: HashSet<&str> = HashSet::new();
+    for (alias, shortcut) in items {
+        if let Some(alias) = alias
+            && !aliases.insert(alias)
         {
             return Err(ObsctlError::ConfigInvalid(format!(
-                "duplicate scene alias: '{alias}'"
+                "duplicate {label} alias: '{alias}'"
             )));
         }
-        if let Some(shortcut) = &sc.shortcut
-            && !shortcuts.insert(shortcut.clone())
+        if let Some(shortcut) = shortcut
+            && !shortcuts.insert(shortcut)
         {
             return Err(ObsctlError::ConfigInvalid(format!(
-                "duplicate scene shortcut: '{shortcut}'"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_audio_duplicates(inputs: &[AudioInputConfig]) -> Result<()> {
-    let mut aliases = HashSet::new();
-    let mut shortcuts = HashSet::new();
-    for ai in inputs {
-        if let Some(alias) = &ai.alias
-            && !aliases.insert(alias.clone())
-        {
-            return Err(ObsctlError::ConfigInvalid(format!(
-                "duplicate audio alias: '{alias}'"
-            )));
-        }
-        if let Some(shortcut) = &ai.shortcut
-            && !shortcuts.insert(shortcut.clone())
-        {
-            return Err(ObsctlError::ConfigInvalid(format!(
-                "duplicate audio shortcut: '{shortcut}'"
+                "duplicate {label} shortcut: '{shortcut}'"
             )));
         }
     }
