@@ -44,6 +44,35 @@ pub struct TuiLogEntry {
 pub struct CommandPaletteState {
     pub active: bool,
     pub input: String,
+    pub completions: Vec<String>,
+    pub completion_idx: Option<usize>,
+}
+
+impl CommandPaletteState {
+    pub fn cycle_next(&mut self) {
+        if self.completions.is_empty() {
+            return;
+        }
+        let next = match self.completion_idx {
+            None => 0,
+            Some(i) => (i + 1) % self.completions.len(),
+        };
+        self.completion_idx = Some(next);
+        self.input = self.completions[next].clone();
+    }
+
+    pub fn cycle_prev(&mut self) {
+        if self.completions.is_empty() {
+            return;
+        }
+        let prev = match self.completion_idx {
+            None => self.completions.len() - 1,
+            Some(0) => self.completions.len() - 1,
+            Some(i) => i - 1,
+        };
+        self.completion_idx = Some(prev);
+        self.input = self.completions[prev].clone();
+    }
 }
 
 impl From<LogEvent> for TuiLogEntry {
