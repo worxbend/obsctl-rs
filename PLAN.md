@@ -430,7 +430,7 @@ Full task details in `.agent-loop/tasks.json`.
 | T031 | Add test for TuiModel::scenes() hidden filter       | improvement | 31  | completed |
 | T032 | Complete CommandPaletteState completions+cycling    | feature     | 32  | completed |
 | T033 | Add TuiAction::CompleteNext/Prev + Tab keys         | feature     | 33  | completed |
-| T034 | Create tui/completion.rs with compute fn            | feature     | 34  | pending |
+| T034 | Create tui/completion.rs with compute fn            | feature     | 34  | completed |
 | T035 | Wire completions into tui/app.rs event loop         | feature     | 35  | pending |
 | T036 | Render completion chips in command_palette widget   | feature     | 36  | pending |
 | T037 | FINAL VALIDATION: cargo check + test + clippy       | validation  | 37  | pending |

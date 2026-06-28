@@ -1,4 +1,5 @@
 pub mod app;
+pub mod completion;
 pub mod event_applier;
 pub mod input;
 pub mod layout;

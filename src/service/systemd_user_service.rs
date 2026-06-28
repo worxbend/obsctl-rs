@@ -12,16 +12,16 @@ pub fn unit_file_content(exec_path: &Path) -> String {
         "[Unit]\n\
          Description=obsctl OBS WebSocket control daemon\n\
          After=graphical-session.target\n\
-         Wants=graphical-session.target\n\
+         StartLimitIntervalSec=0\n\
          \n\
          [Service]\n\
          Type=simple\n\
          ExecStart={exec} server --headless\n\
-         Restart=always\n\
-         RestartSec=3\n\
+         Restart=on-failure\n\
+         RestartSec=10\n\
          \n\
          [Install]\n\
-         WantedBy=default.target\n",
+         WantedBy=graphical-session.target\n",
         exec = exec_path.display()
     )
 }
@@ -61,7 +61,7 @@ mod tests {
         assert!(content.contains("[Unit]"));
         assert!(content.contains("[Service]"));
         assert!(content.contains("[Install]"));
-        assert!(content.contains("WantedBy=default.target"));
+        assert!(content.contains("WantedBy=graphical-session.target"));
         assert!(!content.contains("sudo"));
     }
 }

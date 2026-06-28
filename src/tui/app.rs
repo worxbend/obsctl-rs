@@ -15,6 +15,7 @@ use crate::{
     domain::{command::Command, parser, result::Result},
     ipc::protocol::{CommandPayload, LogLevel, ServerMessage},
     tui::{
+        completion,
         event_applier::apply_server_message,
         input::{TuiAction, handle_key},
         layout,
@@ -153,25 +154,32 @@ async fn handle_action(
             model.command_palette.active = true;
             model.command_palette.input.clear();
             model.command_palette.input.push('/');
+            refresh_completions(model);
             (false, None)
         }
         TuiAction::ClosePalette => {
             model.command_palette.active = false;
             model.command_palette.input.clear();
+            model.command_palette.completions.clear();
+            model.command_palette.completion_idx = None;
             (false, None)
         }
         TuiAction::PaletteChar(c) => {
             model.command_palette.input.push(c);
+            refresh_completions(model);
             (false, None)
         }
         TuiAction::PaletteBackspace => {
             model.command_palette.input.pop();
+            refresh_completions(model);
             (false, None)
         }
         TuiAction::PaletteSubmit => {
             let input = model.command_palette.input.clone();
             model.command_palette.active = false;
             model.command_palette.input.clear();
+            model.command_palette.completions.clear();
+            model.command_palette.completion_idx = None;
             let result = dispatch_palette_command(socket_path, &input).await;
             if result == "quit" {
                 return (true, None);
@@ -276,6 +284,12 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) {
     widgets::command_palette::render(f, areas.palette, model);
 }
 
+
+fn refresh_completions(model: &mut TuiModel) {
+    let input = model.command_palette.input.clone();
+    model.command_palette.completions = completion::compute(&input, model);
+    model.command_palette.completion_idx = None;
+}
 
 async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
     match parser::parse(input) {
