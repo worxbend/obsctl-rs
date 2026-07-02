@@ -1,5 +1,8 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -16,7 +19,11 @@ use crate::ipc::{
     protocol::{ErrorPayload, LogEvent, LogLevel, ServerMessage, public_error_code},
     session::{BroadcastHub, CommandDispatch},
 };
-use crate::obs::{client::ObsClient, requests, state::{ObsSnapshot, ServerStatus}};
+use crate::obs::{
+    client::ObsClient,
+    requests,
+    state::{ObsSnapshot, ServerStatus},
+};
 use crate::server::{client_registry::ClientRegistry, state_store::StateStore};
 
 pub struct CommandExecutorConfig {
@@ -26,6 +33,7 @@ pub struct CommandExecutorConfig {
     pub config_path: Option<PathBuf>,
     pub socket_path: PathBuf,
     pub registry: ClientRegistry,
+    pub reconnecting: Arc<AtomicBool>,
     pub reconnect_tx: mpsc::Sender<()>,
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
     pub hub: Arc<BroadcastHub>,
@@ -38,6 +46,7 @@ pub struct CommandExecutor {
     config_path: Option<PathBuf>,
     socket_path: PathBuf,
     registry: ClientRegistry,
+    reconnecting: Arc<AtomicBool>,
     started_at: Instant,
     reconnect_tx: mpsc::Sender<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -53,6 +62,7 @@ impl CommandExecutor {
             config_path: cfg.config_path,
             socket_path: cfg.socket_path,
             registry: cfg.registry,
+            reconnecting: cfg.reconnecting,
             started_at: Instant::now(),
             reconnect_tx: cfg.reconnect_tx,
             shutdown_tx: cfg.shutdown_tx,
@@ -122,7 +132,7 @@ impl CommandExecutor {
             socket_path: self.socket_path.clone(),
             client_count: self.registry.count(),
             obs_connected: snap.connected,
-            reconnecting: false, // supervisor sets this separately
+            reconnecting: self.reconnecting.load(Ordering::Relaxed),
             last_error: snap.last_error.clone(),
         };
         drop(snap);

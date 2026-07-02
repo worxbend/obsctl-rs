@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 
 mod support {
@@ -16,8 +16,8 @@ use obsctl_rs::{
     config::model::Config,
     ipc::{
         protocol::{
-            CommandPayload, LogEvent, LogLevel, ServerMessage, Topic, TOPIC_EVENTS, TOPIC_LOGS,
-            TOPIC_STATE, exit_code_for_public_error_code,
+            CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS,
+            TOPIC_STATE, Topic, exit_code_for_public_error_code,
         },
         session::BroadcastHub,
         unix_client::IpcClient,
@@ -75,6 +75,7 @@ async fn start_test_server_with_config(
     let hub = Arc::new(BroadcastHub::new());
     let state = StateStore::new(Arc::clone(&hub));
     let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let reconnecting = Arc::new(AtomicBool::new(false));
     let mut cfg = Config::default();
     cfg.connection.password_env = String::new();
     let config = Arc::new(Mutex::new(cfg));
@@ -90,13 +91,14 @@ async fn start_test_server_with_config(
         config,
         config_path: Some(config_path.to_path_buf()),
         socket_path: socket_path.clone(),
-        registry,
+        registry: registry.clone(),
+        reconnecting: Arc::clone(&reconnecting),
         reconnect_tx,
         shutdown_tx: shutdown_tx.clone(),
         hub: Arc::clone(&hub),
     });
 
-    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
+    let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
     tokio::spawn(executor.run(cmd_rx));
     tokio::spawn(server.run(cmd_tx, shutdown_rx));
 
@@ -112,6 +114,7 @@ async fn start_test_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>) {
     let hub = Arc::new(BroadcastHub::new());
     let state = StateStore::new(Arc::clone(&hub));
     let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let reconnecting = Arc::new(AtomicBool::new(false));
     let mut cfg = Config::default();
     cfg.connection.password_env = String::new(); // no env var required in tests
     let config = Arc::new(Mutex::new(cfg));
@@ -126,13 +129,14 @@ async fn start_test_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>) {
         config,
         config_path: None,
         socket_path: socket_path.clone(),
-        registry,
+        registry: registry.clone(),
+        reconnecting: Arc::clone(&reconnecting),
         reconnect_tx,
         shutdown_tx: shutdown_tx.clone(),
         hub: Arc::clone(&hub),
     });
 
-    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
+    let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
     tokio::spawn(executor.run(cmd_rx));
     tokio::spawn(server.run(cmd_tx, shutdown_rx));
 
@@ -154,6 +158,7 @@ async fn start_test_server_with_obs_client(
     let state = StateStore::new(Arc::clone(&hub));
     state.replace(snapshot).await;
     let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(Some(obs_client)));
+    let reconnecting = Arc::new(AtomicBool::new(false));
     let config = Arc::new(Mutex::new(cfg));
     let registry = ClientRegistry::new();
     let (reconnect_tx, _reconnect_rx) = mpsc::channel::<()>(4);
@@ -166,13 +171,14 @@ async fn start_test_server_with_obs_client(
         config,
         config_path: None,
         socket_path: socket_path.clone(),
-        registry,
+        registry: registry.clone(),
+        reconnecting: Arc::clone(&reconnecting),
         reconnect_tx,
         shutdown_tx: shutdown_tx.clone(),
         hub: Arc::clone(&hub),
     });
 
-    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
+    let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
     tokio::spawn(executor.run(cmd_rx));
     tokio::spawn(server.run(cmd_tx, shutdown_rx));
 
@@ -191,6 +197,7 @@ async fn start_test_server_with_obs_supervisor(
     let hub = Arc::new(BroadcastHub::new());
     let state = StateStore::new(Arc::clone(&hub));
     let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let reconnecting = Arc::new(AtomicBool::new(false));
     let config = Arc::new(Mutex::new(cfg));
     let registry = ClientRegistry::new();
     let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(4);
@@ -203,7 +210,8 @@ async fn start_test_server_with_obs_supervisor(
         config: Arc::clone(&config),
         config_path: None,
         socket_path: socket_path.clone(),
-        registry,
+        registry: registry.clone(),
+        reconnecting: Arc::clone(&reconnecting),
         reconnect_tx,
         shutdown_tx: shutdown_tx.clone(),
         hub: Arc::clone(&hub),
@@ -212,12 +220,13 @@ async fn start_test_server_with_obs_supervisor(
         Arc::clone(&config),
         state.clone(),
         obs_handle,
+        Arc::clone(&reconnecting),
         reconnect_rx,
         shutdown_rx.clone(),
         Arc::clone(&hub),
     );
 
-    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
+    let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
     tokio::spawn(executor.run(cmd_rx));
     tokio::spawn(server.run(cmd_tx, shutdown_rx));
     tokio::spawn(supervisor.run());
@@ -387,7 +396,9 @@ async fn get_server_status_returns_fields() {
     let data = result.unwrap();
     assert!(data.get("pid").is_some());
     assert!(data.get("uptime_seconds").is_some());
+    assert!(data["client_count"].as_u64().unwrap() >= 1);
     assert_eq!(data["obs_connected"], false);
+    assert_eq!(data["reconnecting"], false);
 }
 
 #[tokio::test]
@@ -563,6 +574,27 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
         .expect("Mic input");
     assert_eq!(mic["muted"], true);
 
+    fake_obs
+        .set_response(
+            "GetSceneList",
+            PreparedResponse::success(serde_json::json!({
+                "currentProgramSceneName": "BRB",
+                "scenes": [
+                    { "sceneName": "Main", "sceneIndex": 0 },
+                    { "sceneName": "BRB", "sceneIndex": 1 },
+                    { "sceneName": "Interview", "sceneIndex": 2 }
+                ]
+            })),
+        )
+        .await;
+    fake_obs
+        .set_response(
+            "GetCurrentProgramScene",
+            PreparedResponse::success(serde_json::json!({
+                "currentProgramSceneName": "BRB"
+            })),
+        )
+        .await;
     fake_obs.emit_event(
         "SceneCreated",
         serde_json::json!({ "sceneName": "Interview" }),
@@ -578,10 +610,21 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
 
     let scene_list_state =
         next_state_event_matching(&mut state_client, "scene list mutation broadcast", |data| {
-            data["connected"] == true && data["current_scene"] == "BRB"
+            data["connected"] == true
+                && data["current_scene"] == "BRB"
+                && data["scenes"]
+                    .as_array()
+                    .is_some_and(|scenes| scenes.iter().any(|scene| scene["name"] == "Interview"))
         })
         .await;
     assert_eq!(scene_list_state["current_scene"], "BRB");
+    assert!(
+        scene_list_state["scenes"]
+            .as_array()
+            .expect("scenes array")
+            .iter()
+            .any(|scene| scene["name"] == "Interview")
+    );
 
     fake_obs.emit_event(
         "InputCreated",
@@ -716,6 +759,12 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
             "inputMuted": false
         }),
     );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        serde_json::to_value(state.read().await).unwrap(),
+        state_before_unknown
+    );
+
     fake_obs.emit_event(
         "InputMuteStateChanged",
         serde_json::json!({ "inputName": "Mic", "inputMuted": true }),
@@ -732,8 +781,14 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
     .await;
 
     assert_eq!(
-        serde_json::to_value(state.read().await).unwrap(),
-        state_before_unknown
+        state
+            .read()
+            .await
+            .audio_inputs
+            .iter()
+            .find(|input| input.name == "Mic")
+            .and_then(|input| input.muted),
+        Some(true)
     );
     let unknown_event_log_marker = "obs-event-routing-unknown-event-complete";
     publish_log_marker(&hub, unknown_event_log_marker);
@@ -812,6 +867,7 @@ async fn socket_file_exists_while_server_runs() {
     let hub = Arc::new(BroadcastHub::new());
     let state = StateStore::new(Arc::clone(&hub));
     let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let reconnecting = Arc::new(AtomicBool::new(false));
     let mut cfg = Config::default();
     cfg.connection.password_env = String::new();
     let config = Arc::new(Mutex::new(cfg));
@@ -826,13 +882,14 @@ async fn socket_file_exists_while_server_runs() {
         config,
         config_path: None,
         socket_path: socket_path.clone(),
-        registry,
+        registry: registry.clone(),
+        reconnecting: Arc::clone(&reconnecting),
         reconnect_tx,
         shutdown_tx: shutdown_tx.clone(),
         hub: Arc::clone(&hub),
     });
 
-    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
+    let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
     tokio::spawn(executor.run(cmd_rx));
     tokio::spawn(server.run(cmd_tx, shutdown_rx));
 
@@ -855,6 +912,7 @@ async fn server_handles_multiple_sequential_clients() {
     let hub = Arc::new(BroadcastHub::new());
     let state = StateStore::new(Arc::clone(&hub));
     let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let reconnecting = Arc::new(AtomicBool::new(false));
     let mut cfg = Config::default();
     cfg.connection.password_env = String::new();
     let config = Arc::new(Mutex::new(cfg));
@@ -869,13 +927,14 @@ async fn server_handles_multiple_sequential_clients() {
         config,
         config_path: None,
         socket_path: socket_path.clone(),
-        registry,
+        registry: registry.clone(),
+        reconnecting: Arc::clone(&reconnecting),
         reconnect_tx,
         shutdown_tx: shutdown_tx.clone(),
         hub: Arc::clone(&hub),
     });
 
-    let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
+    let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
     tokio::spawn(executor.run(cmd_rx));
     tokio::spawn(server.run(cmd_tx, shutdown_rx));
 
@@ -1042,7 +1101,13 @@ async fn reload_config_returns_config_invalid_for_bad_file() {
     assert_eq!(result.unwrap()["message"], "pong");
 }
 
-async fn start_obs_connected_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>, support::fake_obs_server::FakeObsHandle) {
+async fn start_obs_connected_server(
+    dir: &TempDir,
+) -> (
+    IpcClient,
+    watch::Sender<bool>,
+    support::fake_obs_server::FakeObsHandle,
+) {
     let fake_obs = spawn_fake_obs(false, None).await;
 
     let mut cfg = Config::default();
@@ -1059,7 +1124,8 @@ async fn start_obs_connected_server(dir: &TempDir) -> (IpcClient, watch::Sender<
         ..ObsSnapshot::default()
     };
 
-    let (client, shutdown) = start_test_server_with_obs_client(dir, cfg, obs_client, snapshot).await;
+    let (client, shutdown) =
+        start_test_server_with_obs_client(dir, cfg, obs_client, snapshot).await;
     (client, shutdown, fake_obs)
 }
 

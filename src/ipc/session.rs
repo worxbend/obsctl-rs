@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::ipc::protocol::{
-    CommandPayload, LogEvent, ObsEventPayload, ServerMessage, Topic, TOPIC_STATE,
+    CommandPayload, LogEvent, ObsEventPayload, ServerMessage, TOPIC_STATE, Topic,
 };
 
 pub const BROADCAST_CAPACITY: usize = 64;

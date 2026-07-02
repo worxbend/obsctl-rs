@@ -248,16 +248,14 @@ async fn handle_action(
                 (false, None)
             }
         }
-        TuiAction::RetryConnect => {
-            match TuiEventSession::connect(socket_path).await {
-                Ok(session) => {
-                    model.connected_to_daemon = true;
-                    spawn_session_forwarder(session, ipc_tx.clone());
-                    (false, Some("Reconnected to daemon.".to_string()))
-                }
-                Err(e) => (false, Some(format!("Retry failed: {e}"))),
+        TuiAction::RetryConnect => match TuiEventSession::connect(socket_path).await {
+            Ok(session) => {
+                model.connected_to_daemon = true;
+                spawn_session_forwarder(session, ipc_tx.clone());
+                (false, Some("Reconnected to daemon.".to_string()))
             }
-        }
+            Err(e) => (false, Some(format!("Retry failed: {e}"))),
+        },
         TuiAction::CompleteNext => {
             model.command_palette.cycle_next();
             (false, None)
@@ -283,7 +281,6 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) {
     widgets::logs::render(f, areas.right, model);
     widgets::command_palette::render(f, areas.palette, model);
 }
-
 
 fn refresh_completions(model: &mut TuiModel) {
     let input = model.command_palette.input.clone();
@@ -358,7 +355,9 @@ fn command_to_payload(cmd: Command) -> CommandPayload {
 
 fn format_ipc_response(res: Result<ServerMessage>, ok_fallback: &str) -> String {
     match res {
-        Ok(ServerMessage::Response { ok, result, error, .. }) => {
+        Ok(ServerMessage::Response {
+            ok, result, error, ..
+        }) => {
             if ok {
                 result
                     .as_ref()

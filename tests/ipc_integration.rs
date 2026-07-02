@@ -3,8 +3,8 @@ use std::sync::Arc;
 use obsctl_rs::domain::errors::ObsctlError;
 use obsctl_rs::ipc::{
     protocol::{
-        CommandPayload, LogEvent, LogLevel, PublicErrorCode, ServerMessage, Topic, TOPIC_LOGS,
-        TOPIC_STATE, public_error_code,
+        CommandPayload, LogEvent, LogLevel, PublicErrorCode, ServerMessage, TOPIC_LOGS,
+        TOPIC_STATE, Topic, public_error_code,
     },
     session::{BroadcastHub, CommandDispatch},
     unix_client::IpcClient,

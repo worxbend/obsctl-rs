@@ -46,7 +46,12 @@ impl ObsConnectionParams {
 pub async fn connect(
     params: &ObsConnectionParams,
     event_tx: mpsc::Sender<ObsEvent>,
-) -> Result<(ObsClient, String, String, tokio::sync::oneshot::Receiver<()>)> {
+) -> Result<(
+    ObsClient,
+    String,
+    String,
+    tokio::sync::oneshot::Receiver<()>,
+)> {
     let (ws_stream, _) = tokio::time::timeout(
         std::time::Duration::from_millis(params.connect_timeout_ms),
         tokio_tungstenite::connect_async(&params.url),

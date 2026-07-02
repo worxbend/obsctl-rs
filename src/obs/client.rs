@@ -117,7 +117,12 @@ pub async fn handshake(
     password: Option<&str>,
     event_tx: mpsc::Sender<ObsEvent>,
     request_timeout_ms: u64,
-) -> Result<(ObsClient, String, String, tokio::sync::oneshot::Receiver<()>)> {
+) -> Result<(
+    ObsClient,
+    String,
+    String,
+    tokio::sync::oneshot::Receiver<()>,
+)> {
     use crate::obs::protocol::{HelloData, IdentifyData, OPCODE_HELLO, OPCODE_IDENTIFIED};
 
     // 1. Read Hello
@@ -171,7 +176,14 @@ pub async fn handshake(
     let (req_tx, req_rx) = mpsc::channel::<ObsClientRequest>(64);
     let (cancel_tx, cancel_rx) = mpsc::channel::<String>(64);
     let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(run_client_task(sink, stream, req_rx, cancel_rx, event_tx, disconnect_tx));
+    tokio::spawn(run_client_task(
+        sink,
+        stream,
+        req_rx,
+        cancel_rx,
+        event_tx,
+        disconnect_tx,
+    ));
 
     let client = ObsClient {
         sender: req_tx,
@@ -403,19 +415,12 @@ async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|input| {
-                            let name = input
-                                .get("inputName")
-                                .and_then(|n| n.as_str())?
-                                .to_string();
-                            let levels = input
-                                .get("inputLevelsMul")
-                                .and_then(|l| l.as_array())?;
+                            let name = input.get("inputName").and_then(|n| n.as_str())?.to_string();
+                            let levels = input.get("inputLevelsMul").and_then(|l| l.as_array())?;
                             // Take max magnitude (index 0) across all channels.
                             let max_mag = levels
                                 .iter()
-                                .filter_map(|ch| {
-                                    ch.as_array()?.first()?.as_f64().map(|v| v as f32)
-                                })
+                                .filter_map(|ch| ch.as_array()?.first()?.as_f64().map(|v| v as f32))
                                 .fold(0.0f32, f32::max);
                             Some((name, max_mag))
                         })

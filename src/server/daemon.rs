@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tokio::sync::{Mutex, mpsc};
 use tracing::{error, info};
@@ -66,6 +67,7 @@ pub async fn run(options: ServerOptions) -> i32 {
     let hub = Arc::new(BroadcastHub::new());
     let state = StateStore::new(Arc::clone(&hub));
     let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let reconnecting = Arc::new(AtomicBool::new(false));
     let config_shared = Arc::new(Mutex::new(config));
     let registry = ClientRegistry::new();
 
@@ -74,16 +76,17 @@ pub async fn run(options: ServerOptions) -> i32 {
     let (cmd_tx, cmd_rx) = mpsc::channel(128);
 
     // Bind IPC server
-    let ipc_server = match IpcServer::bind(&socket_path, Arc::clone(&hub)) {
-        Ok(s) => s,
-        Err(e) => {
-            error!(
-                "Failed to bind IPC socket at {}: {e}",
-                socket_path.display()
-            );
-            return 3;
-        }
-    };
+    let ipc_server =
+        match IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(
+                    "Failed to bind IPC socket at {}: {e}",
+                    socket_path.display()
+                );
+                return 3;
+            }
+        };
     info!("IPC server listening at {}", socket_path.display());
     hub.publish_log(
         LogEvent::new(
@@ -103,6 +106,7 @@ pub async fn run(options: ServerOptions) -> i32 {
         config_path: Some(config_path.clone()),
         socket_path: socket_path.clone(),
         registry: registry.clone(),
+        reconnecting: Arc::clone(&reconnecting),
         reconnect_tx: reconnect_tx.clone(),
         shutdown_tx: shutdown_tx.clone(),
         hub: Arc::clone(&hub),
@@ -112,6 +116,7 @@ pub async fn run(options: ServerOptions) -> i32 {
         Arc::clone(&config_shared),
         state.clone(),
         Arc::clone(&obs_handle),
+        Arc::clone(&reconnecting),
         reconnect_rx,
         shutdown_rx.clone(),
         Arc::clone(&hub),

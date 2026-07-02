@@ -85,7 +85,7 @@ impl Default for ConnectionConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReconnectConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,

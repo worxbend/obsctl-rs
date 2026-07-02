@@ -7,7 +7,6 @@ use crate::{
     obs::state::{AudioState, ObsSnapshot, SceneState, ServerStatus},
 };
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FocusPanel {
     #[default]
@@ -179,11 +178,13 @@ mod tests {
     }
 
     fn model_with_scenes(scenes: Vec<SceneState>) -> TuiModel {
-        let mut model = TuiModel::default();
-        model.snapshot = Some(ObsSnapshot {
-            scenes,
+        let mut model = TuiModel {
+            snapshot: Some(ObsSnapshot {
+                scenes,
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         model.clamp_cursors();
         model
     }

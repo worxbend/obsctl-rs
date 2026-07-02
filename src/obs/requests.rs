@@ -12,7 +12,11 @@ fn next_id() -> String {
 }
 
 fn req(type_: &str) -> RequestData {
-    RequestData { request_type: type_.to_string(), request_id: next_id(), request_data: None }
+    RequestData {
+        request_type: type_.to_string(),
+        request_id: next_id(),
+        request_data: None,
+    }
 }
 
 fn req_with(type_: &str, data: serde_json::Value) -> RequestData {
@@ -23,24 +27,35 @@ fn req_with(type_: &str, data: serde_json::Value) -> RequestData {
     }
 }
 
-pub fn get_version() -> RequestData { req("GetVersion") }
+pub fn get_version() -> RequestData {
+    req("GetVersion")
+}
 
-pub fn get_scene_list() -> RequestData { req("GetSceneList") }
+pub fn get_scene_list() -> RequestData {
+    req("GetSceneList")
+}
 
-pub fn get_current_program_scene() -> RequestData { req("GetCurrentProgramScene") }
+pub fn get_current_program_scene() -> RequestData {
+    req("GetCurrentProgramScene")
+}
 
 pub fn set_current_program_scene(scene_name: &str) -> RequestData {
     req_with("SetCurrentProgramScene", json!({ "sceneName": scene_name }))
 }
 
-pub fn get_input_list() -> RequestData { req("GetInputList") }
+pub fn get_input_list() -> RequestData {
+    req("GetInputList")
+}
 
 pub fn get_input_mute(input_name: &str) -> RequestData {
     req_with("GetInputMute", json!({ "inputName": input_name }))
 }
 
 pub fn set_input_mute(input_name: &str, muted: bool) -> RequestData {
-    req_with("SetInputMute", json!({ "inputName": input_name, "inputMuted": muted }))
+    req_with(
+        "SetInputMute",
+        json!({ "inputName": input_name, "inputMuted": muted }),
+    )
 }
 
 pub fn toggle_input_mute(input_name: &str) -> RequestData {
@@ -52,16 +67,27 @@ pub fn get_input_volume(input_name: &str) -> RequestData {
 }
 
 pub fn set_input_volume(input_name: &str, volume_mul: f64) -> RequestData {
-    req_with("SetInputVolume", json!({ "inputName": input_name, "inputVolumeMul": volume_mul }))
+    req_with(
+        "SetInputVolume",
+        json!({ "inputName": input_name, "inputVolumeMul": volume_mul }),
+    )
 }
 
-pub fn get_stream_status() -> RequestData { req("GetStreamStatus") }
+pub fn get_stream_status() -> RequestData {
+    req("GetStreamStatus")
+}
 
-pub fn get_record_status() -> RequestData { req("GetRecordStatus") }
+pub fn get_record_status() -> RequestData {
+    req("GetRecordStatus")
+}
 
-pub fn toggle_stream() -> RequestData { req("ToggleStream") }
+pub fn toggle_stream() -> RequestData {
+    req("ToggleStream")
+}
 
-pub fn toggle_record() -> RequestData { req("ToggleRecord") }
+pub fn toggle_record() -> RequestData {
+    req("ToggleRecord")
+}
 
 #[cfg(test)]
 mod tests {

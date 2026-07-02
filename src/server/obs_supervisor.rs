@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
@@ -21,6 +22,7 @@ pub struct ObsSupervisor {
     config: Arc<Mutex<Config>>,
     state: StateStore,
     obs_handle: Arc<Mutex<Option<ObsClient>>>,
+    reconnecting: Arc<AtomicBool>,
     reconnect_rx: mpsc::Receiver<()>,
     shutdown: watch::Receiver<bool>,
     hub: Arc<BroadcastHub>,
@@ -31,6 +33,7 @@ impl ObsSupervisor {
         config: Arc<Mutex<Config>>,
         state: StateStore,
         obs_handle: Arc<Mutex<Option<ObsClient>>>,
+        reconnecting: Arc<AtomicBool>,
         reconnect_rx: mpsc::Receiver<()>,
         shutdown: watch::Receiver<bool>,
         hub: Arc<BroadcastHub>,
@@ -39,6 +42,7 @@ impl ObsSupervisor {
             config,
             state,
             obs_handle,
+            reconnecting,
             reconnect_rx,
             shutdown,
             hub,
@@ -46,17 +50,26 @@ impl ObsSupervisor {
     }
 
     pub async fn run(mut self) {
-        loop {
-            let params = {
-                let cfg = self.config.lock().await;
-                ObsConnectionParams::from_config(&cfg.connection)
-            };
-            let reconnect_cfg = {
-                let cfg = self.config.lock().await;
-                cfg.reconnect.clone()
-            };
-            let mut policy = ReconnectPolicy::new(reconnect_cfg);
+        let mut reconnect_cfg = {
+            let cfg = self.config.lock().await;
+            cfg.reconnect.clone()
+        };
+        let mut policy = ReconnectPolicy::new(reconnect_cfg.clone());
 
+        loop {
+            let (params, latest_reconnect_cfg) = {
+                let cfg = self.config.lock().await;
+                (
+                    ObsConnectionParams::from_config(&cfg.connection),
+                    cfg.reconnect.clone(),
+                )
+            };
+            if latest_reconnect_cfg != reconnect_cfg {
+                reconnect_cfg = latest_reconnect_cfg;
+                policy = ReconnectPolicy::new(reconnect_cfg.clone());
+            }
+
+            self.reconnecting.store(true, Ordering::Relaxed);
             match self.attempt_connect(&params).await {
                 Ok((client, obs_version, ws_version, disconnect_rx)) => {
                     info!("OBS connected: studio={obs_version} ws={ws_version}");
@@ -65,6 +78,7 @@ impl ObsSupervisor {
                         format!("OBS connected: studio={obs_version} ws={ws_version}"),
                     );
                     policy.reset();
+                    self.reconnecting.store(false, Ordering::Relaxed);
 
                     let fetch_result = self
                         .fetch_and_publish_snapshot(&client, &obs_version, &ws_version)
@@ -115,6 +129,7 @@ impl ObsSupervisor {
             // Reconnect delay loop
             if !policy.enabled() {
                 info!("Reconnect disabled; supervisor stopping");
+                self.reconnecting.store(false, Ordering::Relaxed);
                 self.publish_log(
                     LogLevel::Info,
                     "OBS reconnect disabled; supervisor stopping",
@@ -124,6 +139,7 @@ impl ObsSupervisor {
             loop {
                 let Some(delay) = policy.next_delay() else {
                     info!("Reconnect exhausted; supervisor stopping");
+                    self.reconnecting.store(false, Ordering::Relaxed);
                     self.publish_log(
                         LogLevel::Warn,
                         "OBS reconnect exhausted; supervisor stopping",
@@ -140,6 +156,7 @@ impl ObsSupervisor {
                     }
                     _ = self.shutdown.changed() => {
                         if *self.shutdown.borrow() {
+                            self.reconnecting.store(false, Ordering::Relaxed);
                             return;
                         }
                     }
@@ -155,23 +172,55 @@ impl ObsSupervisor {
     async fn attempt_connect(
         &self,
         params: &ObsConnectionParams,
-    ) -> crate::domain::result::Result<(ObsClient, String, String, tokio::sync::oneshot::Receiver<()>)> {
+    ) -> crate::domain::result::Result<(
+        ObsClient,
+        String,
+        String,
+        tokio::sync::oneshot::Receiver<()>,
+    )> {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ObsEvent>(64);
-        let state_clone = self.state.clone();
+        let (client, obs_version, ws_version, disconnect_rx) = connect(params, event_tx).await?;
+        let event_client = client.clone();
+        let state = self.state.clone();
+        let config = Arc::clone(&self.config);
         let hub = Arc::clone(&self.hub);
+        let event_obs_version = obs_version.clone();
+        let event_ws_version = ws_version.clone();
 
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
+                let needs_full_refresh = matches!(event, ObsEvent::SceneListChanged);
+
                 // Log notable remote OBS changes before applying them.
                 log_obs_event(&hub, &event);
-                state_clone.apply_event(event.clone()).await;
+                state.apply_event(event.clone()).await;
                 if let Some(payload) = normalize_obs_event(&event) {
                     hub.publish_obs_event(payload);
+                }
+
+                if needs_full_refresh
+                    && let Err(e) = fetch_and_publish_snapshot_from(
+                        &config,
+                        &state,
+                        &event_client,
+                        &event_obs_version,
+                        &event_ws_version,
+                    )
+                    .await
+                {
+                    warn!("OBS snapshot refresh after scene-list change failed: {e}");
+                    hub.publish_log(
+                        LogEvent::new(
+                            LogLevel::Warn,
+                            format!("OBS snapshot refresh after scene-list change failed: {e}"),
+                        )
+                        .with_target("obsctl_rs::server::obs_supervisor"),
+                    );
                 }
             }
         });
 
-        connect(params, event_tx).await
+        Ok((client, obs_version, ws_version, disconnect_rx))
     }
 
     async fn fetch_and_publish_snapshot(
@@ -180,80 +229,8 @@ impl ObsSupervisor {
         obs_version: &str,
         ws_version: &str,
     ) -> crate::domain::result::Result<()> {
-        let scene_list_resp = client.request(requests::get_scene_list()).await?;
-        let scenes_raw = scene_list_resp
-            .get("scenes")
-            .cloned()
-            .unwrap_or(serde_json::Value::Array(Vec::new()));
-
-        let current_resp = client
-            .request(requests::get_current_program_scene())
-            .await?;
-        let current_scene = current_resp
-            .get("currentProgramSceneName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let input_list_resp = client.request(requests::get_input_list()).await?;
-        let input_names: Vec<String> = input_list_resp
-            .get("inputs")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.get("inputName").and_then(|n| n.as_str()))
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let mut inputs: Vec<(String, Option<bool>, Option<f64>)> = Vec::new();
-        for name in &input_names {
-            let muted = client
-                .request(requests::get_input_mute(name))
-                .await
-                .ok()
-                .and_then(|v| v.get("inputMuted").and_then(|b| b.as_bool()));
-
-            let vol = client
-                .request(requests::get_input_volume(name))
-                .await
-                .ok()
-                .and_then(|v| v.get("inputVolumeMul").and_then(|f| f.as_f64()));
-
-            inputs.push((name.clone(), muted, vol));
-        }
-
-        let streaming = client
-            .request(requests::get_stream_status())
+        fetch_and_publish_snapshot_from(&self.config, &self.state, client, obs_version, ws_version)
             .await
-            .ok()
-            .and_then(|v| v.get("outputActive").and_then(|b| b.as_bool()))
-            .unwrap_or(false);
-
-        let recording = client
-            .request(requests::get_record_status())
-            .await
-            .ok()
-            .and_then(|v| v.get("outputActive").and_then(|b| b.as_bool()))
-            .unwrap_or(false);
-
-        let cfg = self.config.lock().await;
-        let snapshot = build_snapshot(
-            obs_version,
-            ws_version,
-            &scenes_raw,
-            &current_scene,
-            &inputs,
-            &cfg.scenes,
-            &cfg.audio.inputs,
-            streaming,
-            recording,
-        );
-        drop(cfg);
-
-        self.state.replace(snapshot).await;
-        Ok(())
     }
 
     async fn wait_for_disconnect(
@@ -288,6 +265,89 @@ enum DisconnectReason {
     Shutdown,
     ReconnectRequested,
     ObsDisconnected,
+}
+
+async fn fetch_and_publish_snapshot_from(
+    config: &Arc<Mutex<Config>>,
+    state: &StateStore,
+    client: &ObsClient,
+    obs_version: &str,
+    ws_version: &str,
+) -> crate::domain::result::Result<()> {
+    let scene_list_resp = client.request(requests::get_scene_list()).await?;
+    let scenes_raw = scene_list_resp
+        .get("scenes")
+        .cloned()
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
+
+    let current_resp = client
+        .request(requests::get_current_program_scene())
+        .await?;
+    let current_scene = current_resp
+        .get("currentProgramSceneName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let input_list_resp = client.request(requests::get_input_list()).await?;
+    let input_names: Vec<String> = input_list_resp
+        .get("inputs")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.get("inputName").and_then(|n| n.as_str()))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut inputs: Vec<(String, Option<bool>, Option<f64>)> = Vec::new();
+    for name in &input_names {
+        let muted = client
+            .request(requests::get_input_mute(name))
+            .await
+            .ok()
+            .and_then(|v| v.get("inputMuted").and_then(|b| b.as_bool()));
+
+        let vol = client
+            .request(requests::get_input_volume(name))
+            .await
+            .ok()
+            .and_then(|v| v.get("inputVolumeMul").and_then(|f| f.as_f64()));
+
+        inputs.push((name.clone(), muted, vol));
+    }
+
+    let streaming = client
+        .request(requests::get_stream_status())
+        .await
+        .ok()
+        .and_then(|v| v.get("outputActive").and_then(|b| b.as_bool()))
+        .unwrap_or(false);
+
+    let recording = client
+        .request(requests::get_record_status())
+        .await
+        .ok()
+        .and_then(|v| v.get("outputActive").and_then(|b| b.as_bool()))
+        .unwrap_or(false);
+
+    let cfg = config.lock().await;
+    let snapshot = build_snapshot(
+        obs_version,
+        ws_version,
+        &scenes_raw,
+        &current_scene,
+        &inputs,
+        &cfg.scenes,
+        &cfg.audio.inputs,
+        streaming,
+        recording,
+    );
+    drop(cfg);
+
+    state.replace(snapshot).await;
+    Ok(())
 }
 
 fn log_obs_event(hub: &BroadcastHub, event: &ObsEvent) {

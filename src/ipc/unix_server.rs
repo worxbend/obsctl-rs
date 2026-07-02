@@ -10,24 +10,38 @@ use tracing::{debug, error, warn};
 use crate::ipc::{
     codec::{decode, encode},
     protocol::{
-        ClientMessage, CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage, Topic,
-        TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE, is_valid_topic,
+        ClientMessage, CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage, TOPIC_EVENTS,
+        TOPIC_LOGS, TOPIC_STATE, Topic, is_valid_topic,
     },
     session::{BroadcastHub, CommandDispatch, SessionSubscriptions},
 };
+use crate::server::client_registry::ClientRegistry;
 
 pub struct IpcServer {
     listener: UnixListener,
     hub: Arc<BroadcastHub>,
+    registry: ClientRegistry,
 }
 
 impl IpcServer {
     pub fn bind(path: &Path, hub: Arc<BroadcastHub>) -> std::io::Result<Self> {
+        Self::bind_with_registry(path, hub, ClientRegistry::new())
+    }
+
+    pub fn bind_with_registry(
+        path: &Path,
+        hub: Arc<BroadcastHub>,
+        registry: ClientRegistry,
+    ) -> std::io::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let listener = UnixListener::bind(path)?;
-        Ok(Self { listener, hub })
+        Ok(Self {
+            listener,
+            hub,
+            registry,
+        })
     }
 
     /// Run the accept loop until `shutdown` fires.
@@ -43,7 +57,8 @@ impl IpcServer {
                         Ok((stream, _)) => {
                             let hub = Arc::clone(&self.hub);
                             let tx = command_tx.clone();
-                            tokio::spawn(run_session(stream, hub, tx));
+                            let registry = self.registry.clone();
+                            tokio::spawn(run_session(stream, hub, tx, registry));
                         }
                         Err(e) => {
                             error!("IPC accept error: {e}");
@@ -65,7 +80,9 @@ async fn run_session(
     stream: UnixStream,
     hub: Arc<BroadcastHub>,
     command_tx: mpsc::Sender<CommandDispatch>,
+    registry: ClientRegistry,
 ) {
+    let _client_guard = registry.register();
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let (write_tx, mut write_rx) = mpsc::channel::<String>(64);

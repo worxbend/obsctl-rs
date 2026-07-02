@@ -191,7 +191,12 @@ fn first_time_setup(config_path: &std::path::Path) -> std::io::Result<()> {
         eprintln!("  Invalid port, using 4455.");
         4455
     });
-    let password = prompt_line(&stdin, &mut buf, "OBS WebSocket password (blank = no auth)", "")?;
+    let password = prompt_line(
+        &stdin,
+        &mut buf,
+        "OBS WebSocket password (blank = no auth)",
+        "",
+    )?;
 
     let mut config = crate::config::model::Config::default();
     config.connection.host = host;
