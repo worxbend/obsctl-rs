@@ -392,45 +392,59 @@ No server-side or IPC changes required — all data comes from the existing `Tui
 
 ## Agent Loop Tasks
 
-Implementation queue derived from the plan. Tasks are ordered by dependency and risk.
-Full task details in `.agent-loop/tasks.json`.
+Implementation queue derived from the plan and reconciled with the current codebase.
+Tasks are ordered by dependency, correctness risk, and user value. Full task details live in
+`.agent-loop/tasks.json`.
 
-| ID   | Title                                               | Type        | Pri | Status  |
-|------|-----------------------------------------------------|-------------|-----|---------|
-| T001 | Fix failing state_event_wire_json_is_stable test    | fix         | 1   | **done** |
-| T002 | Extract spawn_session_forwarder in tui/app.rs       | improvement | 2   | **done** |
-| T003 | Extract format_ipc_response in tui/app.rs           | improvement | 3   | **done** |
-| T004 | Extract scene/audio alias entry helpers             | improvement | 4   | **done** |
-| T005 | CHECKPOINT: build+test after H dedup refactors      | validation  | 5   | **done** |
-| T006 | Extract handle_action dispatch from run_loop        | improvement | 6   | **done** |
-| T007 | Fix double read-lock race in cmd_server_status      | fix         | 7   | **done** |
-| T008 | Remove/fix Command::Disconnect dead variant         | fix         | 8   | **done** |
-| T009 | Return error from cmd_dump_config when path is None | fix         | 9   | **done** |
-| T010 | Push connection error to model.logs                 | fix         | 10  | **done** |
-| T011 | CHECKPOINT: build+test after arch/error fixes       | validation  | 11  | **done** |
-| T012 | Merge validate_scene/audio_duplicates in dump.rs    | improvement | 12  | pending |
-| T013 | Extract check_unique_aliases_shortcuts in schema.rs | improvement | 13  | completed |
-| T014 | Add fn req/req_with helpers in obs/requests.rs      | improvement | 14  | pending |
-| T015 | Fix required_string idiom (str::to_owned)           | improvement | 15  | completed |
-| T016 | Fix redundant .clone() on HashSet inserts           | improvement | 16  | completed |
-| T017 | Fix parser.rs clone()+clear() → mem::take          | improvement | 17  | completed |
-| T018 | Eliminate TOPIC_*.to_string() hot-path allocs       | improvement | 18  | completed |
-| T019 | Remove unnecessary level.clone() in cli/router.rs   | improvement | 19  | completed |
-| T020 | Fix Span::raw clones in widgets/scenes+audio        | improvement | 20  | completed |
-| T021 | Add tracing::debug for unhandled TOPIC_EVENTS vars  | improvement | 21  | completed |
-| T022 | Define ES_* event subscription constants            | improvement | 22  | completed |
-| T023 | CHECKPOINT: build+test+clippy after idioms          | validation  | 23  | completed |
-| T024 | Reduce per-call allocation in TuiModel::scenes()    | improvement | 24  | completed |
-| T025 | Introduce CommandExecutorConfig struct              | improvement | 25  | completed |
-| T026 | Move render_unavailable to widgets module           | improvement | 26  | completed |
-| T027 | Move MAX_TUI_LOG_ENTRIES to impl TuiModel const     | improvement | 27  | completed |
-| T028 | CHECKPOINT: build+test after org changes            | validation  | 28  | completed |
-| T029 | Fix variant exhaustiveness checks (compile-time)    | improvement | 29  | completed |
-| T030 | Add tests for cmd_toggle_stream/toggle_record       | improvement | 30  | completed |
-| T031 | Add test for TuiModel::scenes() hidden filter       | improvement | 31  | completed |
-| T032 | Complete CommandPaletteState completions+cycling    | feature     | 32  | completed |
-| T033 | Add TuiAction::CompleteNext/Prev + Tab keys         | feature     | 33  | completed |
-| T034 | Create tui/completion.rs with compute fn            | feature     | 34  | completed |
-| T035 | Wire completions into tui/app.rs event loop         | feature     | 35  | pending |
-| T036 | Render completion chips in command_palette widget   | feature     | 36  | pending |
-| T037 | FINAL VALIDATION: cargo check + test + clippy       | validation  | 37  | pending |
+| ID   | Title                                      | Type        | Pri | Status |
+|------|--------------------------------------------|-------------|-----|--------|
+| T001 | Fix state event wire JSON test             | fix         | 1   | done |
+| T002 | Extract TUI session forwarder              | improvement | 2   | done |
+| T003 | Extract IPC response formatter             | improvement | 3   | done |
+| T004 | Extract alias entry helpers                | improvement | 4   | done |
+| T005 | Checkpoint H dedup refactors               | validation  | 5   | done |
+| T006 | Extract TUI action dispatcher              | improvement | 6   | done |
+| T007 | Fix server-status read race                | fix         | 7   | done |
+| T008 | Remove dead disconnect command             | fix         | 8   | done |
+| T009 | Error when dump config has no path         | fix         | 9   | done |
+| T010 | Persist TUI connection error               | fix         | 10  | done |
+| T011 | Checkpoint architecture fixes              | validation  | 11  | done |
+| T012 | Merge dump duplicate validation            | improvement | 12  | done |
+| T013 | Extract schema uniqueness helper           | improvement | 13  | done |
+| T014 | Add OBS request helpers                    | improvement | 14  | done |
+| T015 | Use str::to_owned in required_string       | improvement | 15  | done |
+| T016 | Remove redundant HashSet clones            | improvement | 16  | done |
+| T017 | Use mem::take in parser                    | improvement | 17  | done |
+| T018 | Eliminate topic string allocations         | improvement | 18  | done |
+| T019 | Remove router level clone                  | improvement | 19  | done |
+| T020 | Avoid widget text clones                   | improvement | 20  | done |
+| T021 | Log unhandled OBS event variants           | improvement | 21  | done |
+| T022 | Name event subscription bits               | improvement | 22  | done |
+| T023 | Checkpoint idiom refactors                 | validation  | 23  | done |
+| T024 | Cache visible scenes                       | improvement | 24  | done |
+| T025 | Add command executor config                | improvement | 25  | done |
+| T026 | Move unavailable widget                    | improvement | 26  | done |
+| T027 | Move max log constant                      | improvement | 27  | done |
+| T028 | Checkpoint organization changes            | validation  | 28  | done |
+| T029 | Add variant exhaustiveness checks          | improvement | 29  | done |
+| T030 | Test stream and record toggles             | improvement | 30  | done |
+| T031 | Test hidden scene filtering                | improvement | 31  | done |
+| T032 | Add palette completion state               | feature     | 32  | done |
+| T033 | Add completion key actions                 | feature     | 33  | done |
+| T034 | Create palette completion engine           | feature     | 34  | done |
+| T035 | Wire completions into TUI app              | feature     | 35  | done |
+| T038 | Fix completion coverage and ordering       | improvement | 36  | done |
+| T036 | Render inline completion chips             | feature     | 37  | pending |
+| T039 | Add completion widget tests                | improvement | 38  | pending |
+| T040 | Match completion argument commands case-insensitively | improvement | 39  | pending |
+| T037 | Run final validation                       | validation  | 40  | pending |
+
+## Plan Expansion Log
+
+- Initial queue decisions: correctness and failing/regression work was ordered first, followed by high-priority duplication refactors, architecture/error-handling work, medium idiom/organization cleanup, test-quality work, then the command-palette completion feature.
+- 2026-07-02 analysis reconciliation: `.agent-loop/tasks.json` was normalized to the required schema and existing completed records were preserved. `T035` was marked done after source inspection showed completion recomputation/clearing/cycling was already wired in `src/tui/app.rs`; `cargo check` passed.
+- Newly queued `T038` (discovered): completion currently omits the supported `/help` command and does not explicitly enforce the plan's exact-match-before-alphabetical ordering. This should be fixed before final rendering validation.
+- Newly queued `T039` (discovered): existing TUI widget tests cover the command palette prompt and last result, but not completion chips or the empty completion hint. Add focused rendering tests after `T036`.
+- 2026-07-02 implementation T038: `src/tui/completion.rs` now includes `/help`, sorts case-insensitive exact matches before other prefix matches, and has focused unit tests for `/help` plus command/argument exact ordering. `cargo fmt --check`, `cargo check`, `cargo check --all-targets --all-features`, and `cargo test tui::completion` pass after applying rustfmt. Newly queued `T040` for the adjacent parser-consistency gap where argument completion dispatch is still case-sensitive after a space; final validation now depends on it.
+- Known follow-up intentionally left unqueued: the `state_store.rs` serialization concern appears already addressed for snapshot broadcasts by logging and returning on `serde_json::to_value` failure; no `serde_json::to_value(...).unwrap_or_default()` remains in `state_store.rs` or `build_snapshot`.
+- Known follow-up intentionally left unqueued: the `config/model.rs` shared `ResourceMetadata` idea is a low-priority modeling refactor, not required for the remaining completion feature or correctness goals.

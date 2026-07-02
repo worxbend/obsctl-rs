@@ -1,6 +1,7 @@
 use super::model::TuiModel;
 
 const ALL_COMMANDS: &[&str] = &[
+    "/help",
     "/scene",
     "/mute",
     "/unmute",
@@ -18,6 +19,19 @@ const ALL_COMMANDS: &[&str] = &[
     "/quit",
 ];
 
+fn sort_candidates(candidates: &mut Vec<String>, prefix: &str) {
+    let prefix_lower = prefix.to_ascii_lowercase();
+    candidates.sort_by_cached_key(|candidate| {
+        let candidate_lower = candidate.to_ascii_lowercase();
+        (
+            candidate_lower != prefix_lower,
+            candidate_lower,
+            candidate.clone(),
+        )
+    });
+    candidates.dedup();
+}
+
 pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
     if !input.contains(' ') {
         let lower = input.to_ascii_lowercase();
@@ -26,7 +40,7 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
             .filter(|cmd| cmd.starts_with(lower.as_str()))
             .map(|s| s.to_string())
             .collect();
-        matches.sort();
+        sort_candidates(&mut matches, input);
         return matches;
     }
 
@@ -47,8 +61,7 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
                 })
                 .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
                 .collect();
-            candidates.sort();
-            candidates.dedup();
+            sort_candidates(&mut candidates, arg_prefix);
             candidates
                 .into_iter()
                 .map(|c| format!("/scene {c}"))
@@ -67,8 +80,7 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
                 })
                 .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
                 .collect();
-            candidates.sort();
-            candidates.dedup();
+            sort_candidates(&mut candidates, arg_prefix);
             candidates
                 .into_iter()
                 .map(|c| format!("{cmd} {c}"))
@@ -121,10 +133,24 @@ mod tests {
     }
 
     #[test]
+    fn help_command_prefix() {
+        let model = make_model(vec![], vec![]);
+        let result = compute("/h", &model);
+        assert_eq!(result, vec!["/help".to_string()]);
+    }
+
+    #[test]
     fn status_exact_prefix() {
         let model = make_model(vec![], vec![]);
         let result = compute("/status", &model);
         assert_eq!(result, vec!["/status".to_string()]);
+    }
+
+    #[test]
+    fn exact_command_match_sorts_before_other_prefix_matches() {
+        let model = make_model(vec![], vec![]);
+        let result = compute("/REC", &model);
+        assert_eq!(result, vec!["/rec".to_string(), "/reconnect".to_string()]);
     }
 
     #[test]
@@ -159,6 +185,23 @@ mod tests {
         assert!(result.contains(&"/mute music".to_string()));
         assert!(result.contains(&"/mute m-bg".to_string()));
         assert!(!result.iter().any(|s| s.contains("desktop")));
+    }
+
+    #[test]
+    fn exact_arg_match_sorts_before_other_prefix_matches() {
+        let model = make_model(
+            vec![],
+            vec![
+                audio("Mic Aux", None),
+                audio("mIc", None),
+                audio("music", None),
+            ],
+        );
+        let result = compute("/mute mic", &model);
+        assert_eq!(
+            result,
+            vec!["/mute mIc".to_string(), "/mute Mic Aux".to_string()]
+        );
     }
 
     #[test]
