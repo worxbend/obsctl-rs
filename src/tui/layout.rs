@@ -19,7 +19,7 @@ pub fn compute(frame: &Frame) -> LayoutAreas {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(6),
-            Constraint::Length(4),
+            Constraint::Length(5),
         ])
         .split(area);
 

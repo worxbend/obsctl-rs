@@ -361,13 +361,13 @@ cyan/bold; others are DarkGray:
 
 If `completions` is empty, the third line is either blank or shows a dim "no completions" hint.
 
-The command palette block height in `tui/layout.rs` should be at least **4 lines** to accommodate:
+The command palette block height in `tui/layout.rs` should be at least **5 terminal rows** to accommodate:
 - Line 1: last result / status
 - Line 2: input prompt
 - Line 3: completion chips
-- Border
+- Top/bottom border
 
-Adjust `layout::compute` to allocate 4 lines minimum for the palette area instead of the current 3.
+Adjust `layout::compute` to allocate enough lines for the palette area.
 
 ---
 
@@ -434,7 +434,7 @@ Tasks are ordered by dependency, correctness risk, and user value. Full task det
 | T034 | Create palette completion engine           | feature     | 34  | done |
 | T035 | Wire completions into TUI app              | feature     | 35  | done |
 | T038 | Fix completion coverage and ordering       | improvement | 36  | done |
-| T036 | Render inline completion chips             | feature     | 37  | pending |
+| T036 | Render inline completion chips             | feature     | 37  | done |
 | T039 | Add completion widget tests                | improvement | 38  | pending |
 | T040 | Match completion argument commands case-insensitively | improvement | 39  | pending |
 | T037 | Run final validation                       | validation  | 40  | pending |
@@ -446,5 +446,6 @@ Tasks are ordered by dependency, correctness risk, and user value. Full task det
 - Newly queued `T038` (discovered): completion currently omits the supported `/help` command and does not explicitly enforce the plan's exact-match-before-alphabetical ordering. This should be fixed before final rendering validation.
 - Newly queued `T039` (discovered): existing TUI widget tests cover the command palette prompt and last result, but not completion chips or the empty completion hint. Add focused rendering tests after `T036`.
 - 2026-07-02 implementation T038: `src/tui/completion.rs` now includes `/help`, sorts case-insensitive exact matches before other prefix matches, and has focused unit tests for `/help` plus command/argument exact ordering. `cargo fmt --check`, `cargo check`, `cargo check --all-targets --all-features`, and `cargo test tui::completion` pass after applying rustfmt. Newly queued `T040` for the adjacent parser-consistency gap where argument completion dispatch is still case-sensitive after a space; final validation now depends on it.
+- 2026-07-02 implementation T036: `src/tui/widgets/command_palette.rs` now renders inline bracketed completion chips below the prompt, uses cyan bold styling for the selected chip, DarkGray for unselected chips, and a dim `no completions` hint when active with no candidates. The floating `Clear`/`List` popup path was removed. `src/tui/layout.rs` now allocates 5 rows to the palette because Ratatui borders leave three inner rows for status, prompt, and completions. `cargo fmt --check`, `cargo check`, `cargo test --test tui_widget_rendering command_palette`, and `cargo check --all-targets --all-features` pass after applying rustfmt. Plan expansion added no new tasks; existing `T039` was updated for the 5-line palette area, with `T040` and `T037` still pending.
 - Known follow-up intentionally left unqueued: the `state_store.rs` serialization concern appears already addressed for snapshot broadcasts by logging and returning on `serde_json::to_value` failure; no `serde_json::to_value(...).unwrap_or_default()` remains in `state_store.rs` or `build_snapshot`.
 - Known follow-up intentionally left unqueued: the `config/model.rs` shared `ResourceMetadata` idea is a low-priority modeling refactor, not required for the remaining completion feature or correctness goals.
