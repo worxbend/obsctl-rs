@@ -397,6 +397,52 @@ fn command_palette_renders_prompt_when_active() {
 }
 
 #[test]
+fn command_palette_renders_completion_chips_in_five_line_area() {
+    let mut model = model_connected();
+    model.command_palette.active = true;
+    model.command_palette.input = "/scene".into();
+    model.command_palette.completions = vec!["/scene main".into(), "/scene cam".into()];
+    model.command_palette.completion_idx = Some(1);
+
+    let mut t = term(80, 5);
+    t.draw(|f| {
+        widgets::command_palette::render(f, Rect::new(0, 0, 80, 5), &model);
+    })
+    .unwrap();
+
+    let out = buf_string(&t);
+    assert!(
+        out.contains("[/scene main]"),
+        "should show bracketed completion candidate; got: {out}"
+    );
+    assert!(
+        out.contains("[/scene cam]"),
+        "should show selected bracketed completion candidate; got: {out}"
+    );
+}
+
+#[test]
+fn command_palette_renders_empty_completion_hint_in_five_line_area() {
+    let mut model = model_connected();
+    model.command_palette.active = true;
+    model.command_palette.input = "/unknown".into();
+    model.command_palette.completions.clear();
+    model.command_palette.completion_idx = None;
+
+    let mut t = term(80, 5);
+    t.draw(|f| {
+        widgets::command_palette::render(f, Rect::new(0, 0, 80, 5), &model);
+    })
+    .unwrap();
+
+    let out = buf_string(&t);
+    assert!(
+        out.contains("no completions"),
+        "should show empty completion hint; got: {out}"
+    );
+}
+
+#[test]
 fn command_palette_renders_last_result() {
     let mut model = model_connected();
     model.last_result = Some("scene set: Main".into());
