@@ -49,7 +49,7 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
     let arg_lower = arg_prefix.to_ascii_lowercase();
 
     match cmd_lower.as_str() {
-        "/scene" => {
+        "/scene" | "/set-scene" => {
             let mut candidates: Vec<String> = model
                 .scenes()
                 .iter()
@@ -68,7 +68,7 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
                 .map(|c| format!("{cmd} {c}"))
                 .collect()
         }
-        "/mute" | "/unmute" | "/toggle-mute" | "/vol" => {
+        "/mute" | "/unmute" | "/toggle-mute" | "/vol" | "/volume" => {
             let mut candidates: Vec<String> = model
                 .audio_inputs()
                 .iter()
@@ -185,6 +185,19 @@ mod tests {
     }
 
     #[test]
+    fn set_scene_alias_arg_filter_preserves_typed_command() {
+        let model = make_model(
+            vec![scene("main", None), scene("media", Some("m2"))],
+            vec![],
+        );
+        let result = compute("/set-scene m", &model);
+        assert!(result.contains(&"/set-scene main".to_string()));
+        assert!(result.contains(&"/set-scene media".to_string()));
+        assert!(result.contains(&"/set-scene m2".to_string()));
+        assert!(result.iter().all(|s| s.starts_with("/set-scene ")));
+    }
+
+    #[test]
     fn mute_arg_filter() {
         let model = make_model(
             vec![],
@@ -208,6 +221,16 @@ mod tests {
         assert_eq!(
             result,
             vec!["/MUTE mic".to_string(), "/MUTE Mic Aux".to_string()]
+        );
+    }
+
+    #[test]
+    fn volume_alias_arg_filter_preserves_typed_command() {
+        let model = make_model(vec![], vec![audio("mic", None), audio("Mic Aux", None)]);
+        let result = compute("/volume mic", &model);
+        assert_eq!(
+            result,
+            vec!["/volume mic".to_string(), "/volume Mic Aux".to_string()]
         );
     }
 
