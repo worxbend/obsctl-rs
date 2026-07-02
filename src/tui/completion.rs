@@ -45,9 +45,10 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
     }
 
     let (cmd, arg_prefix) = input.split_once(' ').unwrap();
+    let cmd_lower = cmd.to_ascii_lowercase();
     let arg_lower = arg_prefix.to_ascii_lowercase();
 
-    match cmd {
+    match cmd_lower.as_str() {
         "/scene" => {
             let mut candidates: Vec<String> = model
                 .scenes()
@@ -64,7 +65,7 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
             sort_candidates(&mut candidates, arg_prefix);
             candidates
                 .into_iter()
-                .map(|c| format!("/scene {c}"))
+                .map(|c| format!("{cmd} {c}"))
                 .collect()
         }
         "/mute" | "/unmute" | "/toggle-mute" | "/vol" => {
@@ -171,6 +172,19 @@ mod tests {
     }
 
     #[test]
+    fn scene_arg_command_match_is_case_insensitive_and_preserves_typed_command() {
+        let model = make_model(
+            vec![scene("main", None), scene("media", Some("m2"))],
+            vec![],
+        );
+        let result = compute("/SCENE m", &model);
+        assert!(result.contains(&"/SCENE main".to_string()));
+        assert!(result.contains(&"/SCENE media".to_string()));
+        assert!(result.contains(&"/SCENE m2".to_string()));
+        assert!(result.iter().all(|s| s.starts_with("/SCENE ")));
+    }
+
+    #[test]
     fn mute_arg_filter() {
         let model = make_model(
             vec![],
@@ -185,6 +199,16 @@ mod tests {
         assert!(result.contains(&"/mute music".to_string()));
         assert!(result.contains(&"/mute m-bg".to_string()));
         assert!(!result.iter().any(|s| s.contains("desktop")));
+    }
+
+    #[test]
+    fn audio_arg_command_match_is_case_insensitive_and_preserves_typed_command() {
+        let model = make_model(vec![], vec![audio("mic", None), audio("Mic Aux", None)]);
+        let result = compute("/MUTE mic", &model);
+        assert_eq!(
+            result,
+            vec!["/MUTE mic".to_string(), "/MUTE Mic Aux".to_string()]
+        );
     }
 
     #[test]

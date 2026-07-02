@@ -10,8 +10,9 @@ pub fn parse(input: &str) -> Result<Command> {
     let (cmd_name, args) = tokens
         .split_first()
         .ok_or_else(|| ObsctlError::CommandParseError("empty command".to_string()))?;
+    let cmd_key = cmd_name.to_ascii_lowercase();
 
-    match cmd_name.as_str() {
+    match cmd_key.as_str() {
         "help" => expect_args(args, 0, "help", Command::Help),
         "quit" | "exit" => expect_args(args, 0, "quit", Command::Quit),
         "dump-config" => expect_args(args, 0, "dump-config", Command::DumpConfig),
@@ -92,8 +93,8 @@ pub fn parse(input: &str) -> Result<Command> {
                 percent,
             })
         }
-        other => Err(ObsctlError::CommandParseError(format!(
-            "unknown command: {other}"
+        _ => Err(ObsctlError::CommandParseError(format!(
+            "unknown command: {cmd_name}"
         ))),
     }
 }
@@ -241,6 +242,30 @@ mod tests {
                 percent: 50
             }
         );
+    }
+
+    #[test]
+    fn parse_command_names_case_insensitively() {
+        assert_eq!(
+            parse("/SCENE Main").unwrap(),
+            Command::SetScene {
+                target: "Main".to_string()
+            }
+        );
+        assert_eq!(
+            parse("MUTE Mic").unwrap(),
+            Command::Mute {
+                target: "Mic".to_string()
+            }
+        );
+        assert_eq!(
+            parse("VoL Mic 50").unwrap(),
+            Command::SetVolume {
+                target: "Mic".to_string(),
+                percent: 50
+            }
+        );
+        assert_eq!(parse("/REC").unwrap(), Command::ToggleRecord);
     }
 
     #[test]
