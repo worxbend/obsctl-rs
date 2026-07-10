@@ -44,7 +44,12 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
         return matches;
     }
 
-    let (cmd, arg_prefix) = input.split_once(' ').unwrap();
+    let (cmd, raw_arg_prefix) = match input.split_once(' ') {
+        Some(parts) => parts,
+        None => return vec![],
+    };
+    let cmd = cmd.trim_end();
+    let arg_prefix = raw_arg_prefix.trim_start();
     let cmd_lower = cmd.to_ascii_lowercase();
     let arg_lower = arg_prefix.to_ascii_lowercase();
 

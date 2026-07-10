@@ -7,19 +7,21 @@ use crate::{
         args::{Cli, Commands, ServiceAction},
         client_commands::ProxyCtx,
     },
-    config::{paths, schema, writer},
-    ipc::socket_path::default_socket_path,
+    config::{loader, model, paths, schema, writer},
+    ipc::socket_path::resolve_server_socket_path,
     runtime::logger,
     server::{daemon, options::ServerOptions},
-    service::systemd_user_service::{self, CommandRunner, SystemctlRunner},
+    service::{
+        installer::{self, ServiceInstaller},
+        systemd_user_service::{self, SystemctlRunner},
+    },
+    support::validation::{
+        password_config_error_message, read_env_token, resolve_connection_password,
+    },
 };
 
 pub fn run(cli: Cli) -> i32 {
-    let config_path = cli
-        .config
-        .clone()
-        .or_else(|| std::env::var("OBSCTL_CONFIG").ok().map(PathBuf::from))
-        .or_else(paths::config_path);
+    let config_path = cli.config.clone().or_else(paths::config_path);
 
     let level = effective_log_level(&cli);
 
@@ -44,9 +46,9 @@ pub fn run(cli: Cli) -> i32 {
             logger::init_cli(&level);
             run_service(action)
         }
-        cmd => {
+        Some(cmd) => {
             logger::init_cli(&level);
-            run_proxy(config_path, cmd.unwrap(), cli.json)
+            run_proxy(config_path, cmd, cli.json)
         }
     }
 }
@@ -61,8 +63,10 @@ fn effective_log_level(cli: &Cli) -> String {
     if let Some(level) = cli.log_level.clone() {
         return level;
     }
-    if let Ok(rust_log) = std::env::var("RUST_LOG") {
-        return rust_log;
+    if let Some(rust_log) = read_env_token("RUST_LOG")
+        && let Ok(level) = crate::cli::args::parse_log_level(&rust_log)
+    {
+        return level;
     }
     match &cli.command {
         Some(Commands::Server { .. }) => "info",
@@ -71,14 +75,30 @@ fn effective_log_level(cli: &Cli) -> String {
     .to_string()
 }
 
-fn resolve_socket_path(config_path: Option<&PathBuf>) -> PathBuf {
-    if let Some(cp) = config_path
-        && let Ok(config) = crate::config::loader::load_or_default(cp)
-        && let Some(sp) = config.server.socket_path
-    {
-        return PathBuf::from(sp);
+fn resolve_socket_config(config_path: Option<&PathBuf>) -> Result<(PathBuf, u64), String> {
+    if let Some(cp) = config_path {
+        let (_, socket_path, refresh_interval_ms) = loader::load_or_default_with_runtime(cp)
+            .map_err(|e| format!("failed to load config: {e}"))?;
+
+        return Ok((socket_path, refresh_interval_ms));
     }
-    default_socket_path()
+
+    if let Some(default_cp) = paths::config_path() {
+        match loader::load_or_default_with_runtime(&default_cp) {
+            Ok((_, socket_path, refresh_interval_ms)) => {
+                return Ok((socket_path, refresh_interval_ms));
+            }
+            Err(error) => {
+                return Err(format!("failed to load default config: {error}"));
+            }
+        }
+    }
+
+    let default_refresh_interval_ms = model::Config::default().ui.refresh_interval_ms;
+    Ok((
+        resolve_server_socket_path(None).map_err(|e| e.to_string())?,
+        default_refresh_interval_ms,
+    ))
 }
 
 // ── Local commands ────────────────────────────────────────────────────────────
@@ -121,31 +141,23 @@ fn run_validate_config(config_path: Option<PathBuf>) -> i32 {
         }
     };
 
-    let config = match crate::config::loader::load(&path) {
-        Ok(c) => c,
+    let (_config, warnings) = match crate::config::loader::load_with_warnings(&path) {
+        Ok(result) => result,
         Err(e) => {
             eprintln!("error: {e}");
             return 2;
         }
     };
 
-    match schema::validate(&config) {
-        Ok(warnings) => {
-            for w in &warnings {
-                eprintln!("warning: {}", w.0);
-            }
-            if warnings.is_empty() {
-                println!("Config is valid.");
-            } else {
-                println!("Config is valid with {} warning(s).", warnings.len());
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            2
-        }
+    for w in &warnings {
+        eprintln!("warning: {}", w.0);
     }
+    if warnings.is_empty() {
+        println!("Config is valid.");
+    } else {
+        println!("Config is valid with {} warning(s).", warnings.len());
+    }
+    0
 }
 
 fn run_server(config_path: Option<PathBuf>, headless: bool) -> i32 {
@@ -164,10 +176,10 @@ fn run_server(config_path: Option<PathBuf>, headless: bool) -> i32 {
         return 1;
     }
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
+    let rt = match tokio_runtime("server") {
+        Some(rt) => rt,
+        None => return 1,
+    };
 
     let options = ServerOptions {
         headless,
@@ -186,17 +198,21 @@ fn first_time_setup(config_path: &std::path::Path) -> std::io::Result<()> {
     let mut buf = String::new();
 
     let host = prompt_line(&stdin, &mut buf, "OBS host", "127.0.0.1")?;
-    let port_str = prompt_line(&stdin, &mut buf, "OBS port", "4455")?;
-    let port: u16 = port_str.parse().unwrap_or_else(|_| {
-        eprintln!("  Invalid port, using 4455.");
-        4455
-    });
-    let password = prompt_line(
-        &stdin,
-        &mut buf,
-        "OBS WebSocket password (blank = no auth)",
-        "",
-    )?;
+    let port = prompt_port(&stdin, &mut buf)?;
+    let password = loop {
+        let value = prompt_line(
+            &stdin,
+            &mut buf,
+            "OBS WebSocket password (blank = no auth)",
+            "",
+        )?;
+        if let Err(error) = resolve_connection_password(Some(&value), "") {
+            eprintln!("  {}", password_config_error_message(&error));
+            continue;
+        }
+        break value;
+    };
+    schema::validate_connection_host(&host).map_err(|e| std::io::Error::other(e.to_string()))?;
 
     let mut config = crate::config::model::Config::default();
     config.connection.host = host;
@@ -211,6 +227,21 @@ fn first_time_setup(config_path: &std::path::Path) -> std::io::Result<()> {
 
     eprintln!("\nConfig written to {}.\n", config_path.display());
     Ok(())
+}
+
+fn prompt_port(stdin: &std::io::Stdin, buf: &mut String) -> std::io::Result<u16> {
+    loop {
+        let port_str = prompt_line(stdin, buf, "OBS port", "4455")?;
+        match port_str.parse::<u16>() {
+            Ok(0) => {
+                eprintln!("  Port must be in range 1-65535.");
+            }
+            Ok(port) => return Ok(port),
+            Err(_) => {
+                eprintln!("  Invalid port, enter an integer 1-65535.");
+            }
+        }
+    }
 }
 
 fn prompt_line(
@@ -239,23 +270,37 @@ fn prompt_line(
 }
 
 fn run_tui(config_path: Option<PathBuf>) -> i32 {
-    let socket_path = resolve_socket_path(config_path.as_ref());
-    let refresh_ms = config_path
-        .as_ref()
-        .and_then(|p| crate::config::loader::load_or_default(p).ok())
-        .map(|c| c.ui.refresh_interval_ms)
-        .unwrap_or(250);
+    let (socket_path, refresh_ms) = match resolve_socket_config(config_path.as_ref()) {
+        Ok(values) => values,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
+    let rt = match tokio_runtime("TUI") {
+        Some(rt) => rt,
+        None => return 1,
+    };
 
     match rt.block_on(crate::tui::app::run(&socket_path, refresh_ms)) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("tui error: {e}");
             1
+        }
+    }
+}
+
+fn tokio_runtime(context: &str) -> Option<tokio::runtime::Runtime> {
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => Some(rt),
+        Err(e) => {
+            eprintln!("error: failed to start async runtime for {context}: {e}");
+            None
         }
     }
 }
@@ -271,77 +316,370 @@ fn run_service(action: ServiceAction) -> i32 {
             return 1;
         }
     };
+    let installer = ServiceInstaller::new(&runner, unit_path.clone());
 
     match action {
         ServiceAction::Install => {
-            let exec = match std::env::current_exe() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("error: could not determine executable path: {e}");
+            let exec = match resolve_service_exec_path() {
+                Ok(exec) => exec,
+                Err(message) => {
+                    eprintln!("error: {message}");
                     return 1;
                 }
             };
-            let content = systemd_user_service::unit_file_content(&exec);
-            if let Some(parent) = unit_path.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
+            if let Err(e) = installer.install(&exec) {
                 eprintln!("error: {e}");
                 return 1;
             }
-            if let Err(e) = std::fs::write(&unit_path, &content) {
-                eprintln!("error writing unit file: {e}");
-                return 1;
-            }
-            match runner.run("systemctl", &["--user", "daemon-reload"]) {
-                Ok(_) => {
-                    println!("Service installed at {}", unit_path.display());
-                    println!("Enable with: systemctl --user enable --now obsctl.service");
-                    0
-                }
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    1
-                }
-            }
+            println!("Service installed at {}", unit_path.display());
+            println!(
+                "Enable with: {}",
+                systemd_user_service::SYSTEMCTL_ENABLE_HINT
+            );
+            0
         }
         ServiceAction::Uninstall => {
-            if unit_path.exists()
-                && let Err(e) = std::fs::remove_file(&unit_path)
-            {
-                eprintln!("error removing unit file: {e}");
+            if let Err(e) = installer.uninstall() {
+                eprintln!("error: {e}");
                 return 1;
             }
-            match runner.run("systemctl", &["--user", "daemon-reload"]) {
-                Ok(_) => {
-                    println!("Service uninstalled.");
-                    0
-                }
-                Err(e) => {
-                    eprintln!("warning: daemon-reload failed: {e}");
-                    0
-                }
-            }
+            println!("Service uninstalled.");
+            0
         }
-        ServiceAction::Status => {
-            match runner.run("systemctl", &["--user", "status", "obsctl.service"]) {
-                Ok(out) => {
-                    print!("{out}");
-                    0
-                }
-                Err(e) => {
-                    eprintln!("{e}");
-                    1
-                }
-            }
-        }
-        ServiceAction::Start => service_ctl(&runner, "start"),
-        ServiceAction::Stop => service_ctl(&runner, "stop"),
-        ServiceAction::Restart => service_ctl(&runner, "restart"),
+        ServiceAction::Status => installer
+            .status()
+            .map(|out| {
+                print!("{out}");
+            })
+            .map(|_| 0)
+            .unwrap_or_else(|e| {
+                eprintln!("{e}");
+                1
+            }),
+        ServiceAction::Start => service_action(&installer, "start"),
+        ServiceAction::Stop => service_action(&installer, "stop"),
+        ServiceAction::Restart => service_action(&installer, "restart"),
     }
 }
 
-fn service_ctl(runner: &dyn CommandRunner, verb: &str) -> i32 {
-    match runner.run("systemctl", &["--user", verb, "obsctl.service"]) {
+fn resolve_service_exec_path() -> Result<std::path::PathBuf, String> {
+    let exec =
+        std::env::current_exe().map_err(|e| format!("could not determine executable path: {e}"))?;
+    installer::validate_service_exec_path(&exec).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use crate::support::fs;
+    use std::io::Write;
+
+    fn with_rust_log_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _lock = crate::support::validation::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let previous = std::env::var_os("RUST_LOG");
+        if let Some(value) = value {
+            unsafe { std::env::set_var("RUST_LOG", value) };
+        } else {
+            unsafe { std::env::remove_var("RUST_LOG") };
+        }
+
+        let result = f();
+
+        match previous {
+            Some(previous) => unsafe { std::env::set_var("RUST_LOG", previous) },
+            None => unsafe { std::env::remove_var("RUST_LOG") },
+        }
+
+        result
+    }
+
+    fn with_obsctl_config_env<R>(value: Option<&std::path::Path>, f: impl FnOnce() -> R) -> R {
+        let _lock = crate::support::validation::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let previous = std::env::var_os("OBSCTL_CONFIG");
+        if let Some(value) = value {
+            unsafe { std::env::set_var("OBSCTL_CONFIG", value) };
+        } else {
+            unsafe { std::env::remove_var("OBSCTL_CONFIG") };
+        }
+
+        let result = f();
+
+        match previous {
+            Some(previous) => unsafe { std::env::set_var("OBSCTL_CONFIG", previous) },
+            None => unsafe { std::env::remove_var("OBSCTL_CONFIG") },
+        }
+
+        result
+    }
+
+    #[cfg(unix)]
+    fn with_rust_log_env_os<R>(value: Option<std::ffi::OsString>, f: impl FnOnce() -> R) -> R {
+        let _lock = crate::support::validation::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let previous = std::env::var_os("RUST_LOG");
+        if let Some(value) = value {
+            unsafe { std::env::set_var("RUST_LOG", value) };
+        } else {
+            unsafe { std::env::remove_var("RUST_LOG") };
+        }
+
+        let result = f();
+
+        match previous {
+            Some(previous) => unsafe { std::env::set_var("RUST_LOG", previous) },
+            None => unsafe { std::env::remove_var("RUST_LOG") },
+        }
+
+        result
+    }
+
+    #[test]
+    fn effective_log_level_prefers_cli_verbose() {
+        let cli = Cli {
+            config: None,
+            log_level: None,
+            verbose: true,
+            force: false,
+            json: false,
+            command: None,
+        };
+        assert_eq!(effective_log_level(&cli), "debug");
+    }
+
+    #[test]
+    fn effective_log_level_uses_log_level_arg() {
+        let cli = Cli {
+            config: None,
+            log_level: Some("error".to_string()),
+            verbose: false,
+            force: false,
+            json: false,
+            command: None,
+        };
+        assert_eq!(effective_log_level(&cli), "error");
+    }
+
+    #[test]
+    fn effective_log_level_rejects_invalid_rust_log() {
+        let cli = Cli {
+            config: None,
+            log_level: None,
+            verbose: false,
+            force: false,
+            json: false,
+            command: Some(Commands::Server { headless: false }),
+        };
+        with_rust_log_env(Some("verbose"), || {
+            assert_eq!(effective_log_level(&cli), "info");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effective_log_level_rejects_non_unicode_rust_log() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let cli = Cli {
+            config: None,
+            log_level: None,
+            verbose: false,
+            force: false,
+            json: false,
+            command: Some(Commands::Tui),
+        };
+        with_rust_log_env_os(Some(std::ffi::OsString::from_vec(vec![0xff])), || {
+            assert_eq!(effective_log_level(&cli), "warn");
+        });
+    }
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn service_exec_validator_rejects_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = installer::validate_service_exec_path(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("not a regular executable file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_exec_validator_rejects_non_executable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("obsctl-temp-bin");
+        let mut f = std::fs::File::create(&file).unwrap();
+        f.write_all(b"#!/bin/sh\necho test\n").unwrap();
+        fs::secure_permissions(&file, 0o644).unwrap();
+        let err = installer::validate_service_exec_path(&file).unwrap_err();
+        assert!(err.to_string().contains("is not executable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_exec_validator_rejects_world_or_group_writable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("obsctl-world-writable");
+        let mut f = std::fs::File::create(&file).unwrap();
+        f.write_all(b"#!/bin/sh\necho test\n").unwrap();
+        fs::secure_permissions(&file, 0o777).unwrap();
+        let err = installer::validate_service_exec_path(&file).unwrap_err();
+        assert!(err.to_string().contains("writable by group or other"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_exec_validator_rejects_insecure_special_mode_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("obsctl-special-bits");
+        let mut f = std::fs::File::create(&file).unwrap();
+        f.write_all(b"#!/bin/sh\necho test\n").unwrap();
+        fs::secure_permissions(&file, 0o4755).unwrap();
+        let err = installer::validate_service_exec_path(&file).unwrap_err();
+        assert!(err.to_string().contains("insecure special mode bits"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_exec_validator_rejects_symlinked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("obsctl-real-bin");
+        let link = dir.path().join("obsctl-link-bin");
+        let mut f = std::fs::File::create(&real).unwrap();
+        f.write_all(b"#!/bin/sh\necho test\n").unwrap();
+        fs::secure_permissions(&real, 0o755).unwrap();
+        symlink(&real, &link).unwrap();
+
+        let err = installer::validate_service_exec_path(&link).unwrap_err();
+        assert!(err.to_string().contains("symbolic link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_exec_validator_rejects_control_characters() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut name = b"obsctl".to_vec();
+        name.extend(b"-bad\x0a-path");
+        let path = dir
+            .path()
+            .join(std::path::PathBuf::from(OsString::from_vec(name)));
+
+        let mut f = std::fs::File::create(&path).unwrap();
+        use std::io::Write;
+        f.write_all(b"#!/bin/sh\necho test\n").unwrap();
+        fs::secure_permissions(&path, 0o755).unwrap();
+
+        let err = installer::validate_service_exec_path(&path).unwrap_err();
+        assert!(err.to_string().contains("contains control characters"));
+    }
+
+    #[test]
+    fn service_exec_validator_accepts_executable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("obsctl-temp-bin");
+        let mut f = std::fs::File::create(&file).unwrap();
+        f.write_all(b"#!/bin/sh\necho test\n").unwrap();
+        fs::secure_permissions(&file, 0o755).unwrap();
+
+        let validated = installer::validate_service_exec_path(&file).unwrap();
+        assert_eq!(validated, file);
+    }
+
+    #[test]
+    fn resolve_socket_config_rejects_zero_refresh_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nui:\n  refresh_interval_ms: 0\n").unwrap();
+        let err = resolve_socket_config(Some(&path)).unwrap_err();
+        assert!(err.contains("refresh_interval_ms"));
+    }
+
+    #[test]
+    fn resolve_socket_config_rejects_invalid_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(
+            &path,
+            "version: 1\nconnection:\n  host: bad host\n  password: foo\n",
+        )
+        .unwrap();
+
+        let err = resolve_socket_config(Some(&path)).unwrap_err();
+        assert!(err.contains("config invalid"));
+        assert!(err.contains("connection.host"));
+    }
+
+    #[test]
+    fn resolve_socket_config_rejects_invalid_socket_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nserver:\n  socket_path: relative.sock\n").unwrap();
+
+        let err = resolve_socket_config(Some(&path)).unwrap_err();
+        assert!(err.contains("server.socket_path"));
+    }
+
+    #[test]
+    fn resolve_socket_config_without_path_uses_defaults() {
+        with_obsctl_config_env(None, || {
+            let (socket_path, refresh_interval_ms) = resolve_socket_config(None).unwrap();
+            assert!(socket_path.is_absolute());
+            assert_eq!(
+                socket_path.file_name().and_then(|name| name.to_str()),
+                Some("obsctl.sock")
+            );
+            assert_eq!(
+                refresh_interval_ms,
+                model::Config::default().ui.refresh_interval_ms
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_socket_config_without_path_prefers_default_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_dir = dir.path().join("sockets");
+        std::fs::create_dir(&socket_dir).unwrap();
+        fs::secure_permissions(&socket_dir, 0o700).unwrap();
+        let socket_path = socket_dir.join("obsctl.sock");
+        let config_path = dir.path().join("config.yml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "version: 1\nserver:\n  socket_path: {}\nui:\n  refresh_interval_ms: 321\n",
+                socket_path.display()
+            ),
+        )
+        .unwrap();
+
+        with_obsctl_config_env(Some(config_path.as_path()), || {
+            let (resolved_socket_path, refresh_interval_ms) = resolve_socket_config(None).unwrap();
+            assert_eq!(resolved_socket_path, socket_path);
+            assert_eq!(refresh_interval_ms, 321);
+        });
+    }
+}
+
+fn service_action(installer: &ServiceInstaller<'_>, verb: &str) -> i32 {
+    let result = match verb {
+        "start" => installer.start(),
+        "stop" => installer.stop(),
+        "restart" => installer.restart(),
+        _ => unreachable!("unsupported verb"),
+    };
+
+    match result {
         Ok(_) => {
             println!("Service {verb}ed.");
             0
@@ -356,7 +694,13 @@ fn service_ctl(runner: &dyn CommandRunner, verb: &str) -> i32 {
 // ── Proxy commands ────────────────────────────────────────────────────────────
 
 fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> i32 {
-    let socket_path = resolve_socket_path(config_path.as_ref());
+    let (socket_path, _) = match resolve_socket_config(config_path.as_ref()) {
+        Ok(values) => values,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
     let ctx = ProxyCtx {
         socket_path,
         json_output,
@@ -377,11 +721,9 @@ fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> 
         Commands::ReloadConfig => ctx.reload_config(),
         Commands::ToggleStream => ctx.toggle_stream(),
         Commands::ToggleRecord => ctx.toggle_record(),
-        // Already handled above
-        Commands::Init
-        | Commands::ValidateConfig
-        | Commands::Server { .. }
-        | Commands::Tui
-        | Commands::Service { .. } => unreachable!("local commands handled separately"),
+        other => {
+            eprintln!("error: command {other:?} is not supported for server proxying");
+            1
+        }
     }
 }

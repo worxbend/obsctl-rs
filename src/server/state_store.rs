@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use serde_json::Value;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
 use tracing::debug;
@@ -201,7 +200,7 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
 pub fn build_snapshot(
     obs_studio_version: &str,
     obs_ws_version: &str,
-    scenes_raw: &Value,
+    scenes: &[String],
     current_scene: &str,
     inputs_raw: &[(String, Option<bool>, Option<f64>)],
     scene_cfgs: &[SceneConfig],
@@ -209,19 +208,16 @@ pub fn build_snapshot(
     streaming: bool,
     recording: bool,
 ) -> ObsSnapshot {
-    let raw_scenes: Vec<Value> = scenes_raw.as_array().cloned().unwrap_or_default();
-
-    let scenes: Vec<SceneState> = raw_scenes
+    let scenes: Vec<SceneState> = scenes
         .iter()
-        .filter_map(|v| v.get("sceneName").and_then(|n| n.as_str()))
         .map(|name| {
-            let cfg = scene_cfgs.iter().find(|c| c.name == name);
+            let cfg = scene_cfgs.iter().find(|c| c.name == *name);
             SceneState {
-                name: name.to_string(),
+                name: name.clone(),
                 alias: cfg.and_then(|c| c.alias.clone()),
                 shortcut: cfg.and_then(|c| c.shortcut.clone()),
                 group: cfg.and_then(|c| c.group.clone()),
-                active: name == current_scene,
+                active: *name == current_scene,
                 hidden: cfg.map(|c| c.hidden).unwrap_or(false),
             }
         })

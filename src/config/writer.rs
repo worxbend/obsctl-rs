@@ -3,22 +3,24 @@ use std::path::Path;
 
 use crate::domain::errors::ObsctlError;
 use crate::domain::result::Result;
+use crate::support::fs;
 
 use super::model::Config;
 
 pub fn write(config: &Config, path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    write_atomic(config, path)
+}
+
+pub fn write_atomic(config: &Config, path: &Path) -> Result<()> {
+    fs::ensure_private_parent(path).map_err(|e| ObsctlError::ConfigInvalid(e.to_string()))?;
+
     let content =
         serde_yaml::to_string(config).map_err(|e| ObsctlError::ConfigInvalid(e.to_string()))?;
-    let tmp = path.with_extension("yml.tmp");
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(content.as_bytes())?;
-        f.flush()?;
-    }
-    std::fs::rename(&tmp, path)?;
+
+    fs::write_atomic_with_temp_file(path, "obsctl-config", 0o600, true, |tmp| {
+        tmp.write_all(content.as_bytes())
+    })
+    .map_err(ObsctlError::Io)?;
     Ok(())
 }
 

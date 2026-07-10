@@ -1,5 +1,6 @@
 use super::errors::ObsctlError;
 use super::result::Result;
+use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
 pub struct AliasEntry {
     pub name: String,
@@ -7,37 +8,48 @@ pub struct AliasEntry {
     pub shortcut: Option<String>,
 }
 
+fn normalized_token(value: &str) -> Result<String> {
+    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
+        .map_err(|error| ObsctlError::ConfigInvalid(format!("alias or shortcut {error}")))
+        .map(|value| value.to_ascii_lowercase())
+}
+
+pub fn normalize_alias_or_shortcut(value: &str, kind: &str) -> Result<String> {
+    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
+        .map_err(|error| ObsctlError::ConfigInvalid(format!("{kind} aliases/shortcuts {error}")))
+        .map(|value| value.to_ascii_lowercase())
+}
+
 pub fn resolve<'a>(target: &str, entries: &'a [AliasEntry]) -> Result<&'a AliasEntry> {
+    let target_normalized = normalized_token(target)?;
+    let target_trimmed = target.trim();
     let mut candidates: Vec<&AliasEntry> = Vec::new();
 
     // 1. Exact shortcut
     for e in entries {
-        if e.shortcut.as_deref() == Some(target) {
+        if e.shortcut.as_deref() == Some(target_trimmed) {
             return Ok(e);
         }
     }
 
     // 2. Exact alias
     for e in entries {
-        if e.alias.as_deref() == Some(target) {
+        if e.alias.as_deref() == Some(target_trimmed) {
             return Ok(e);
         }
     }
 
     // 3. Exact OBS name
     for e in entries {
-        if e.name == target {
+        if e.name == target_trimmed {
             return Ok(e);
         }
     }
 
     // 4. Case-insensitive alias
-    let target_lower = target.to_lowercase();
     for e in entries {
-        if e.alias
-            .as_deref()
-            .map(|a| a.to_lowercase() == target_lower)
-            .unwrap_or(false)
+        if let Some(alias) = e.alias.as_deref()
+            && normalized_token(alias)? == target_normalized
         {
             candidates.push(e);
         }
@@ -51,7 +63,7 @@ pub fn resolve<'a>(target: &str, entries: &'a [AliasEntry]) -> Result<&'a AliasE
 
     // 5. Case-insensitive OBS name
     for e in entries {
-        if e.name.to_lowercase() == target_lower {
+        if normalized_token(&e.name)? == target_normalized {
             candidates.push(e);
         }
     }
@@ -132,6 +144,44 @@ mod tests {
         assert!(matches!(
             resolve("cam", &entries),
             Err(ObsctlError::AliasAmbiguous(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_allows_target_whitespace_trimming_for_exact_match_fallback() {
+        let entries = vec![entry("Main Scene", Some(" main "), None)];
+        assert_eq!(resolve("main", &entries).unwrap().name, "Main Scene");
+    }
+
+    #[test]
+    fn resolve_case_insensitive_match_uses_trimmed_alias() {
+        let entries = vec![entry("Main Scene", Some("MainCam"), None)];
+        assert_eq!(resolve(" maincam ", &entries).unwrap().name, "Main Scene");
+    }
+
+    #[test]
+    fn resolve_rejects_target_with_control_characters() {
+        let entries = vec![entry("Main Scene", Some("main"), None)];
+        assert!(matches!(
+            resolve("main\t", &entries),
+            Err(ObsctlError::ConfigInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn reject_alias_with_control_character() {
+        assert!(matches!(
+            normalize_alias_or_shortcut("bad\talias", "scene"),
+            Err(ObsctlError::ConfigInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn reject_alias_with_excessive_length() {
+        let value = "a".repeat(crate::support::validation::MAX_TARGET_TOKEN_LENGTH + 1);
+        assert!(matches!(
+            normalize_alias_or_shortcut(&value, "scene"),
+            Err(ObsctlError::ConfigInvalid(_))
         ));
     }
 

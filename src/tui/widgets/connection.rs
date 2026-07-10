@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
+use crate::service::systemd_user_service::SYSTEMCTL_ENABLE_HINT;
 use crate::tui::model::TuiModel;
 
 pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
@@ -30,7 +31,7 @@ pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
         Line::raw("Or install the service:"),
         Line::styled("  obsctl service install", Style::default().fg(Color::Cyan)),
         Line::styled(
-            "  systemctl --user enable --now obsctl.service",
+            format!("  {SYSTEMCTL_ENABLE_HINT}"),
             Style::default().fg(Color::Cyan),
         ),
         Line::raw(""),

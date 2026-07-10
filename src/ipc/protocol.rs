@@ -1,9 +1,22 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use time::OffsetDateTime;
 
 use crate::domain::errors::ObsctlError;
 pub use crate::support::redaction::redact_message as redacted_message;
+use crate::support::validation::validate_no_control_or_whitespace;
+
+/// Maximum size of one framed IPC JSON line, including the trailing newline.
+pub const MAX_IPC_LINE_BYTES: usize = 64 * 1024;
+pub const MAX_IPC_REQUEST_ID_BYTES: usize = 64;
+pub const MAX_COMMAND_NAME_BYTES: usize = 64;
+
+/// Client side tolerance for unrelated frames while waiting for a correlated response.
+pub const MAX_UNMATCHED_IPC_RESPONSES: usize = 32;
+
+/// Maximum number of topics accepted in a single subscribe command.
+pub const MAX_SUBSCRIBE_TOPICS: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -40,17 +53,137 @@ impl ServerMessage {
     pub fn obs_event(event: ObsEventPayload) -> Self {
         Self::Event {
             topic: Topic::Events,
-            data: serde_json::to_value(event)
-                .expect("ObsEventPayload serialization should not fail"),
+            data: serialize_payload(event, "ObsEventPayload"),
         }
     }
 
     pub fn log_event(event: LogEvent) -> Self {
         Self::Event {
             topic: Topic::Logs,
-            data: serde_json::to_value(event).expect("LogEvent serialization should not fail"),
+            data: serialize_payload(event, "LogEvent"),
         }
     }
+}
+
+fn serialize_payload<T: Serialize>(payload: T, label: &'static str) -> Value {
+    serde_json::to_value(payload).unwrap_or_else(|error| {
+        tracing::warn!(error = %error, label = %label, "failed to serialize IPC payload");
+        serde_json::json!({
+            "_serialization_error": true,
+            "_payload": label,
+            "_message": error.to_string(),
+        })
+    })
+}
+
+pub(crate) fn deduplicate_topics<I, S>(topics: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+
+    for topic in topics {
+        let topic = topic.as_ref();
+        if seen.insert(topic.to_string()) {
+            deduped.push(topic.to_string());
+        }
+    }
+
+    deduped
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscribeTopicsError {
+    EmptyList,
+    TooManyTopics { provided: usize, limit: usize },
+    UnknownTopics(Vec<String>),
+}
+
+impl SubscribeTopicsError {
+    pub fn as_protocol_error_message(&self) -> String {
+        match self {
+            Self::EmptyList => "topics list must not be empty".to_string(),
+            Self::TooManyTopics { .. } => "too many topics in subscribe request".to_string(),
+            Self::UnknownTopics(invalid) => {
+                format!("unknown topics: {}", invalid.join(", "))
+            }
+        }
+    }
+
+    pub fn to_protocol_response(&self, id: String) -> ServerMessage {
+        ServerMessage::Response {
+            id,
+            ok: false,
+            result: None,
+            error: Some(ErrorPayload::new(
+                PublicErrorCode::IpcProtocolError,
+                self.as_protocol_error_message(),
+            )),
+        }
+    }
+}
+
+pub fn normalize_subscribe_topics<I, S>(topics: I) -> Result<Vec<String>, SubscribeTopicsError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let topics = topics
+        .into_iter()
+        .map(|topic| topic.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    if topics.is_empty() {
+        return Err(SubscribeTopicsError::EmptyList);
+    }
+
+    if topics.len() > MAX_SUBSCRIBE_TOPICS {
+        return Err(SubscribeTopicsError::TooManyTopics {
+            provided: topics.len(),
+            limit: MAX_SUBSCRIBE_TOPICS,
+        });
+    }
+
+    let deduped = deduplicate_topics(topics);
+    let invalid = deduped
+        .iter()
+        .filter(|topic| has_invalid_topic_chars(topic) || !is_valid_topic(topic))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if !invalid.is_empty() {
+        return Err(SubscribeTopicsError::UnknownTopics(invalid));
+    }
+
+    Ok(deduped)
+}
+
+fn has_invalid_topic_chars(topic: &str) -> bool {
+    topic.is_empty() || validate_no_control_or_whitespace(topic).is_err()
+}
+
+pub fn validate_ipc_request_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("request id must not be empty".to_string());
+    }
+    if id.len() > MAX_IPC_REQUEST_ID_BYTES {
+        return Err("request id is too long".to_string());
+    }
+    validate_no_control_or_whitespace(id).map_err(|error| format!("request id {error}"))?;
+    Ok(())
+}
+
+pub fn validate_command_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("command name must not be empty".to_string());
+    }
+    if name.len() > MAX_COMMAND_NAME_BYTES {
+        return Err("command name is too long".to_string());
+    }
+    validate_no_control_or_whitespace(name).map_err(|error| format!("command name {error}"))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -967,5 +1100,100 @@ mod tests {
         for (error, expected) in cases {
             assert_eq!(public_error_code(&error), expected, "{error}");
         }
+    }
+
+    #[test]
+    fn deduplicate_topics_removes_duplicates_preserving_order() {
+        let topics = deduplicate_topics(vec!["events", "state", "events", "logs", "state"]);
+
+        assert_eq!(topics, vec!["events", "state", "logs"]);
+    }
+
+    #[test]
+    fn normalize_subscribe_topics_validates_limit_and_topic_names() {
+        assert_eq!(
+            normalize_subscribe_topics::<Vec<&str>, &str>(vec![]),
+            Err(SubscribeTopicsError::EmptyList)
+        );
+
+        let too_many = normalize_subscribe_topics((0..=MAX_SUBSCRIBE_TOPICS).map(|idx| {
+            if idx % 2 == 0 {
+                TOPIC_STATE
+            } else {
+                TOPIC_EVENTS
+            }
+        }));
+        assert!(matches!(
+            too_many,
+            Err(SubscribeTopicsError::TooManyTopics {
+                provided,
+                limit,
+            }) if provided == MAX_SUBSCRIBE_TOPICS + 1 && limit == MAX_SUBSCRIBE_TOPICS
+        ));
+
+        assert_eq!(
+            normalize_subscribe_topics(["state", "events", "bad"]),
+            Err(SubscribeTopicsError::UnknownTopics(vec!["bad".to_string()]))
+        );
+
+        assert_eq!(
+            normalize_subscribe_topics(["state", "", "events"]),
+            Err(SubscribeTopicsError::UnknownTopics(vec!["".to_string()]))
+        );
+
+        assert_eq!(
+            normalize_subscribe_topics(["state", "events\t"]),
+            Err(SubscribeTopicsError::UnknownTopics(vec![
+                "events\t".to_string()
+            ]))
+        );
+
+        assert_eq!(
+            normalize_subscribe_topics(["state", "state", TOPIC_EVENTS, TOPIC_LOGS]),
+            Ok(vec![
+                TOPIC_STATE.to_string(),
+                TOPIC_EVENTS.to_string(),
+                TOPIC_LOGS.to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn subscribe_topics_error_builds_protocol_response() {
+        let err = SubscribeTopicsError::UnknownTopics(vec!["bad-topic".to_string()]);
+        let response = err.to_protocol_response("req-1".to_string());
+
+        match response {
+            ServerMessage::Response {
+                id,
+                ok,
+                result,
+                error,
+            } => {
+                assert_eq!(id, "req-1");
+                assert!(!ok);
+                assert!(result.is_none());
+                let error = error.expect("missing protocol error payload");
+                assert_eq!(error.code, PublicErrorCode::IpcProtocolError.as_str());
+                assert_eq!(error.message, "unknown topics: bad-topic");
+            }
+            _ => panic!("expected response message"),
+        }
+    }
+
+    #[test]
+    fn validate_ipc_request_id_rejects_bad_values() {
+        assert!(validate_ipc_request_id("ok-id").is_ok());
+        assert!(validate_ipc_request_id("id with space").is_err());
+        assert!(validate_ipc_request_id("").is_err());
+        assert!(validate_ipc_request_id(&"x".repeat(MAX_IPC_REQUEST_ID_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn validate_command_name_rejects_bad_values() {
+        assert!(validate_command_name("set_scene").is_ok());
+        assert!(validate_command_name("name with space").is_err());
+        assert!(validate_command_name("").is_err());
+        assert!(validate_command_name(&"x".repeat(MAX_COMMAND_NAME_BYTES + 1)).is_err());
     }
 }

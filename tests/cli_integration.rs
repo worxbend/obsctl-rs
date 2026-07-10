@@ -108,7 +108,7 @@ fn validate_config_fails_for_missing_file() {
 fn validate_config_fails_for_bad_yaml() {
     let dir = TempDir::new().unwrap();
     let path = temp_config(&dir);
-    std::fs::write(&path, "version: 1\nconnection: !!!bad").unwrap();
+    std::fs::write(&path, "version: [\n").unwrap();
 
     obsctl()
         .args(["--config", path.to_str().unwrap(), "validate-config"])
@@ -133,12 +133,8 @@ fn validate_config_rejects_bad_version() {
 
 // ── proxy commands without server ─────────────────────────────────────────────
 
-fn nonexistent_socket() -> std::path::PathBuf {
-    std::path::PathBuf::from("/tmp/obsctl-nonexistent-test.sock")
-}
-
 fn config_with_socket(dir: &TempDir) -> std::path::PathBuf {
-    let sock = nonexistent_socket();
+    let sock = dir.path().join("obsctl-nonexistent-test.sock");
     let path = temp_config(dir);
     let yaml = format!("version: 1\nserver:\n  socket_path: {}\n", sock.display());
     std::fs::write(&path, yaml).unwrap();

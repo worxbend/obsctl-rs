@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use crate::{
     domain::{command::Command, parser, result::Result},
     ipc::protocol::{CommandPayload, LogLevel, ServerMessage},
+    support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len},
     tui::{
         completion,
         event_applier::apply_server_message,
@@ -299,7 +300,10 @@ async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
                 .to_string()
         }
         Ok(cmd) => {
-            let payload = command_to_payload(cmd);
+            let payload = match command_to_payload(cmd) {
+                Ok(payload) => payload,
+                Err(error) => return format!("error: {error}"),
+            };
             match send_command(socket_path, payload).await {
                 Ok(ServerMessage::Response {
                     ok, result, error, ..
@@ -325,7 +329,7 @@ async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
     }
 }
 
-fn command_to_payload(cmd: Command) -> CommandPayload {
+fn command_to_payload(cmd: Command) -> std::result::Result<CommandPayload, String> {
     let (name, args) = match cmd {
         Command::Status => ("get_snapshot", serde_json::Value::Null),
         Command::ServerStatus => ("get_server_status", serde_json::Value::Null),
@@ -335,22 +339,47 @@ fn command_to_payload(cmd: Command) -> CommandPayload {
         Command::ShutdownServer => ("shutdown_server", serde_json::Value::Null),
         Command::DumpConfig => ("dump_config", serde_json::Value::Null),
         Command::ReloadConfig => ("reload_config", serde_json::Value::Null),
-        Command::SetScene { target } => ("set_scene", serde_json::json!({ "target": target })),
-        Command::Mute { target } => ("mute", serde_json::json!({ "target": target })),
-        Command::Unmute { target } => ("unmute", serde_json::json!({ "target": target })),
-        Command::ToggleMute { target } => ("toggle_mute", serde_json::json!({ "target": target })),
-        Command::SetVolume { target, percent } => (
-            "set_volume",
-            serde_json::json!({ "target": target, "percent": percent }),
-        ),
+        Command::SetScene { target } => {
+            let target = sanitize_target_arg(&target)?;
+            ("set_scene", serde_json::json!({ "target": target }))
+        }
+        Command::Mute { target } => {
+            let target = sanitize_target_arg(&target)?;
+            ("mute", serde_json::json!({ "target": target }))
+        }
+        Command::Unmute { target } => {
+            let target = sanitize_target_arg(&target)?;
+            ("unmute", serde_json::json!({ "target": target }))
+        }
+        Command::ToggleMute { target } => {
+            let target = sanitize_target_arg(&target)?;
+            ("toggle_mute", serde_json::json!({ "target": target }))
+        }
+        Command::SetVolume { target, percent } => {
+            if percent > 100 {
+                return Err("volume percent must be 0-100".to_string());
+            }
+            (
+                "set_volume",
+                serde_json::json!({
+                    "target": sanitize_target_arg(&target)?,
+                    "percent": percent
+                }),
+            )
+        }
         Command::ToggleStream => ("toggle_stream", serde_json::Value::Null),
         Command::ToggleRecord => ("toggle_record", serde_json::Value::Null),
         Command::Help | Command::Quit => unreachable!("handled before"),
     };
-    CommandPayload {
+    Ok(CommandPayload {
         name: name.to_string(),
         args,
-    }
+    })
+}
+
+fn sanitize_target_arg(value: &str) -> std::result::Result<String, String> {
+    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
+        .map_err(|error| format!("{error}"))
 }
 
 fn format_ipc_response(res: Result<ServerMessage>, ok_fallback: &str) -> String {
@@ -377,6 +406,11 @@ fn format_ipc_response(res: Result<ServerMessage>, ok_fallback: &str) -> String 
 }
 
 async fn send_simple_with_target(socket_path: &Path, name: &str, target: &str) -> String {
+    let target = match sanitize_target_arg(target) {
+        Ok(target) => target,
+        Err(error) => return format!("error: invalid target: {error}"),
+    };
+
     let payload = CommandPayload {
         name: name.to_string(),
         args: serde_json::json!({ "target": target }),
@@ -385,6 +419,14 @@ async fn send_simple_with_target(socket_path: &Path, name: &str, target: &str) -
 }
 
 async fn send_set_volume(socket_path: &Path, target: &str, percent: u8) -> String {
+    let target = match sanitize_target_arg(target) {
+        Ok(target) => target,
+        Err(error) => return format!("error: invalid target: {error}"),
+    };
+    if percent > 100 {
+        return "error: volume percent must be 0-100".to_string();
+    }
+
     let payload = CommandPayload {
         name: "set_volume".to_string(),
         args: serde_json::json!({ "target": target, "percent": percent }),
@@ -401,4 +443,54 @@ async fn send_simple(socket_path: &Path, name: &str) -> String {
         args: serde_json::Value::Null,
     };
     format_ipc_response(send_command(socket_path, payload).await, "ok")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_TARGET_TOKEN_LENGTH, command_to_payload};
+    use crate::domain::command::Command;
+
+    #[test]
+    fn command_to_payload_rejects_invalid_target_values() {
+        let cmd = Command::SetScene {
+            target: "  \t\n  ".to_string(),
+        };
+        assert!(command_to_payload(cmd).is_err());
+
+        let cmd = Command::Mute {
+            target: "Mic\nInput".to_string(),
+        };
+        assert!(command_to_payload(cmd).is_err());
+    }
+
+    #[test]
+    fn command_to_payload_sanitizes_target_whitespace() {
+        let cmd = Command::ToggleMute {
+            target: "  Mic  ".to_string(),
+        };
+        let payload = command_to_payload(cmd).unwrap();
+        assert_eq!(payload.name, "toggle_mute");
+        assert_eq!(
+            payload.args.get("target").and_then(|v| v.as_str()).unwrap(),
+            "Mic"
+        );
+    }
+
+    #[test]
+    fn command_to_payload_rejects_excessive_target_length() {
+        let cmd = Command::SetVolume {
+            target: "a".repeat(MAX_TARGET_TOKEN_LENGTH + 1),
+            percent: 50,
+        };
+        assert!(command_to_payload(cmd).is_err());
+    }
+
+    #[test]
+    fn command_to_payload_rejects_volume_percent_out_of_range() {
+        let cmd = Command::SetVolume {
+            target: "Mic".to_string(),
+            percent: 101,
+        };
+        assert!(command_to_payload(cmd).is_err());
+    }
 }

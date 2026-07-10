@@ -9,7 +9,11 @@ pub fn encode(value: &impl serde::Serialize) -> Result<String> {
 }
 
 pub fn decode<T: serde::de::DeserializeOwned>(line: &str) -> Result<T> {
-    serde_json::from_str(line.trim()).map_err(|e| ObsctlError::IpcProtocolError(e.to_string()))
+    let trimmed = line.trim_end_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        return Err(ObsctlError::IpcProtocolError("empty IPC frame".to_string()));
+    }
+    serde_json::from_str(trimmed).map_err(|e| ObsctlError::IpcProtocolError(e.to_string()))
 }
 
 #[cfg(test)]
@@ -36,5 +40,19 @@ mod tests {
     #[test]
     fn malformed_json_returns_error() {
         assert!(decode::<Sample>("not json").is_err());
+    }
+
+    #[test]
+    fn empty_frame_is_error() {
+        assert!(decode::<Sample>("").is_err());
+        assert!(decode::<Sample>("\n").is_err());
+        assert!(decode::<Sample>("\r\n").is_err());
+        assert!(decode::<Sample>("   \n").is_err());
+    }
+
+    #[test]
+    fn trim_newline_before_decode() {
+        let value = decode::<Sample>("{\"value\":\"hello\"}\r\n").unwrap();
+        assert_eq!(value.value, "hello");
     }
 }

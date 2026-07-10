@@ -12,6 +12,8 @@ use crate::obs::protocol::{
     OPCODE_EVENT, OPCODE_IDENTIFY, OPCODE_REQUEST, OPCODE_REQUEST_RESPONSE, ObsMessage,
     RequestData, RequestResponseData,
 };
+use crate::obs::validation::extract_resource_names;
+use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
 const ES_GENERAL: u32 = 1;
 const ES_SCENES: u32 = 4;
@@ -350,96 +352,248 @@ async fn dispatch_message(
 }
 
 async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
-    let event_type = data
-        .get("eventType")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let event_type = match data.get("eventType").and_then(|v| v.as_str()) {
+        Some(event_type) => {
+            match trim_and_validate_token_with_max_len(event_type, MAX_TARGET_TOKEN_LENGTH) {
+                Ok(event_type) => event_type,
+                Err(error) => {
+                    warn!(
+                        event_type = %event_type,
+                        message = %error,
+                        "Malformed OBS event payload: invalid eventType"
+                    );
+                    return;
+                }
+            }
+        }
+        None => {
+            warn!("Malformed OBS event: missing or invalid eventType");
+            return;
+        }
+    };
     let event_data = data.get("eventData").cloned().unwrap_or(Value::Null);
+
+    let required_str = |field: &str| -> Option<String> {
+        event_data
+            .get(field)
+            .and_then(|v| {
+                let value = v.as_str()?;
+                match trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        warn!(
+                            event_type = %event_type,
+                            field = %field,
+                            message = %error,
+                            "Malformed OBS event payload: string field invalid"
+                        );
+                        None
+                    }
+                }
+            })
+            .or_else(|| {
+                warn!(
+                    event_type = %event_type,
+                    field = %field,
+                    "Malformed OBS event payload: missing or invalid string field"
+                );
+                None
+            })
+    };
+
+    let required_bool = |field: &str| -> Option<bool> {
+        event_data.get(field).and_then(|v| v.as_bool()).or_else(|| {
+            warn!(
+                event_type = %event_type,
+                field = %field,
+                "Malformed OBS event payload: missing or invalid boolean field"
+            );
+            None
+        })
+    };
+
+    let required_f64 = |field: &str| -> Option<f64> {
+        event_data.get(field).and_then(|v| v.as_f64()).or_else(|| {
+            warn!(
+                event_type = %event_type,
+                field = %field,
+                "Malformed OBS event payload: missing or invalid number field"
+            );
+            None
+        })
+    };
+
+    let required_array = |field: &str| -> Option<&Vec<Value>> {
+        event_data
+            .get(field)
+            .and_then(|v| v.as_array())
+            .or_else(|| {
+                warn!(
+                    event_type = %event_type,
+                    field = %field,
+                    "Malformed OBS event payload: missing or invalid array field"
+                );
+                None
+            })
+    };
 
     let event = match event_type.as_str() {
         "CurrentProgramSceneChanged" => ObsEvent::CurrentProgramSceneChanged {
-            scene_name: event_data
-                .get("sceneName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            scene_name: match required_str("sceneName") {
+                Some(value) => value,
+                None => return,
+            },
         },
         "SceneCreated" | "SceneRemoved" | "SceneNameChanged" | "SceneListReindexed" => {
             ObsEvent::SceneListChanged
         }
         "InputCreated" => ObsEvent::InputCreated {
-            input_name: event_data
-                .get("inputName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            input_name: match required_str("inputName") {
+                Some(value) => value,
+                None => return,
+            },
         },
         "InputRemoved" => ObsEvent::InputRemoved {
-            input_name: event_data
-                .get("inputName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            input_name: match required_str("inputName") {
+                Some(value) => value,
+                None => return,
+            },
         },
         "InputMuteStateChanged" => ObsEvent::InputMuteStateChanged {
-            input_name: event_data
-                .get("inputName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            muted: event_data
-                .get("inputMuted")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+            input_name: match required_str("inputName") {
+                Some(value) => value,
+                None => return,
+            },
+            muted: match required_bool("inputMuted") {
+                Some(value) => value,
+                None => return,
+            },
         },
         "InputVolumeChanged" => ObsEvent::InputVolumeChanged {
-            input_name: event_data
-                .get("inputName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            volume_mul: event_data
-                .get("inputVolumeMul")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0),
-            volume_db: event_data
-                .get("inputVolumeDb")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(f64::NEG_INFINITY),
+            input_name: match required_str("inputName") {
+                Some(value) => value,
+                None => return,
+            },
+            volume_mul: match required_f64("inputVolumeMul")
+                .filter(|value| value.is_finite() && *value >= 0.0)
+            {
+                Some(value) => value,
+                None => {
+                    warn!(
+                        event_type = %event_type,
+                        field = "inputVolumeMul",
+                        "Malformed OBS InputVolumeChanged payload: inputVolumeMul must be finite and non-negative"
+                    );
+                    return;
+                }
+            },
+            volume_db: match required_f64("inputVolumeDb").filter(|value| value.is_finite()) {
+                Some(value) => value,
+                None => {
+                    warn!(
+                        event_type = %event_type,
+                        field = "inputVolumeDb",
+                        "Malformed OBS InputVolumeChanged payload: inputVolumeDb must be finite"
+                    );
+                    return;
+                }
+            },
         },
         "InputVolumeMeters" => {
-            let inputs = event_data
-                .get("inputs")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|input| {
-                            let name = input.get("inputName").and_then(|n| n.as_str())?.to_string();
-                            let levels = input.get("inputLevelsMul").and_then(|l| l.as_array())?;
-                            // Take max magnitude (index 0) across all channels.
-                            let max_mag = levels
-                                .iter()
-                                .filter_map(|ch| ch.as_array()?.first()?.as_f64().map(|v| v as f32))
-                                .fold(0.0f32, f32::max);
-                            Some((name, max_mag))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let inputs = match required_array("inputs") {
+                Some(inputs) => inputs,
+                None => return,
+            };
+            let input_names = match extract_resource_names(&event_data, "inputs", "inputName") {
+                Ok(values) => values,
+                Err(error) => {
+                    warn!(
+                        event_type = %event_type,
+                        message = %error,
+                        "Malformed OBS InputVolumeMeters payload: invalid inputName list"
+                    );
+                    return;
+                }
+            };
+
+            let mut had_invalid_entry = false;
+            let mut parsed_inputs: Vec<(String, f32)> = Vec::new();
+
+            for (name, input) in input_names.into_iter().zip(inputs.iter()) {
+                let levels = match input.get("inputLevelsMul") {
+                    Some(Value::Array(levels)) => levels,
+                    None => {
+                        had_invalid_entry = true;
+                        continue;
+                    }
+                    Some(invalid) => {
+                        warn!(
+                            event_type = %event_type,
+                            input = %name,
+                            data = %invalid,
+                            "Malformed OBS InputVolumeMeters payload: inputLevelsMul must be an array"
+                        );
+                        had_invalid_entry = true;
+                        continue;
+                    }
+                };
+
+                let mut max_mag: Option<f32> = None;
+                for channel in levels {
+                    let raw = match channel.as_array().and_then(|ch| ch.first()) {
+                        Some(v) => v,
+                        None => {
+                            had_invalid_entry = true;
+                            continue;
+                        }
+                    };
+                    match raw.as_f64() {
+                        Some(v) if v.is_finite() => {
+                            if v < 0.0 {
+                                had_invalid_entry = true;
+                                continue;
+                            }
+                            let value = v as f32;
+                            max_mag = Some(max_mag.map_or(value, |current| current.max(value)));
+                        }
+                        Some(_) | None => {
+                            had_invalid_entry = true;
+                            continue;
+                        }
+                    }
+                }
+                let max_mag = match max_mag {
+                    Some(value) => value,
+                    None => {
+                        had_invalid_entry = true;
+                        continue;
+                    }
+                };
+
+                parsed_inputs.push((name, max_mag));
+            }
+
+            if had_invalid_entry {
+                warn!(
+                    event_type = %event_type,
+                    "Malformed OBS InputVolumeMeters payload: discarding event due to invalid entries"
+                );
+                return;
+            }
+            let inputs = parsed_inputs;
             ObsEvent::InputVolumeMeters { inputs }
         }
         "StreamStateChanged" => ObsEvent::StreamStateChanged {
-            active: event_data
-                .get("outputActive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+            active: match required_bool("outputActive") {
+                Some(value) => value,
+                None => return,
+            },
         },
         "RecordStateChanged" => ObsEvent::RecordStateChanged {
-            active: event_data
-                .get("outputActive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+            active: match required_bool("outputActive") {
+                Some(value) => value,
+                None => return,
+            },
         },
         _ => ObsEvent::Other {
             event_type,
@@ -458,6 +612,7 @@ pub fn parse_ws_message(text: &str) -> Option<ObsMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::{Duration, timeout};
 
     #[test]
     fn obs_event_dispatches_scene_change() {
@@ -497,6 +652,213 @@ mod tests {
                 }
                 _ => panic!("wrong event type"),
             }
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_invalid_scene_event() {
+        let data = serde_json::json!({
+            "eventType": "CurrentProgramSceneChanged",
+            "eventData": {}
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_invalid_stream_state() {
+        let data = serde_json::json!({
+            "eventType": "StreamStateChanged",
+            "eventData": {}
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_invalid_volume_meters() {
+        let data = serde_json::json!({
+            "eventType": "InputVolumeMeters",
+            "eventData": {
+                "inputs": [ { "inputName": "Mic" } ]
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_volume_meters_with_invalid_channel_payload() {
+        let data = serde_json::json!({
+            "eventType": "InputVolumeMeters",
+            "eventData": {
+                "inputs": [
+                    {
+                        "inputName": "Mic",
+                        "inputLevelsMul": [ [1.0], [0.5] ]
+                    },
+                    {
+                        "inputName": "Music",
+                        "inputLevelsMul": [ ["bad"] ]
+                    }
+                ]
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_scene_with_control_characters() {
+        let data = serde_json::json!({
+            "eventType": "CurrentProgramSceneChanged",
+            "eventData": { "sceneName": "Main\nScene" }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_volume_meters_with_invalid_name() {
+        let data = serde_json::json!({
+            "eventType": "InputVolumeMeters",
+            "eventData": {
+                "inputs": [
+                    {
+                        "inputName": "Mic\tLeft",
+                        "inputLevelsMul": [ [1.0], [0.5] ]
+                    }
+                ]
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_invalid_volume_changed_negative_mul() {
+        let data = serde_json::json!({
+            "eventType": "InputVolumeChanged",
+            "eventData": {
+                "inputName": "Mic",
+                "inputVolumeMul": -0.25,
+                "inputVolumeDb": -12.3
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_invalid_volume_meters_with_negative_level() {
+        let data = serde_json::json!({
+            "eventType": "InputVolumeMeters",
+            "eventData": {
+                "inputs": [
+                    { "inputName": "Mic", "inputLevelsMul": [[-0.25]] }
+                ]
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_volume_meters_with_duplicate_names() {
+        let data = serde_json::json!({
+            "eventType": "InputVolumeMeters",
+            "eventData": {
+                "inputs": [
+                    {
+                        "inputName": "Mic",
+                        "inputLevelsMul": [[1.0]]
+                    },
+                    {
+                        "inputName": "Mic",
+                        "inputLevelsMul": [[0.5]]
+                    }
+                ]
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_invalid_event_type() {
+        let data = serde_json::json!({
+            "eventType": "CurrentProgramSceneChanged\n"
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_oversize_event_type() {
+        let event_type = "a".repeat(300);
+        let data = serde_json::json!({
+            "eventType": event_type,
+            "eventData": { "sceneName": "Main" }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_drops_oversize_string_field() {
+        let data = serde_json::json!({
+            "eventType": "CurrentProgramSceneChanged",
+            "eventData": { "sceneName": "a".repeat(300) }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
         });
     }
 }

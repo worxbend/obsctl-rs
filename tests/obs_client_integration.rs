@@ -148,7 +148,7 @@ fn set_current_program_scene_request_is_dispatched() {
         let (client, _, _, _) = connect_to_fake(server.addr, None).await;
 
         client
-            .request(requests::set_current_program_scene("BRB"))
+            .request(requests::set_current_program_scene("BRB").unwrap())
             .await
             .expect("set scene");
 
@@ -180,7 +180,7 @@ fn obs_request_failure_returns_error() {
         let (client, _, _, _) = connect_to_fake(server.addr, None).await;
 
         let result = client
-            .request(requests::set_current_program_scene("NonExistent"))
+            .request(requests::set_current_program_scene("NonExistent").unwrap())
             .await;
         assert!(result.is_err(), "expected error from OBS");
         if let Err(e) = result {
@@ -249,7 +249,7 @@ fn get_input_mute_returns_mute_state() {
         let (client, _, _, _) = connect_to_fake(server.addr, None).await;
 
         let data = client
-            .request(requests::get_input_mute("Mic"))
+            .request(requests::get_input_mute("Mic").unwrap())
             .await
             .expect("get_input_mute");
         assert!(data.get("inputMuted").is_some());
@@ -427,7 +427,7 @@ fn late_response_after_request_timeout_does_not_poison_next_request() {
         let (client, _, _, _) = connect_to_fake_with_timeout(server.addr, None, TIMEOUT_MS).await;
 
         let timed_out = client
-            .request(requests::set_current_program_scene("BRB"))
+            .request(requests::set_current_program_scene("BRB").unwrap())
             .await;
         assert!(
             matches!(
@@ -468,7 +468,7 @@ fn connection_params_from_config_resolves_password_env() {
         request_timeout_ms: 2500,
         reconnect: None,
     };
-    let params = ObsConnectionParams::from_config(&cfg);
+    let params = ObsConnectionParams::from_config(&cfg).unwrap();
     assert_eq!(params.password.as_deref(), Some("mypassword"));
     unsafe { std::env::remove_var("TEST_OBS_PW_RESOLVE") };
 }

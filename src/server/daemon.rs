@@ -1,15 +1,18 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt as _;
+
 use tokio::sync::{Mutex, mpsc};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::loader;
 use crate::ipc::{
     protocol::{LogEvent, LogLevel},
     session::BroadcastHub,
-    socket_path::default_socket_path,
+    socket_path::{ensure_socket_file, validate_socket_path},
     unix_server::IpcServer,
 };
 use crate::obs::client::ObsClient;
@@ -21,6 +24,7 @@ use crate::server::{
     options::ServerOptions,
     state_store::StateStore,
 };
+use crate::support::fs;
 
 /// Start the daemon and block until shutdown.
 /// Returns the process exit code (0 = success, 1 = startup failure).
@@ -32,7 +36,7 @@ pub async fn run(options: ServerOptions) -> i32 {
         .or_else(crate::config::paths::config_path)
         .unwrap_or_else(dirs_next_config_path);
 
-    let config = match loader::load_or_default(&config_path) {
+    let (config, socket_path, _) = match loader::load_or_default_with_runtime(&config_path) {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to load config: {e}");
@@ -40,18 +44,18 @@ pub async fn run(options: ServerOptions) -> i32 {
         }
     };
 
-    // Validate config
-    if let Err(e) = crate::config::schema::validate(&config) {
-        error!("Config invalid: {e}");
-        return 2;
+    if let Err(err) = crate::ipc::socket_path::ensure_private_socket_parent(&socket_path) {
+        error!(
+            "Refusing to use socket path {}: {err}",
+            socket_path.display()
+        );
+        return 3;
     }
 
-    let socket_path = config
-        .server
-        .socket_path
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(default_socket_path);
+    if let Err(error) = validate_socket_path(&socket_path) {
+        error!("Invalid socket path {}: {error}", socket_path.display());
+        return 3;
+    }
 
     // Remove stale socket file if present
     if socket_path.exists() {
@@ -138,8 +142,11 @@ pub async fn run(options: ServerOptions) -> i32 {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), supervisor_handle).await;
 
     // Cleanup socket
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(&socket_path);
+    if let Err(err) = cleanup_socket_file(&socket_path) {
+        warn!(
+            "Failed to remove IPC socket file {}: {err}",
+            socket_path.display()
+        );
     }
 
     info!("obsctl server shutdown complete");
@@ -154,6 +161,26 @@ pub async fn run(options: ServerOptions) -> i32 {
 /// If it responds, the socket is live and we should not replace it.
 /// If it cannot connect or times out, we remove the stale file.
 async fn try_remove_stale_socket(path: &PathBuf) -> Result<(), String> {
+    validate_socket_path(path).map_err(|error| {
+        if error.to_string().contains("not a private directory") {
+            "socket parent is not private".to_string()
+        } else {
+            error.to_string()
+        }
+    })?;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "socket path has no parent".to_string())?;
+    if fs::ensure_private_dir(parent).is_err() {
+        return Err("socket parent is not private".to_string());
+    }
+
+    validate_socket_file_for_cleanup(path).map_err(|error| match error {
+        SocketFileValidation::Path(error) => error.to_string(),
+        SocketFileValidation::File(error) => error.to_string(),
+    })?;
+
     use tokio::net::UnixStream;
 
     match tokio::time::timeout(
@@ -167,13 +194,225 @@ async fn try_remove_stale_socket(path: &PathBuf) -> Result<(), String> {
             path.display()
         )),
         _ => {
-            // No response → stale socket
-            std::fs::remove_file(path).map_err(|e| format!("failed to remove stale socket: {e}"))
+            // Re-check the socket file immediately before deleting to avoid deleting a
+            // newly replaced non-socket path under the same name.
+            validate_socket_file_for_cleanup(path).map_err(|error| match error {
+                SocketFileValidation::Path(error) => error.to_string(),
+                SocketFileValidation::File(error) => error.to_string(),
+            })?;
+
+            match fs::remove_with_type_guard(
+                path,
+                |metadata| metadata.file_type().is_socket(),
+                "socket",
+            ) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(format!("failed to remove stale socket: {err}")),
+            }
         }
     }
+}
+
+enum SocketFileValidation {
+    Path(std::io::Error),
+    File(std::io::Error),
+}
+
+fn validate_socket_file_for_cleanup(path: &Path) -> Result<(), SocketFileValidation> {
+    validate_socket_path(path).map_err(SocketFileValidation::Path)?;
+    ensure_socket_file(path).map_err(SocketFileValidation::File)?;
+    Ok(())
 }
 
 fn dirs_next_config_path() -> PathBuf {
     crate::config::paths::default_config_path()
         .unwrap_or_else(|| PathBuf::from("/tmp/obsctl_config.yml"))
+}
+
+fn cleanup_socket_file(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::ensure_private_dir(parent)?;
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket path has no parent",
+        ));
+    }
+
+    match validate_socket_file_for_cleanup(path) {
+        Ok(()) => {}
+        Err(SocketFileValidation::Path(error)) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid socket path for cleanup: {error}"),
+            ));
+        }
+        Err(SocketFileValidation::File(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(SocketFileValidation::File(error)) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid socket file for cleanup: {error}"),
+            ));
+        }
+    }
+
+    match fs::remove_with_type_guard(path, |metadata| metadata.file_type().is_socket(), "socket") {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cleanup_socket_file, try_remove_stale_socket};
+
+    use std::io::Write;
+    use std::path::PathBuf;
+    use tempfile::{NamedTempFile, tempdir};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    #[cfg(unix)]
+    use tokio::net::UnixListener;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_socket_check_rejects_symlink_paths() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real.sock");
+        let link = dir.path().join("link.sock");
+        symlink(&real, &link).unwrap();
+
+        let result = try_remove_stale_socket(&link).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "socket path is symbolic link");
+    }
+
+    #[tokio::test]
+    async fn stale_socket_check_rejects_non_socket_files() {
+        let dir = tempdir().unwrap();
+        let file = NamedTempFile::new_in(dir.path()).unwrap();
+        let path = file.path().to_path_buf();
+        let mut out = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        out.write_all(b"not a socket").unwrap();
+
+        let result = try_remove_stale_socket(&path).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a socket"));
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn stale_socket_check_rejects_relative_paths() {
+        let path = PathBuf::from("relative.sock");
+        let result = try_remove_stale_socket(&path).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("absolute"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_socket_check_removes_stale_listener_socket() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("stale.sock");
+
+        let listener = UnixListener::bind(&path).unwrap();
+        drop(listener);
+
+        let result = try_remove_stale_socket(&path).await;
+        assert!(result.is_ok());
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_socket_check_rejects_unsafe_socket_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let parent = dir.path().join("unsafe-parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = parent.join("obsctl.sock");
+        std::fs::write(&path, b"payload").unwrap();
+
+        let error = try_remove_stale_socket(&path).await.unwrap_err();
+        assert!(error.contains("socket parent is not private"));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn cleanup_socket_file_rejects_non_socket_paths() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("not-a-socket.txt");
+        std::fs::write(&path, b"payload").unwrap();
+
+        let error = cleanup_socket_file(&path).unwrap_err();
+        let message = format!("{error}");
+        assert!(message.contains("not a socket"));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn cleanup_socket_file_noop_when_path_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("missing.sock");
+
+        cleanup_socket_file(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_socket_file_rejects_broken_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("link.sock");
+        let target = dir.path().join("missing.sock");
+        symlink(&target, &path).unwrap();
+
+        let error = cleanup_socket_file(&path).unwrap_err();
+        let message = format!("{error}");
+        assert!(message.contains("invalid socket path for cleanup"));
+        assert!(std::fs::symlink_metadata(&path).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_socket_file_rejects_unsafe_socket_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let parent = dir.path().join("unsafe-parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = parent.join("obsctl.sock");
+        std::fs::write(&path, b"payload").unwrap();
+
+        let error = cleanup_socket_file(&path).unwrap_err();
+        let message = format!("{error}");
+        assert!(message.contains("not a private directory"));
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_socket_file_removes_stale_socket() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("stale.sock");
+
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        drop(listener);
+
+        cleanup_socket_file(&path).unwrap();
+        assert!(!path.exists());
+    }
 }

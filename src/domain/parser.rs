@@ -1,4 +1,7 @@
 use super::{command::Command, errors::ObsctlError, result::Result};
+use crate::support::validation::{
+    MAX_TARGET_TOKEN_LENGTH, parse_u8_in_range, trim_and_validate_token_with_max_len,
+};
 
 pub fn parse(input: &str) -> Result<Command> {
     let input = input.trim().trim_start_matches('/');
@@ -10,7 +13,8 @@ pub fn parse(input: &str) -> Result<Command> {
     let (cmd_name, args) = tokens
         .split_first()
         .ok_or_else(|| ObsctlError::CommandParseError("empty command".to_string()))?;
-    let cmd_key = cmd_name.to_ascii_lowercase();
+    let cmd_key = normalize_command_name(cmd_name)?;
+    let maybe_target = args.first();
 
     match cmd_key.as_str() {
         "help" => expect_args(args, 0, "help", Command::Help),
@@ -34,7 +38,7 @@ pub fn parse(input: &str) -> Result<Command> {
                 )));
             }
             Ok(Command::SetScene {
-                target: args[0].clone(),
+                target: sanitize_target(maybe_target)?,
             })
         }
         "mute" => {
@@ -45,7 +49,7 @@ pub fn parse(input: &str) -> Result<Command> {
                 )));
             }
             Ok(Command::Mute {
-                target: args[0].clone(),
+                target: sanitize_target(maybe_target)?,
             })
         }
         "unmute" => {
@@ -56,7 +60,7 @@ pub fn parse(input: &str) -> Result<Command> {
                 )));
             }
             Ok(Command::Unmute {
-                target: args[0].clone(),
+                target: sanitize_target(maybe_target)?,
             })
         }
         "toggle-mute" => {
@@ -67,7 +71,7 @@ pub fn parse(input: &str) -> Result<Command> {
                 )));
             }
             Ok(Command::ToggleMute {
-                target: args[0].clone(),
+                target: sanitize_target(maybe_target)?,
             })
         }
         "vol" | "volume" => {
@@ -77,19 +81,14 @@ pub fn parse(input: &str) -> Result<Command> {
                     args.len()
                 )));
             }
-            let percent = args[1].parse::<u8>().map_err(|_| {
-                ObsctlError::CommandParseError(format!(
-                    "volume must be integer 0-100, got {:?}",
-                    args[1]
-                ))
-            })?;
-            if percent > 100 {
-                return Err(ObsctlError::CommandParseError(format!(
-                    "volume must be 0-100, got {percent}"
-                )));
+            if input.trim_end().ends_with('"') {
+                return Err(ObsctlError::CommandParseError(
+                    "volume percentage must not be quoted".to_string(),
+                ));
             }
+            let percent = required_u8_percentage(&args[1])?;
             Ok(Command::SetVolume {
-                target: args[0].clone(),
+                target: sanitize_target(maybe_target)?,
                 percent,
             })
         }
@@ -107,6 +106,23 @@ fn expect_args(args: &[String], expected: usize, name: &str, cmd: Command) -> Re
         )));
     }
     Ok(cmd)
+}
+
+fn sanitize_target(value: Option<&String>) -> Result<String> {
+    let target = value
+        .ok_or_else(|| ObsctlError::CommandParseError("target must not be blank".to_string()))?;
+    trim_and_validate_token_with_max_len(target, MAX_TARGET_TOKEN_LENGTH)
+        .map_err(|error| ObsctlError::CommandParseError(format!("target {error}")))
+}
+
+fn normalize_command_name(value: &str) -> Result<String> {
+    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
+        .map_err(|error| ObsctlError::CommandParseError(format!("command {error}")))
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn required_u8_percentage(value: &str) -> Result<u8> {
+    parse_u8_in_range(value, "volume", 0, 100).map_err(ObsctlError::CommandParseError)
 }
 
 fn tokenize(input: &str) -> Result<Vec<String>> {
@@ -181,6 +197,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_blank_target() {
+        assert!(parse("scene").is_err());
+        assert!(parse("scene   ").is_err());
+        assert!(parse(r#"scene "   ""#).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_control_characters_in_target() {
+        assert!(parse("scene main\tcam").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_control_characters_in_command_name() {
+        assert!(parse("main\0cam").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_oversize_command_name() {
+        let input = format!("{} arg", "a".repeat(MAX_TARGET_TOKEN_LENGTH + 1));
+        assert!(parse(&input).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_oversize_target() {
+        let input = format!("scene {}", "a".repeat(MAX_TARGET_TOKEN_LENGTH + 1));
+        assert!(parse(&input).is_err());
+    }
+
+    #[test]
     fn parse_volume_command() {
         assert_eq!(
             parse("vol mic 70").unwrap(),
@@ -242,6 +287,13 @@ mod tests {
                 percent: 50
             }
         );
+    }
+
+    #[test]
+    fn parse_volume_command_rejects_invalid_values() {
+        assert!(parse("vol mic 101").is_err());
+        assert!(parse("vol mic 50.5").is_err());
+        assert!(parse(r#"vol mic "70""#).is_err());
     }
 
     #[test]

@@ -447,7 +447,7 @@ async fn obs_command_timeout_returns_request_timeout_ipc_code_and_exit_4() {
     cfg.connection.port = fake_obs.addr.port();
     cfg.connection.password_env = String::new();
     cfg.connection.request_timeout_ms = TIMEOUT_MS;
-    let params = ObsConnectionParams::from_config(&cfg.connection);
+    let params = ObsConnectionParams::from_config(&cfg.connection).unwrap();
     let (event_tx, _event_rx) = mpsc::channel(8);
     let (obs_client, _, _, _disconnect) = connect(&params, event_tx).await.unwrap();
 
@@ -1115,7 +1115,7 @@ async fn start_obs_connected_server(
     cfg.connection.port = fake_obs.addr.port();
     cfg.connection.password_env = String::new();
     cfg.connection.request_timeout_ms = 500;
-    let params = ObsConnectionParams::from_config(&cfg.connection);
+    let params = ObsConnectionParams::from_config(&cfg.connection).unwrap();
     let (event_tx, _event_rx) = mpsc::channel(8);
     let (obs_client, _, _, _disconnect) = connect(&params, event_tx).await.unwrap();
 

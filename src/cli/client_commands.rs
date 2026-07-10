@@ -9,20 +9,27 @@ use crate::{
     ipc::{
         protocol::{
             CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage,
-            exit_code_for_public_error_code, public_error_code,
+            exit_code_for_public_error_code, public_error_code, validate_command_name,
         },
         unix_client::IpcClient,
     },
+    service::systemd_user_service::SYSTEMCTL_ENABLE_HINT,
     support::redaction::redact_message,
+    support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len},
 };
 
-const SERVER_UNAVAILABLE_HINT: &str = "\
+fn server_unavailable_hint() -> String {
+    format!(
+        "\
 obsctl server is not running.
 Start it with:
   obsctl server --headless
 Or install the service:
   obsctl service install
-  systemctl --user enable --now obsctl.service";
+  {}",
+        SYSTEMCTL_ENABLE_HINT
+    )
+}
 
 pub struct ProxyCtx {
     pub socket_path: PathBuf,
@@ -30,25 +37,35 @@ pub struct ProxyCtx {
 }
 
 impl ProxyCtx {
-    fn rt() -> Runtime {
+    fn rt() -> Result<Runtime, ObsctlError> {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("tokio runtime")
+            .map_err(ObsctlError::Io)
     }
 
     async fn send(&self, payload: CommandPayload) -> Result<ServerMessage, ObsctlError> {
         let mut client = IpcClient::connect(&self.socket_path).await.map_err(|_| {
             ObsctlError::ServerUnavailable {
                 socket_path: self.socket_path.display().to_string(),
-                message: SERVER_UNAVAILABLE_HINT.to_string(),
+                message: server_unavailable_hint(),
             }
         })?;
         client.send_command(payload).await
     }
 
     fn run_proxy(&self, payload: CommandPayload) -> i32 {
-        let rt = Self::rt();
+        if let Err(error) = validate_command_name(&payload.name) {
+            return self.emit_local_error(&ObsctlError::CommandParseError(format!(
+                "invalid command name: {error}"
+            )));
+        }
+
+        let rt = match Self::rt() {
+            Ok(rt) => rt,
+            Err(e) => return self.emit_local_error(&e),
+        };
+
         match rt.block_on(self.send(payload)) {
             Ok(ServerMessage::Response {
                 ok, result, error, ..
@@ -81,7 +98,10 @@ impl ProxyCtx {
     }
 
     pub fn status(&self) -> i32 {
-        let rt = Self::rt();
+        let rt = match Self::rt() {
+            Ok(rt) => rt,
+            Err(e) => return self.emit_local_error(&e),
+        };
         match rt.block_on(self.send(simple_cmd("get_snapshot"))) {
             Ok(ServerMessage::Response {
                 ok, result, error, ..
@@ -112,22 +132,33 @@ impl ProxyCtx {
     }
 
     pub fn scene(&self, target: &str) -> i32 {
-        self.run_proxy(target_cmd("set_scene", target))
+        self.run_target_cmd("set_scene", target)
     }
 
     pub fn mute(&self, target: &str) -> i32 {
-        self.run_proxy(target_cmd("mute", target))
+        self.run_target_cmd("mute", target)
     }
 
     pub fn unmute(&self, target: &str) -> i32 {
-        self.run_proxy(target_cmd("unmute", target))
+        self.run_target_cmd("unmute", target)
     }
 
     pub fn toggle_mute(&self, target: &str) -> i32 {
-        self.run_proxy(target_cmd("toggle_mute", target))
+        self.run_target_cmd("toggle_mute", target)
     }
 
     pub fn set_volume(&self, target: &str, percent: u8) -> i32 {
+        if percent > 100 {
+            return self.emit_local_error(&ObsctlError::CommandParseError(
+                "percent must be 0-100".to_string(),
+            ));
+        }
+
+        let target = match sanitize_target_arg(target) {
+            Ok(value) => value,
+            Err(error) => return self.emit_local_error(&error),
+        };
+
         let args = serde_json::json!({ "target": target, "percent": percent });
         self.run_proxy(CommandPayload {
             name: "set_volume".into(),
@@ -206,6 +237,14 @@ impl ProxyCtx {
         }
         exit_code
     }
+
+    fn run_target_cmd(&self, name: &str, target: &str) -> i32 {
+        let target = match sanitize_target_arg(target) {
+            Ok(value) => value,
+            Err(error) => return self.emit_local_error(&error),
+        };
+        self.run_proxy(target_cmd(name, &target))
+    }
 }
 
 fn simple_cmd(name: &str) -> CommandPayload {
@@ -222,6 +261,11 @@ fn target_cmd(name: &str, target: &str) -> CommandPayload {
     }
 }
 
+fn sanitize_target_arg(value: &str) -> Result<String, ObsctlError> {
+    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
+        .map_err(|error| ObsctlError::CommandParseError(format!("target {error}")))
+}
+
 fn map_error_code(code: &str) -> i32 {
     exit_code_for_public_error_code(code)
 }
@@ -233,7 +277,10 @@ fn print_json_success(result: Option<serde_json::Value>) {
         "error": serde_json::Value::Null,
         "exit_code": 0,
     });
-    println!("{}", serde_json::to_string(&envelope).unwrap_or_default());
+    print_json_envelope(
+        &envelope,
+        "{\"ok\":false,\"result\":null,\"error\":{\"code\":\"internal\",\"message\":\"failed to encode JSON response\"},\"exit_code\":1}",
+    );
 }
 
 fn print_json_error(code: &str, message: &str, exit_code: i32) {
@@ -247,7 +294,8 @@ fn print_json_error(code: &str, message: &str, exit_code: i32) {
         },
         "exit_code": exit_code,
     });
-    println!("{}", serde_json::to_string(&envelope).unwrap_or_default());
+    let fallback = r#"{"ok":false,"result":null,"error":{"code":"internal","message":"failed to encode JSON output"},"exit_code":1}"#;
+    print_json_envelope(&envelope, fallback);
 }
 
 fn print_status_json(v: &serde_json::Value) {
@@ -260,10 +308,21 @@ fn print_status_json(v: &serde_json::Value) {
     }
 }
 
+fn print_json_envelope(envelope: &serde_json::Value, fallback: &str) {
+    match serde_json::to_string(envelope) {
+        Ok(value) => println!("{value}"),
+        Err(error) => {
+            eprintln!("warning: failed to encode JSON output: {error}");
+            println!("{fallback}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ipc::protocol::PublicErrorCode;
+    use std::path::PathBuf;
 
     #[test]
     fn proxy_error_code_mapping_uses_public_contract() {
@@ -272,5 +331,60 @@ mod tests {
         }
 
         assert_eq!(map_error_code("UNKNOWN_CODE"), 1);
+    }
+
+    #[test]
+    fn sanitize_target_arg_trimmed() {
+        assert_eq!(sanitize_target_arg(" Mic ").unwrap(), "Mic");
+        assert!(sanitize_target_arg("   ").is_err());
+        assert!(sanitize_target_arg("a\tb").is_err());
+    }
+
+    #[test]
+    fn sanitize_target_arg_rejects_excessive_length() {
+        assert!(sanitize_target_arg(&"a".repeat(MAX_TARGET_TOKEN_LENGTH + 1)).is_err());
+    }
+
+    #[test]
+    fn sanitize_target_arg_rejects_control_characters() {
+        assert!(sanitize_target_arg("Mic\n").is_err());
+        assert!(sanitize_target_arg("\tMic").is_err());
+    }
+
+    #[test]
+    fn run_proxy_rejects_invalid_command_name_without_connect() {
+        let ctx = ProxyCtx {
+            socket_path: PathBuf::from("/tmp/obsctl-invalid-command-name.sock"),
+            json_output: false,
+        };
+
+        let exit_code = ctx.run_proxy(CommandPayload {
+            name: "bad command".to_string(),
+            args: serde_json::Value::Null,
+        });
+
+        assert_eq!(exit_code, PublicErrorCode::CommandParseError.exit_code(),);
+    }
+
+    #[test]
+    fn set_volume_rejects_percent_out_of_range_without_server() {
+        let ctx = ProxyCtx {
+            socket_path: PathBuf::from("/tmp/obsctl-test.sock"),
+            json_output: false,
+        };
+
+        assert_eq!(ctx.set_volume("Mic", 101), 5);
+        assert_eq!(ctx.set_volume("Mic", 255), 5);
+    }
+
+    #[test]
+    fn target_cmd_rejects_invalid_target_without_server() {
+        let ctx = ProxyCtx {
+            socket_path: PathBuf::from("/tmp/obsctl-test.sock"),
+            json_output: false,
+        };
+
+        assert_eq!(ctx.run_target_cmd("mute", "Bad\nTarget"), 5);
+        assert_eq!(ctx.run_target_cmd("set_scene", "   "), 5);
     }
 }

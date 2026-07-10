@@ -9,12 +9,33 @@ pub fn channel() -> (watch::Sender<bool>, watch::Receiver<bool>) {
 /// Install a SIGTERM/SIGINT handler that fires the given shutdown sender.
 pub fn install_signal_handler(tx: watch::Sender<bool>) {
     tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to listen for SIGTERM");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
+        let sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            Ok(sigterm) => Some(sigterm),
+            Err(error) => {
+                eprintln!("warning: failed to listen for SIGTERM: {error}");
+                None
+            }
+        };
+
+        match sigterm {
+            Some(mut sigterm) => {
+                tokio::select! {
+                    _ = async {
+                        if let Err(error) = tokio::signal::ctrl_c().await {
+                            eprintln!("warning: failed to listen for Ctrl-C: {error}");
+                        }
+                    } => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            None => {
+                if let Err(error) = tokio::signal::ctrl_c().await {
+                    eprintln!("warning: failed to listen for Ctrl-C: {error}");
+                }
+            }
         }
+
         let _ = tx.send(true);
     });
 }

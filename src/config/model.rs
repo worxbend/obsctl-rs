@@ -36,6 +36,7 @@ impl Default for Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ServerConfig {
     pub socket_path: Option<String>,
     pub pid_file: Option<String>,
@@ -46,6 +47,7 @@ pub struct ServerConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ConnectionConfig {
     pub host: String,
     pub port: u16,
@@ -86,6 +88,7 @@ impl Default for ConnectionConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ReconnectConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -111,6 +114,7 @@ impl Default for ReconnectConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UiConfig {
     pub refresh_interval_ms: u64,
     pub command_palette_prefix: String,
@@ -158,6 +162,7 @@ pub struct AudioInputConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KeymapConfig {
     pub quit: Vec<String>,
     pub command_palette: Vec<String>,

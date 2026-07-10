@@ -5,6 +5,7 @@ use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{info, warn};
 
 use crate::config::model::Config;
+use crate::domain::errors::ObsctlError;
 use crate::ipc::{
     protocol::{LogEvent, LogLevel},
     session::BroadcastHub,
@@ -13,10 +14,12 @@ use crate::obs::{
     client::{ObsClient, ObsEvent},
     connection::{ObsConnectionParams, connect},
     requests,
+    validation::extract_resource_names,
 };
 use crate::runtime::reconnect_policy::ReconnectPolicy;
 use crate::server::obs_event_adapter::normalize_obs_event;
 use crate::server::state_store::{StateStore, build_snapshot};
+use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
 pub struct ObsSupervisor {
     config: Arc<Mutex<Config>>,
@@ -64,13 +67,17 @@ impl ObsSupervisor {
                     cfg.reconnect.clone(),
                 )
             };
+            let attempt = match params {
+                Ok(params) => self.attempt_connect(&params).await,
+                Err(error) => Err(error),
+            };
             if latest_reconnect_cfg != reconnect_cfg {
                 reconnect_cfg = latest_reconnect_cfg;
                 policy = ReconnectPolicy::new(reconnect_cfg.clone());
             }
 
             self.reconnecting.store(true, Ordering::Relaxed);
-            match self.attempt_connect(&params).await {
+            match attempt {
                 Ok((client, obs_version, ws_version, disconnect_rx)) => {
                     info!("OBS connected: studio={obs_version} ws={ws_version}");
                     self.publish_log(
@@ -275,10 +282,7 @@ async fn fetch_and_publish_snapshot_from(
     ws_version: &str,
 ) -> crate::domain::result::Result<()> {
     let scene_list_resp = client.request(requests::get_scene_list()).await?;
-    let scenes_raw = scene_list_resp
-        .get("scenes")
-        .cloned()
-        .unwrap_or(serde_json::Value::Array(Vec::new()));
+    let scenes_raw = extract_resource_names(&scene_list_resp, "scenes", "sceneName")?;
 
     let current_resp = client
         .request(requests::get_current_program_scene())
@@ -286,34 +290,65 @@ async fn fetch_and_publish_snapshot_from(
     let current_scene = current_resp
         .get("currentProgramSceneName")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .ok_or_else(|| {
+            warn!("Malformed GetCurrentProgramScene response: missing `currentProgramSceneName`");
+            ObsctlError::ObsRequestFailed(
+                "GetCurrentProgramScene response missing `currentProgramSceneName`".to_string(),
+            )
+        })?;
+    let current_scene =
+        trim_and_validate_token_with_max_len(current_scene, MAX_TARGET_TOKEN_LENGTH).map_err(
+            |error| ObsctlError::ObsRequestFailed(format!("currentProgramSceneName {error}")),
+        )?;
 
-    let input_list_resp = client.request(requests::get_input_list()).await?;
-    let input_names: Vec<String> = input_list_resp
-        .get("inputs")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.get("inputName").and_then(|n| n.as_str()))
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
+    if !scenes_raw.contains(&current_scene) {
+        warn!(
+            "Current program scene '{}' is not present in GetSceneList response",
+            current_scene
+        );
+    }
+
+    let input_names = extract_resource_names(
+        &client.request(requests::get_input_list()).await?,
+        "inputs",
+        "inputName",
+    )?;
 
     let mut inputs: Vec<(String, Option<bool>, Option<f64>)> = Vec::new();
     for name in &input_names {
         let muted = client
-            .request(requests::get_input_mute(name))
+            .request(requests::get_input_mute(name)?)
             .await
             .ok()
-            .and_then(|v| v.get("inputMuted").and_then(|b| b.as_bool()));
+            .and_then(|v| match v.get("inputMuted").and_then(|b| b.as_bool()) {
+                Some(muted) => Some(muted),
+                None => {
+                    warn!("Malformed GetInputMute response for {name}: missing `inputMuted`");
+                    None
+                }
+            });
 
         let vol = client
-            .request(requests::get_input_volume(name))
+            .request(requests::get_input_volume(name)?)
             .await
             .ok()
-            .and_then(|v| v.get("inputVolumeMul").and_then(|f| f.as_f64()));
+            .and_then(
+                |v| match v.get("inputVolumeMul").and_then(|f| f.as_f64()) {
+                    Some(volume_mul) if volume_mul.is_finite() && volume_mul >= 0.0 => Some(volume_mul),
+                    None => {
+                        warn!(
+                            "Malformed GetInputVolume response for {name}: missing `inputVolumeMul`"
+                        );
+                        None
+                    }
+                    Some(_) => {
+                        warn!(
+                            "Malformed GetInputVolume response for {name}: non-finite or negative `inputVolumeMul`"
+                        );
+                        None
+                    }
+                },
+            );
 
         inputs.push((name.clone(), muted, vol));
     }
@@ -323,14 +358,24 @@ async fn fetch_and_publish_snapshot_from(
         .await
         .ok()
         .and_then(|v| v.get("outputActive").and_then(|b| b.as_bool()))
-        .unwrap_or(false);
+        .unwrap_or_else(|| {
+            warn!(
+                "Malformed GetStreamStatus response: missing `outputActive`, defaulting to false"
+            );
+            false
+        });
 
     let recording = client
         .request(requests::get_record_status())
         .await
         .ok()
         .and_then(|v| v.get("outputActive").and_then(|b| b.as_bool()))
-        .unwrap_or(false);
+        .unwrap_or_else(|| {
+            warn!(
+                "Malformed GetRecordStatus response: missing `outputActive`, defaulting to false"
+            );
+            false
+        });
 
     let cfg = config.lock().await;
     let snapshot = build_snapshot(
