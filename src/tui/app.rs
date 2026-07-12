@@ -61,7 +61,7 @@ async fn run_loop(
         Err(e) => {
             model.connected_to_daemon = false;
             let msg = format!("Cannot connect to daemon: {e}");
-            model.last_result = Some(msg.clone());
+            model.set_last_result(msg.clone());
             model.push_log(TuiLogEntry {
                 level: LogLevel::Error,
                 message: msg,
@@ -86,7 +86,7 @@ async fn run_loop(
                     Some(Ok(msg)) => apply_server_message(&mut model, msg),
                     Some(Err(e)) => {
                         model.connected_to_daemon = false;
-                        model.last_result = Some(format!("Daemon disconnected: {e}"));
+                        model.set_last_result(format!("Daemon disconnected: {e}"));
                         true
                     }
                     None => {
@@ -109,7 +109,7 @@ async fn run_loop(
                                 return Ok(0);
                             }
                             if let Some(r) = result {
-                                model.last_result = Some(r);
+                                model.set_last_result(r);
                             }
                             terminal.draw(|f| render(f, &model))?;
                         }

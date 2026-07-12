@@ -9,6 +9,9 @@ use ratatui::{
 use crate::tui::model::TuiModel;
 
 const MAX_VISIBLE_COMPLETIONS: usize = 8;
+/// Reveal speed of the last-result typewriter animation, in characters per
+/// render tick. Fast enough to feel snappy rather than sluggish.
+const RESULT_REVEAL_CHARS_PER_TICK: usize = 3;
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
@@ -21,13 +24,23 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    if let Some(result) = &model.last_result {
-        let style = if result.starts_with("error") {
+    if let Some(full) = &model.last_result {
+        let style = if full.starts_with("error") {
             Style::default().fg(theme.danger)
         } else {
             Style::default().fg(theme.success)
         };
-        lines.push(Line::styled(result.clone(), style));
+        let revealed = model
+            .revealed_last_result(RESULT_REVEAL_CHARS_PER_TICK)
+            .unwrap_or("");
+        if revealed.len() < full.len() {
+            lines.push(Line::from(vec![
+                Span::styled(revealed.to_string(), style),
+                Span::styled("▌", Style::default().fg(theme.accent)),
+            ]));
+        } else {
+            lines.push(Line::styled(revealed.to_string(), style));
+        }
     } else {
         lines.push(Line::raw(""));
     }

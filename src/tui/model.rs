@@ -23,6 +23,9 @@ pub struct TuiModel {
     pub logs: Vec<TuiLogEntry>,
     pub command_palette: CommandPaletteState,
     pub last_result: Option<String>,
+    /// Tick at which `last_result` was last set; drives the typewriter
+    /// reveal animation in the command palette.
+    pub last_result_tick: u64,
     pub connected_to_daemon: bool,
     pub focus: FocusPanel,
     pub scene_cursor: usize,
@@ -50,6 +53,7 @@ impl Default for TuiModel {
             logs: Vec::new(),
             command_palette: CommandPaletteState::default(),
             last_result: None,
+            last_result_tick: 0,
             connected_to_daemon: false,
             focus: FocusPanel::default(),
             scene_cursor: 0,
@@ -127,6 +131,25 @@ impl TuiModel {
         Self {
             theme,
             ..Self::default()
+        }
+    }
+
+    /// Set `last_result` and mark the current tick as its reveal start, so
+    /// the command palette can replay it with a typewriter animation.
+    pub fn set_last_result(&mut self, message: impl Into<String>) {
+        self.last_result = Some(message.into());
+        self.last_result_tick = self.anim.frame;
+    }
+
+    /// Characters of `last_result` revealed so far, per `chars_per_tick`.
+    /// Returns `None` if there is no result to show.
+    pub fn revealed_last_result(&self, chars_per_tick: usize) -> Option<&str> {
+        let text = self.last_result.as_deref()?;
+        let elapsed = self.anim.frame.saturating_sub(self.last_result_tick) as usize;
+        let revealed_chars = elapsed.saturating_mul(chars_per_tick.max(1));
+        match text.char_indices().nth(revealed_chars) {
+            Some((byte_idx, _)) => Some(&text[..byte_idx]),
+            None => Some(text),
         }
     }
 
@@ -318,5 +341,27 @@ mod tests {
         assert_eq!(model.focused_profile(), Some("Streaming"));
         model.move_up();
         assert_eq!(model.focused_profile(), Some("Default"));
+    }
+
+    #[test]
+    fn revealed_last_result_is_none_without_a_result() {
+        let model = TuiModel::default();
+        assert_eq!(model.revealed_last_result(3), None);
+    }
+
+    #[test]
+    fn revealed_last_result_grows_with_ticks_then_settles() {
+        let mut model = TuiModel::default();
+        model.set_last_result("scene set: Main");
+
+        assert_eq!(model.revealed_last_result(3), Some(""));
+        model.anim.tick();
+        assert_eq!(model.revealed_last_result(3), Some("sce"));
+        model.anim.tick();
+        assert_eq!(model.revealed_last_result(3), Some("scene "));
+        for _ in 0..10 {
+            model.anim.tick();
+        }
+        assert_eq!(model.revealed_last_result(3), Some("scene set: Main"));
     }
 }

@@ -533,7 +533,12 @@ fn command_palette_renders_empty_completion_hint_in_five_line_area() {
 #[test]
 fn command_palette_renders_last_result() {
     let mut model = model_connected();
-    model.last_result = Some("scene set: Main".into());
+    model.set_last_result("scene set: Main");
+    // Let the typewriter reveal animation finish before asserting the
+    // final rendered text.
+    for _ in 0..20 {
+        model.anim.tick();
+    }
     let mut t = term(80, 5);
     t.draw(|f| {
         widgets::command_palette::render(f, Rect::new(0, 0, 80, 5), &model);
