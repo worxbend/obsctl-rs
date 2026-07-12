@@ -142,6 +142,59 @@ fn get_current_program_scene_returns_scene_name() {
 }
 
 #[test]
+fn get_stats_request_returns_performance_fields() {
+    rt().block_on(async {
+        let server = spawn_fake_obs(false, None).await;
+        let (client, _, _, _) = connect_to_fake(server.addr, None).await;
+
+        let result = client
+            .request(requests::get_stats())
+            .await
+            .expect("get_stats");
+        assert_eq!(result.get("cpuUsage").and_then(|v| v.as_f64()), Some(12.5));
+        assert_eq!(result.get("activeFps").and_then(|v| v.as_f64()), Some(60.0));
+        server.shutdown();
+    });
+}
+
+#[test]
+fn get_profile_list_request_returns_profiles_and_current() {
+    rt().block_on(async {
+        let server = spawn_fake_obs(false, None).await;
+        let (client, _, _, _) = connect_to_fake(server.addr, None).await;
+
+        let result = client
+            .request(requests::get_profile_list())
+            .await
+            .expect("get_profile_list");
+        assert_eq!(
+            result.get("currentProfileName").and_then(|v| v.as_str()),
+            Some("Default")
+        );
+        let profiles = result
+            .get("profiles")
+            .and_then(|v| v.as_array())
+            .expect("profiles array");
+        assert_eq!(profiles.len(), 2);
+        server.shutdown();
+    });
+}
+
+#[test]
+fn set_current_profile_request_is_dispatched() {
+    rt().block_on(async {
+        let server = spawn_fake_obs(false, None).await;
+        let (client, _, _, _) = connect_to_fake(server.addr, None).await;
+
+        let result = client
+            .request(requests::set_current_profile("Streaming").unwrap())
+            .await;
+        assert!(result.is_ok(), "expected SetCurrentProfile to succeed");
+        server.shutdown();
+    });
+}
+
+#[test]
 fn set_current_program_scene_request_is_dispatched() {
     rt().block_on(async {
         let mut server = spawn_fake_obs(false, None).await;

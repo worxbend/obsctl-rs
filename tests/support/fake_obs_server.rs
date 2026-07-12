@@ -445,6 +445,21 @@ fn default_response(request_type: &str) -> Value {
             "inputVolumeMul": 1.0,
             "inputVolumeDb": 0.0,
         }),
+        "GetStats" => json!({
+            "cpuUsage": 12.5,
+            "memoryUsage": 512.0,
+            "availableDiskSpace": 100_000.0,
+            "activeFps": 60.0,
+            "averageFrameRenderTime": 3.2,
+            "renderSkippedFrames": 0,
+            "renderTotalFrames": 1000,
+            "outputSkippedFrames": 0,
+            "outputTotalFrames": 1000,
+        }),
+        "GetProfileList" => json!({
+            "currentProfileName": "Default",
+            "profiles": ["Default", "Streaming"],
+        }),
         _ => Value::Null,
     }
 }
