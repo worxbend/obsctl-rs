@@ -8,3 +8,4 @@ pub mod profiles;
 pub mod scene_map;
 pub mod scenes;
 pub mod settings;
+pub mod splash;

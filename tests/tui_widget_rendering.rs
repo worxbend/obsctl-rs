@@ -551,6 +551,50 @@ fn command_palette_renders_last_result() {
     );
 }
 
+// ── splash widget ───────────────────────────────────────────────────────────
+
+#[test]
+fn splash_renders_wordmark_tagline_and_progress_bar() {
+    let mut t = term(60, 12);
+    t.draw(|f| {
+        widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 0, 40);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.contains("O B S"),
+        "should show the wordmark; got: {out}"
+    );
+    assert!(
+        out.contains("OBS Studio Controller"),
+        "should show the tagline; got: {out}"
+    );
+    assert!(out.contains('['), "should show a progress bar; got: {out}");
+}
+
+#[test]
+fn splash_progress_bar_fills_as_frames_advance() {
+    let mut t = term(60, 12);
+    t.draw(|f| {
+        widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 40, 40);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.contains("████████████████████████"),
+        "bar should be fully filled at the last frame; got: {out}"
+    );
+}
+
+#[test]
+fn splash_survives_minimum_terminal_size() {
+    let mut t = term(20, 4);
+    t.draw(|f| {
+        widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 5, 40);
+    })
+    .unwrap();
+}
+
 // ── settings widget ─────────────────────────────────────────────────────────
 
 #[test]

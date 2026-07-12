@@ -32,6 +32,10 @@ use crate::{
     },
 };
 
+/// Total time the startup splash is shown, unless skipped by a keypress.
+const SPLASH_DURATION: Duration = Duration::from_millis(2000);
+const SPLASH_FRAME_INTERVAL: Duration = Duration::from_millis(50);
+
 pub async fn run(
     socket_path: &Path,
     refresh_ms: u64,
@@ -43,12 +47,49 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
+    {
+        let mut splash_events = EventStream::new();
+        run_splash(&mut terminal, &mut splash_events, theme).await?;
+    }
+
     let result = run_loop(&mut terminal, socket_path, refresh_ms, theme, config_path).await;
 
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)?;
 
     result
+}
+
+/// Show the animated "obsctl" splash for `SPLASH_DURATION`, or until the
+/// user presses any key.
+async fn run_splash(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    events: &mut EventStream,
+    theme: Theme,
+) -> Result<()> {
+    let total_frames =
+        (SPLASH_DURATION.as_millis() / SPLASH_FRAME_INTERVAL.as_millis().max(1)) as u64;
+    let mut ticker = tokio::time::interval(SPLASH_FRAME_INTERVAL);
+    let mut frame = 0u64;
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                terminal.draw(|f| widgets::splash::render(f, theme, frame, total_frames))?;
+                if frame >= total_frames {
+                    return Ok(());
+                }
+                frame += 1;
+            }
+            maybe_event = events.next() => {
+                if let Some(Ok(Event::Key(key))) = maybe_event
+                    && key.kind == KeyEventKind::Press
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 async fn run_loop(
