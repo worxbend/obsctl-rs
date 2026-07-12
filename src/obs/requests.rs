@@ -118,6 +118,18 @@ pub fn get_stats() -> RequestData {
     req("GetStats")
 }
 
+pub fn get_profile_list() -> RequestData {
+    req("GetProfileList")
+}
+
+pub fn set_current_profile(profile_name: &str) -> RequestResult<RequestData> {
+    let profile_name = validate_name(profile_name, "profileName")?;
+    Ok(req_with(
+        "SetCurrentProfile",
+        json!({ "profileName": profile_name }),
+    ))
+}
+
 pub fn toggle_stream() -> RequestData {
     req("ToggleStream")
 }

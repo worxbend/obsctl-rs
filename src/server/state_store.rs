@@ -209,6 +209,18 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
             snapshot.updated_at = OffsetDateTime::now_utc();
             true
         }
+        ObsEvent::CurrentProfileChanged { profile_name } => {
+            if snapshot.current_profile.as_deref() == Some(&profile_name) {
+                return false;
+            }
+            snapshot.current_profile = Some(profile_name);
+            snapshot.updated_at = OffsetDateTime::now_utc();
+            true
+        }
+        ObsEvent::ProfileListChanged => {
+            // Full refresh needed; the supervisor will fetch a new snapshot.
+            true
+        }
         // High-frequency; don't update the snapshot or broadcast.
         ObsEvent::InputVolumeMeters { .. } => false,
         ObsEvent::Other { .. } => false,
@@ -227,6 +239,8 @@ pub fn build_snapshot(
     audio_cfgs: &[AudioInputConfig],
     streaming: bool,
     recording: bool,
+    profiles: &[String],
+    current_profile: &str,
 ) -> ObsSnapshot {
     let scenes: Vec<SceneState> = scenes
         .iter()
@@ -270,6 +284,8 @@ pub fn build_snapshot(
         audio_inputs,
         streaming,
         recording,
+        profiles: profiles.to_vec(),
+        current_profile: (!current_profile.is_empty()).then(|| current_profile.to_string()),
         updated_at: OffsetDateTime::now_utc(),
         ..ObsSnapshot::default()
     }
@@ -382,6 +398,44 @@ mod tests {
 
         let current = store.read().await;
         assert_eq!(current.audio_inputs[0].muted, Some(true));
+    }
+
+    #[tokio::test]
+    async fn apply_event_profile_change() {
+        let store = make_store();
+        let snap = ObsSnapshot {
+            current_profile: Some("Default".to_string()),
+            ..ObsSnapshot::default()
+        };
+        store.replace(snap).await;
+
+        store
+            .apply_event(ObsEvent::CurrentProfileChanged {
+                profile_name: "Streaming".to_string(),
+            })
+            .await;
+
+        let current = store.read().await;
+        assert_eq!(current.current_profile.as_deref(), Some("Streaming"));
+    }
+
+    #[test]
+    fn build_snapshot_populates_profiles() {
+        let snapshot = build_snapshot(
+            "30.1.0",
+            "5.3.0",
+            &[],
+            "",
+            &[],
+            &[],
+            &[],
+            false,
+            false,
+            &["Default".to_string(), "Streaming".to_string()],
+            "Streaming",
+        );
+        assert_eq!(snapshot.profiles, vec!["Default", "Streaming"]);
+        assert_eq!(snapshot.current_profile.as_deref(), Some("Streaming"));
     }
 
     #[tokio::test]

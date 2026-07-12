@@ -64,6 +64,10 @@ pub enum Commands {
         #[arg(value_parser = non_blank_trimmed)]
         target: String,
     },
+    Profile {
+        #[arg(value_parser = non_blank_trimmed)]
+        target: String,
+    },
     Mute {
         #[arg(value_parser = non_blank_trimmed)]
         target: String,

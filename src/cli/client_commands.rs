@@ -135,6 +135,10 @@ impl ProxyCtx {
         self.run_target_cmd("set_scene", target)
     }
 
+    pub fn profile(&self, target: &str) -> i32 {
+        self.run_target_cmd("set_profile", target)
+    }
+
     pub fn mute(&self, target: &str) -> i32 {
         self.run_target_cmd("mute", target)
     }

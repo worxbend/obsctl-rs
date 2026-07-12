@@ -11,6 +11,12 @@ pub struct ObsSnapshot {
     pub audio_inputs: Vec<AudioState>,
     pub streaming: bool,
     pub recording: bool,
+    /// All OBS profile names (`GetProfileList.profiles`).
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    /// Name of the currently active OBS profile.
+    #[serde(default)]
+    pub current_profile: Option<String>,
     pub last_error: Option<String>,
     /// CPU/memory/disk/render performance stats, polled periodically from
     /// `GetStats`. `None` until the first poll completes after connecting.
@@ -42,6 +48,8 @@ impl Default for ObsSnapshot {
             audio_inputs: Vec::new(),
             streaming: false,
             recording: false,
+            profiles: Vec::new(),
+            current_profile: None,
             last_error: None,
             stats: None,
             stream_bitrate_kbps: None,

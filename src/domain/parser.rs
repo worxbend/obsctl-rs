@@ -41,6 +41,17 @@ pub fn parse(input: &str) -> Result<Command> {
                 target: sanitize_target(maybe_target)?,
             })
         }
+        "profile" | "set-profile" => {
+            if args.len() != 1 {
+                return Err(ObsctlError::CommandParseError(format!(
+                    "profile expects 1 argument, got {}",
+                    args.len()
+                )));
+            }
+            Ok(Command::SetProfile {
+                target: sanitize_target(maybe_target)?,
+            })
+        }
         "mute" => {
             if args.len() != 1 {
                 return Err(ObsctlError::CommandParseError(format!(
@@ -194,6 +205,18 @@ mod tests {
                 target: "Main Camera".to_string()
             }
         );
+    }
+
+    #[test]
+    fn parse_profile_command() {
+        assert_eq!(
+            parse("profile Streaming").unwrap(),
+            Command::SetProfile {
+                target: "Streaming".to_string()
+            }
+        );
+        assert!(parse("profile").is_err());
+        assert!(parse("profile a b").is_err());
     }
 
     #[test]

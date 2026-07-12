@@ -142,6 +142,19 @@ impl TuiModel {
             .unwrap_or(&[])
     }
 
+    pub fn profiles(&self) -> &[String] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.profiles.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn current_profile(&self) -> Option<&str> {
+        self.snapshot
+            .as_ref()
+            .and_then(|s| s.current_profile.as_deref())
+    }
+
     pub fn current_scene(&self) -> Option<&str> {
         self.snapshot
             .as_ref()

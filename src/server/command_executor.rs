@@ -98,6 +98,7 @@ impl CommandExecutor {
                 ServerCommand::GetObsStatus => self.cmd_obs_status().await,
                 ServerCommand::GetSnapshot => self.cmd_get_snapshot().await,
                 ServerCommand::SetScene => self.cmd_set_scene(&payload.args).await,
+                ServerCommand::SetProfile => self.cmd_set_profile(&payload.args).await,
                 ServerCommand::Mute => self.cmd_set_mute(&payload.args, true).await,
                 ServerCommand::Unmute => self.cmd_set_mute(&payload.args, false).await,
                 ServerCommand::ToggleMute => self.cmd_toggle_mute(&payload.args).await,
@@ -179,6 +180,26 @@ impl CommandExecutor {
             .await?;
         info!("Scene set to: {obs_name}");
         Ok(json!({ "message": format!("scene set: {obs_name}") }))
+    }
+
+    async fn cmd_set_profile(&self, args: &Value) -> crate::domain::result::Result<Value> {
+        let target = required_string(args, "target")?;
+        let client = self.require_obs().await?;
+
+        let snap = self.state.read().await;
+        let known = snap.profiles.iter().any(|p| p == &target);
+        drop(snap);
+        if !known {
+            return Err(ObsctlError::ObsRequestFailed(format!(
+                "unknown profile: {target}"
+            )));
+        }
+
+        client
+            .request(requests::set_current_profile(&target)?)
+            .await?;
+        info!("Profile set to: {target}");
+        Ok(json!({ "message": format!("profile set: {target}") }))
     }
 
     async fn cmd_set_mute(
@@ -467,6 +488,7 @@ enum ServerCommand {
     GetObsStatus,
     GetSnapshot,
     SetScene,
+    SetProfile,
     Mute,
     Unmute,
     ToggleMute,
@@ -494,7 +516,9 @@ impl ServerCommand {
             | Self::DumpConfig
             | Self::ToggleStream
             | Self::ToggleRecord => validate_empty_payload(args, self.name()),
-            Self::SetScene => validate_object_args(args, self.name(), &["target"]),
+            Self::SetScene | Self::SetProfile => {
+                validate_object_args(args, self.name(), &["target"])
+            }
             Self::Mute | Self::Unmute | Self::ToggleMute => {
                 validate_object_args(args, self.name(), &["target"])
             }
@@ -509,6 +533,7 @@ impl ServerCommand {
             Self::GetObsStatus => "get_obs_status",
             Self::GetSnapshot => "get_snapshot",
             Self::SetScene => "set_scene",
+            Self::SetProfile => "set_profile",
             Self::Mute => "mute",
             Self::Unmute => "unmute",
             Self::ToggleMute => "toggle_mute",
@@ -531,6 +556,7 @@ fn parse_server_command(name: &str) -> Result<ServerCommand> {
         "get_obs_status" => Ok(ServerCommand::GetObsStatus),
         "get_snapshot" => Ok(ServerCommand::GetSnapshot),
         "set_scene" => Ok(ServerCommand::SetScene),
+        "set_profile" => Ok(ServerCommand::SetProfile),
         "mute" => Ok(ServerCommand::Mute),
         "unmute" => Ok(ServerCommand::Unmute),
         "toggle_mute" => Ok(ServerCommand::ToggleMute),
@@ -750,6 +776,7 @@ mod tests {
             ("get_obs_status", ServerCommand::GetObsStatus),
             ("get_snapshot", ServerCommand::GetSnapshot),
             ("set_scene", ServerCommand::SetScene),
+            ("set_profile", ServerCommand::SetProfile),
             ("mute", ServerCommand::Mute),
             ("unmute", ServerCommand::Unmute),
             ("toggle_mute", ServerCommand::ToggleMute),

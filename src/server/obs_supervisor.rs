@@ -199,7 +199,10 @@ impl ObsSupervisor {
 
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                let needs_full_refresh = matches!(event, ObsEvent::SceneListChanged);
+                let needs_full_refresh = matches!(
+                    event,
+                    ObsEvent::SceneListChanged | ObsEvent::ProfileListChanged
+                );
 
                 // Log notable remote OBS changes before applying them.
                 log_obs_event(&hub, &event);
@@ -380,6 +383,26 @@ async fn fetch_and_publish_snapshot_from(
             false
         });
 
+    let (profiles, current_profile) = client
+        .request(requests::get_profile_list())
+        .await
+        .ok()
+        .map(|v| {
+            let profiles = crate::obs::validation::extract_string_array(&v, "profiles")
+                .ok()
+                .unwrap_or_default();
+            let current = v
+                .get("currentProfileName")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string();
+            (profiles, current)
+        })
+        .unwrap_or_else(|| {
+            warn!("Malformed or missing GetProfileList response");
+            (Vec::new(), String::new())
+        });
+
     let cfg = config.lock().await;
     let snapshot = build_snapshot(
         obs_version,
@@ -391,6 +414,8 @@ async fn fetch_and_publish_snapshot_from(
         &cfg.audio.inputs,
         streaming,
         recording,
+        &profiles,
+        &current_profile,
     );
     drop(cfg);
 
@@ -502,6 +527,10 @@ fn log_obs_event(hub: &BroadcastHub, event: &ObsEvent) {
             let state = if *active { "started" } else { "stopped" };
             Some(format!("OBS: recording {state}"))
         }
+        CurrentProfileChanged { profile_name } => {
+            Some(format!("OBS: profile changed → {profile_name}"))
+        }
+        ProfileListChanged => Some("OBS: profile list changed".to_string()),
         // High-frequency or uninteresting — don't flood the log.
         InputVolumeMeters { .. } | Other { .. } => None,
     };

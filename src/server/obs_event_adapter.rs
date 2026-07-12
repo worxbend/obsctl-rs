@@ -45,6 +45,12 @@ pub fn normalize_obs_event(event: &ObsEvent) -> Option<ObsEventPayload> {
         ObsEvent::RecordStateChanged { active } => {
             Some(ObsEventPayload::RecordStateChanged { active: *active })
         }
+        ObsEvent::CurrentProfileChanged { profile_name } => {
+            Some(ObsEventPayload::CurrentProfileChanged {
+                profile_name: profile_name.clone(),
+            })
+        }
+        ObsEvent::ProfileListChanged => Some(ObsEventPayload::ProfileListChanged),
         ObsEvent::Other { .. } => None,
     }
 }

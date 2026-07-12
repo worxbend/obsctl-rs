@@ -223,6 +223,10 @@ pub enum ObsEventPayload {
     RecordStateChanged {
         active: bool,
     },
+    CurrentProfileChanged {
+        profile_name: String,
+    },
+    ProfileListChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -460,6 +464,8 @@ mod tests {
             ObsEventPayload::InputVolumeMeters { .. } => {}
             ObsEventPayload::StreamStateChanged { .. } => {}
             ObsEventPayload::RecordStateChanged { .. } => {}
+            ObsEventPayload::CurrentProfileChanged { .. } => {}
+            ObsEventPayload::ProfileListChanged => {}
         }
     }
 
@@ -678,6 +684,8 @@ mod tests {
                     ],
                     "streaming": false,
                     "recording": false,
+                    "profiles": [],
+                    "current_profile": null,
                     "last_error": null,
                     "stats": null,
                     "stream_bitrate_kbps": null,
@@ -769,6 +777,19 @@ mod tests {
             (
                 ObsEventPayload::RecordStateChanged { active: false },
                 json!({ "type": "RecordStateChanged", "active": false }),
+            ),
+            (
+                ObsEventPayload::CurrentProfileChanged {
+                    profile_name: "Streaming".to_string(),
+                },
+                json!({
+                    "type": "CurrentProfileChanged",
+                    "profile_name": "Streaming"
+                }),
+            ),
+            (
+                ObsEventPayload::ProfileListChanged,
+                json!({ "type": "ProfileListChanged" }),
             ),
         ];
 

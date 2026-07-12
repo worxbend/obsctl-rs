@@ -55,6 +55,10 @@ pub enum ObsEvent {
     RecordStateChanged {
         active: bool,
     },
+    CurrentProfileChanged {
+        profile_name: String,
+    },
+    ProfileListChanged,
     Other {
         event_type: String,
         data: Value,
@@ -595,6 +599,13 @@ async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
                 None => return,
             },
         },
+        "CurrentProfileChanged" => ObsEvent::CurrentProfileChanged {
+            profile_name: match required_str("profileName") {
+                Some(value) => value,
+                None => return,
+            },
+        },
+        "ProfileListChanged" => ObsEvent::ProfileListChanged,
         _ => ObsEvent::Other {
             event_type,
             data: event_data,
@@ -631,6 +642,41 @@ mod tests {
                 }
                 _ => panic!("wrong event type"),
             }
+        });
+    }
+
+    #[test]
+    fn obs_event_dispatches_profile_change() {
+        let data = serde_json::json!({
+            "eventType": "CurrentProfileChanged",
+            "eventData": { "profileName": "Streaming" }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            let event = rx.recv().await.unwrap();
+            match event {
+                ObsEvent::CurrentProfileChanged { profile_name } => {
+                    assert_eq!(profile_name, "Streaming");
+                }
+                _ => panic!("wrong event type"),
+            }
+        });
+    }
+
+    #[test]
+    fn obs_event_dispatches_profile_list_changed() {
+        let data = serde_json::json!({
+            "eventType": "ProfileListChanged",
+            "eventData": {}
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            let event = rx.recv().await.unwrap();
+            assert!(matches!(event, ObsEvent::ProfileListChanged));
         });
     }
 

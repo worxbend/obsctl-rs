@@ -297,7 +297,7 @@ async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
         Err(e) => format!("error: {e}"),
         Ok(Command::Quit) => "quit".to_string(),
         Ok(Command::Help) => {
-            "Commands: /scene /mute /unmute /toggle-mute /vol /stream /rec /status \
+            "Commands: /scene /profile /mute /unmute /toggle-mute /vol /stream /rec /status \
              /obs-status /server-status /reload-config /dump-config /validate-config \
              /reconnect /quit"
                 .to_string()
@@ -345,6 +345,10 @@ fn command_to_payload(cmd: Command) -> std::result::Result<CommandPayload, Strin
         Command::SetScene { target } => {
             let target = sanitize_target_arg(&target)?;
             ("set_scene", serde_json::json!({ "target": target }))
+        }
+        Command::SetProfile { target } => {
+            let target = sanitize_target_arg(&target)?;
+            ("set_profile", serde_json::json!({ "target": target }))
         }
         Command::Mute { target } => {
             let target = sanitize_target_arg(&target)?;

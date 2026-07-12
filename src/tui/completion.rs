@@ -3,6 +3,7 @@ use super::model::TuiModel;
 const ALL_COMMANDS: &[&str] = &[
     "/help",
     "/scene",
+    "/profile",
     "/mute",
     "/unmute",
     "/toggle-mute",
@@ -66,6 +67,19 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
                     names
                 })
                 .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
+                .collect();
+            sort_candidates(&mut candidates, arg_prefix);
+            candidates
+                .into_iter()
+                .map(|c| format!("{cmd} {c}"))
+                .collect()
+        }
+        "/profile" | "/set-profile" => {
+            let mut candidates: Vec<String> = model
+                .profiles()
+                .iter()
+                .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
+                .cloned()
                 .collect();
             sort_candidates(&mut candidates, arg_prefix);
             candidates
@@ -174,6 +188,18 @@ mod tests {
         assert!(result.contains(&"/scene media".to_string()));
         assert!(result.contains(&"/scene m2".to_string()));
         assert!(!result.iter().any(|s| s.contains("overlay")));
+    }
+
+    #[test]
+    fn profile_arg_filter() {
+        let mut model = make_model(vec![], vec![]);
+        model.snapshot = Some(ObsSnapshot {
+            profiles: vec!["Default".to_string(), "Streaming".to_string()],
+            ..Default::default()
+        });
+        let result = compute("/profile S", &model);
+        assert!(result.contains(&"/profile Streaming".to_string()));
+        assert!(!result.iter().any(|s| s.contains("Default")));
     }
 
     #[test]
