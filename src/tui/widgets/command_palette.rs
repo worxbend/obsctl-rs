@@ -58,7 +58,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         ])
     } else {
         Line::from(vec![Span::styled(
-            " / or : palette  F2 settings  q quit  r reload  D dump",
+            " / or : palette  F2/Ctrl-T themes  q quit  r reload  D dump",
             Style::default().fg(theme.muted),
         )])
     };

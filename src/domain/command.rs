@@ -2,6 +2,7 @@
 pub enum Command {
     Help,
     Quit,
+    Themes,
     DumpConfig,
     ReloadConfig,
     Status,

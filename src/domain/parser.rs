@@ -19,6 +19,7 @@ pub fn parse(input: &str) -> Result<Command> {
     match cmd_key.as_str() {
         "help" => expect_args(args, 0, "help", Command::Help),
         "quit" | "exit" => expect_args(args, 0, "quit", Command::Quit),
+        "themes" | "theme" | "settings" => expect_args(args, 0, "themes", Command::Themes),
         "dump-config" => expect_args(args, 0, "dump-config", Command::DumpConfig),
         "reload-config" => expect_args(args, 0, "reload-config", Command::ReloadConfig),
         "status" => expect_args(args, 0, "status", Command::Status),
@@ -189,6 +190,10 @@ mod tests {
         assert_eq!(parse("quit").unwrap(), Command::Quit);
         assert_eq!(parse("exit").unwrap(), Command::Quit);
         assert_eq!(parse("status").unwrap(), Command::Status);
+        assert_eq!(parse("themes").unwrap(), Command::Themes);
+        assert_eq!(parse("theme").unwrap(), Command::Themes);
+        assert_eq!(parse("settings").unwrap(), Command::Themes);
+        assert!(parse("themes extra").is_err());
     }
 
     #[test]

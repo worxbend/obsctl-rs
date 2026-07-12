@@ -66,6 +66,9 @@ pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
 
     match key.code {
         KeyCode::F(2) => Some(TuiAction::OpenSettings),
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::OpenSettings)
+        }
         KeyCode::Char('q') => Some(TuiAction::Quit),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::Quit)
@@ -109,6 +112,16 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn ctrl_t_opens_settings_from_main_view() {
+        let model = TuiModel::default();
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            handle_key(&model, ctrl_t),
+            Some(TuiAction::OpenSettings)
+        ));
     }
 
     #[test]

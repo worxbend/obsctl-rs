@@ -14,7 +14,7 @@ The TUI provides a real-time, themeable dashboard with:
 - **Logs panel** — compact streaming server and OBS event log
 - **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/mute`, `/vol`, `/stream`, `/rec`; results stream in with a typewriter animation
 - **Header** — daemon/OBS connection status, active scene, active profile
-- **Settings view** (`F2`) — btop-style theme picker with live preview across the whole UI; `Enter` persists the choice, `Esc` reverts
+- **Settings view** (`F2`, `Ctrl-T`, or `/themes`) — btop-style theme picker with live preview across the whole UI; `Enter` persists the choice, `Esc` reverts
 - A short animated splash screen (~2s, skippable by any keypress) on launch
 
 See [Themes](#themes) for the full list of built-in themes and how to define a custom palette.
@@ -112,7 +112,7 @@ keymap:
 
 ## Themes
 
-Set `ui.theme` to any of the built-in ids below, or `"custom"` to use a hand-defined palette. Themes can also be browsed and applied live from the TUI's settings view (`F2`).
+Set `ui.theme` to any of the built-in ids below, or `"custom"` to use a hand-defined palette. Themes can also be browsed and applied live from the TUI's settings view (`F2`, `Ctrl-T`, or `/themes` in the command palette).
 
 Built-in ids: `claude` (default), `codex`, `btop`, `nord`, `dracula`, `gruvbox`, `solarized-dark`, `monokai`, `one-dark`, `tokyo-night`, `catppuccin-mocha`, `rose-pine`, `mono` (TTY-safe, no truecolor). `default` is accepted as a legacy alias for `claude`.
 
@@ -182,7 +182,7 @@ Global options:
 | `/` or `:` | Open command palette |
 | `Enter` | Submit palette command |
 | `Esc` | Cancel palette editing |
-| `F2` | Open/close the settings (theme) view |
+| `F2` or `Ctrl-T` | Open/close the settings (theme) view |
 | `s` / `a` / `p` | Focus the scenes / audio / profiles panel |
 | `q` | Quit |
 | `r` | Reload config |
@@ -197,6 +197,7 @@ Type `/` to open the palette, then use any of:
 
 ```
 /help
+/themes
 /scene <target>
 /set-scene <target>
 /profile <target>

@@ -2,6 +2,7 @@ use super::model::TuiModel;
 
 const ALL_COMMANDS: &[&str] = &[
     "/help",
+    "/themes",
     "/scene",
     "/profile",
     "/mute",

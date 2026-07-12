@@ -247,6 +247,10 @@ async fn handle_action(
             if result == "quit" {
                 return (true, None);
             }
+            if result == "themes" {
+                open_settings(model);
+                return (false, None);
+            }
             (false, Some(result))
         }
         TuiAction::ReloadConfig => {
@@ -340,9 +344,7 @@ async fn handle_action(
             (false, None)
         }
         TuiAction::OpenSettings => {
-            model.theme_preview_origin = Some(model.theme);
-            model.settings_cursor = model.theme.index();
-            model.view = View::Settings;
+            open_settings(model);
             (false, None)
         }
         TuiAction::CloseSettings => {
@@ -372,6 +374,14 @@ async fn handle_action(
             (false, Some(result))
         }
     }
+}
+
+/// Enter the settings view, remembering the current theme so Esc/close
+/// without confirming can restore it (live-preview-then-cancel).
+fn open_settings(model: &mut TuiModel) {
+    model.theme_preview_origin = Some(model.theme);
+    model.settings_cursor = model.theme.index();
+    model.view = View::Settings;
 }
 
 /// Best-effort write of the chosen theme id into `ui.theme` in the config
@@ -424,10 +434,11 @@ async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
     match parser::parse(input) {
         Err(e) => format!("error: {e}"),
         Ok(Command::Quit) => "quit".to_string(),
+        Ok(Command::Themes) => "themes".to_string(),
         Ok(Command::Help) => {
             "Commands: /scene /profile /mute /unmute /toggle-mute /vol /stream /rec /status \
              /obs-status /server-status /reload-config /dump-config /validate-config \
-             /reconnect /quit"
+             /themes /reconnect /quit"
                 .to_string()
         }
         Ok(cmd) => {
@@ -504,7 +515,7 @@ fn command_to_payload(cmd: Command) -> std::result::Result<CommandPayload, Strin
         }
         Command::ToggleStream => ("toggle_stream", serde_json::Value::Null),
         Command::ToggleRecord => ("toggle_record", serde_json::Value::Null),
-        Command::Help | Command::Quit => unreachable!("handled before"),
+        Command::Help | Command::Quit | Command::Themes => unreachable!("handled before"),
     };
     Ok(CommandPayload {
         name: name.to_string(),
@@ -582,8 +593,21 @@ async fn send_simple(socket_path: &Path, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_TARGET_TOKEN_LENGTH, command_to_payload, persist_theme_choice};
+    use super::{MAX_TARGET_TOKEN_LENGTH, command_to_payload, open_settings, persist_theme_choice};
     use crate::domain::command::Command;
+    use crate::tui::model::{TuiModel, View};
+
+    #[test]
+    fn open_settings_enters_settings_view_and_remembers_current_theme() {
+        let mut model = TuiModel::default();
+        let original_theme = model.theme;
+
+        open_settings(&mut model);
+
+        assert_eq!(model.view, View::Settings);
+        assert_eq!(model.theme_preview_origin, Some(original_theme));
+        assert_eq!(model.settings_cursor, original_theme.index());
+    }
 
     #[tokio::test]
     async fn persist_theme_choice_writes_theme_id_and_preserves_other_config() {
