@@ -26,8 +26,8 @@ fn make_snapshot(connected: bool) -> ObsSnapshot {
         }],
         streaming: false,
         recording: false,
-        last_error: None,
         updated_at: OffsetDateTime::now_utc(),
+        ..ObsSnapshot::default()
     }
 }
 

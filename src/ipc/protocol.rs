@@ -635,8 +635,8 @@ mod tests {
             }],
             streaming: false,
             recording: false,
-            last_error: None,
             updated_at: datetime!(2024-01-02 03:04:05 UTC),
+            ..ObsSnapshot::default()
         };
         let message = ServerMessage::Event {
             topic: Topic::State,
@@ -679,6 +679,10 @@ mod tests {
                     "streaming": false,
                     "recording": false,
                     "last_error": null,
+                    "stats": null,
+                    "stream_bitrate_kbps": null,
+                    "stream_duration_ms": null,
+                    "record_duration_ms": null,
                     "updated_at": "2024-01-02T03:04:05Z"
                 }
             })

@@ -65,23 +65,16 @@ fn snap_connected() -> ObsSnapshot {
         ],
         streaming: false,
         recording: false,
-        last_error: None,
         updated_at: OffsetDateTime::now_utc(),
+        ..ObsSnapshot::default()
     }
 }
 
 fn snap_disconnected_with_error() -> ObsSnapshot {
     ObsSnapshot {
-        connected: false,
-        obs_studio_version: None,
-        obs_websocket_version: None,
-        current_scene: None,
-        scenes: Vec::new(),
-        audio_inputs: Vec::new(),
-        streaming: false,
-        recording: false,
         last_error: Some("connection refused".into()),
         updated_at: OffsetDateTime::now_utc(),
+        ..ObsSnapshot::default()
     }
 }
 

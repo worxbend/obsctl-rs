@@ -14,6 +14,7 @@ use crate::obs::{
     client::{ObsClient, ObsEvent},
     connection::{ObsConnectionParams, connect},
     requests,
+    state::ObsStats,
     validation::extract_resource_names,
 };
 use crate::runtime::reconnect_policy::ReconnectPolicy;
@@ -193,6 +194,8 @@ impl ObsSupervisor {
         let hub = Arc::clone(&self.hub);
         let event_obs_version = obs_version.clone();
         let event_ws_version = ws_version.clone();
+
+        spawn_stats_poller(client.clone(), self.state.clone());
 
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
@@ -395,6 +398,77 @@ async fn fetch_and_publish_snapshot_from(
     Ok(())
 }
 
+const STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Poll `GetStats`/`GetStreamStatus`/`GetRecordStatus` on a fixed interval
+/// and publish the results via `StateStore::update_stats`. Stream bitrate
+/// isn't available directly from obs-websocket, so it's derived from the
+/// delta of `GetStreamStatus.outputBytes` between polls (the same approach
+/// OBS's own stats dock and most third-party remotes use).
+fn spawn_stats_poller(client: ObsClient, state: StateStore) {
+    tokio::spawn(async move {
+        let mut last_bytes: Option<(u64, tokio::time::Instant)> = None;
+        let mut interval = tokio::time::interval(STATS_POLL_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+
+            let Ok(stats_resp) = client.request(requests::get_stats()).await else {
+                // Client is most likely disconnected; the supervisor's main
+                // loop will notice and drop this poller along with it.
+                break;
+            };
+            let stats = ObsStats::from_response(&stats_resp);
+
+            let stream_resp = client.request(requests::get_stream_status()).await.ok();
+            let bitrate_kbps = stream_resp.as_ref().and_then(|v| {
+                let active = v
+                    .get("outputActive")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false);
+                let bytes = v.get("outputBytes").and_then(|b| b.as_u64())?;
+                if !active {
+                    last_bytes = None;
+                    return None;
+                }
+                let now = tokio::time::Instant::now();
+                let kbps = last_bytes.and_then(|(prev_bytes, prev_time)| {
+                    if bytes < prev_bytes {
+                        return None; // stream (re)started; skip this sample
+                    }
+                    let elapsed = now.duration_since(prev_time).as_secs_f64();
+                    (elapsed > 0.0).then(|| (bytes - prev_bytes) as f64 * 8.0 / 1000.0 / elapsed)
+                });
+                last_bytes = Some((bytes, now));
+                kbps
+            });
+            let stream_duration_ms = stream_resp.as_ref().and_then(output_duration_if_active);
+
+            let record_resp = client.request(requests::get_record_status()).await.ok();
+            let record_duration_ms = record_resp.as_ref().and_then(output_duration_if_active);
+
+            state
+                .update_stats(stats, bitrate_kbps, stream_duration_ms, record_duration_ms)
+                .await;
+        }
+    });
+}
+
+/// Extract `outputDuration` from a `GetStreamStatus`/`GetRecordStatus`
+/// response, but only while `outputActive` is true (OBS keeps the last
+/// duration around after stopping, which would otherwise look live).
+fn output_duration_if_active(response: &serde_json::Value) -> Option<u64> {
+    let active = response
+        .get("outputActive")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    if !active {
+        return None;
+    }
+    response.get("outputDuration").and_then(|d| d.as_u64())
+}
+
 fn log_obs_event(hub: &BroadcastHub, event: &ObsEvent) {
     use crate::obs::client::ObsEvent::*;
     let msg: Option<String> = match event {
@@ -435,5 +509,28 @@ fn log_obs_event(hub: &BroadcastHub, event: &ObsEvent) {
         hub.publish_log(
             LogEvent::new(LogLevel::Info, m).with_target("obsctl_rs::server::obs_supervisor"),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_duration_if_active_returns_none_when_inactive() {
+        let v = serde_json::json!({ "outputActive": false, "outputDuration": 5000 });
+        assert_eq!(output_duration_if_active(&v), None);
+    }
+
+    #[test]
+    fn output_duration_if_active_returns_duration_when_active() {
+        let v = serde_json::json!({ "outputActive": true, "outputDuration": 5000 });
+        assert_eq!(output_duration_if_active(&v), Some(5000));
+    }
+
+    #[test]
+    fn output_duration_if_active_defaults_missing_active_to_false() {
+        let v = serde_json::json!({ "outputDuration": 5000 });
+        assert_eq!(output_duration_if_active(&v), None);
     }
 }

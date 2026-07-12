@@ -11,7 +11,7 @@ use crate::ipc::{
     session::BroadcastHub,
 };
 use crate::obs::client::ObsEvent;
-use crate::obs::state::{AudioState, ObsSnapshot, SceneState};
+use crate::obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState};
 
 #[derive(Clone)]
 pub struct StateStore {
@@ -75,6 +75,26 @@ impl StateStore {
         };
         self.hub.publish(Topic::State, msg);
         debug!("State broadcast: connected={}", snapshot.connected);
+    }
+
+    /// Update the polled performance/bitrate/duration metrics and broadcast.
+    /// Called periodically by the stats poller; leaves everything else
+    /// (scenes, audio, streaming/recording flags) untouched.
+    pub async fn update_stats(
+        &self,
+        stats: ObsStats,
+        stream_bitrate_kbps: Option<f64>,
+        stream_duration_ms: Option<u64>,
+        record_duration_ms: Option<u64>,
+    ) {
+        let mut guard = self.inner.write().await;
+        guard.stats = Some(stats);
+        guard.stream_bitrate_kbps = stream_bitrate_kbps;
+        guard.stream_duration_ms = stream_duration_ms;
+        guard.record_duration_ms = record_duration_ms;
+        guard.updated_at = OffsetDateTime::now_utc();
+        drop(guard);
+        self.broadcast().await;
     }
 
     /// Merge scene and audio config metadata into the snapshot.
@@ -250,8 +270,8 @@ pub fn build_snapshot(
         audio_inputs,
         streaming,
         recording,
-        last_error: None,
         updated_at: OffsetDateTime::now_utc(),
+        ..ObsSnapshot::default()
     }
 }
 
@@ -362,5 +382,38 @@ mod tests {
 
         let current = store.read().await;
         assert_eq!(current.audio_inputs[0].muted, Some(true));
+    }
+
+    #[tokio::test]
+    async fn update_stats_sets_metrics_and_broadcasts() {
+        let store = make_store();
+        let mut rx = store.hub.subscribe_state();
+
+        let stats = ObsStats {
+            cpu_usage_percent: 42.0,
+            active_fps: 60.0,
+            ..ObsStats::default()
+        };
+        store
+            .update_stats(stats, Some(4500.0), Some(12_000), Some(3_000))
+            .await;
+
+        let current = store.read().await;
+        assert_eq!(current.stats, Some(stats));
+        assert_eq!(current.stream_bitrate_kbps, Some(4500.0));
+        assert_eq!(current.stream_duration_ms, Some(12_000));
+        assert_eq!(current.record_duration_ms, Some(3_000));
+
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv error");
+        match msg {
+            ServerMessage::Event { topic, data } => {
+                assert_eq!(topic, Topic::State);
+                assert_eq!(data["stream_bitrate_kbps"], 4500.0);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 }

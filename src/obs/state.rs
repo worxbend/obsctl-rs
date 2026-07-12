@@ -12,6 +12,21 @@ pub struct ObsSnapshot {
     pub streaming: bool,
     pub recording: bool,
     pub last_error: Option<String>,
+    /// CPU/memory/disk/render performance stats, polled periodically from
+    /// `GetStats`. `None` until the first poll completes after connecting.
+    #[serde(default)]
+    pub stats: Option<ObsStats>,
+    /// Stream encoder bitrate in kbit/s, derived from the `GetStreamStatus`
+    /// `outputBytes` delta between polls (obs-websocket has no direct
+    /// bitrate field). `None` while not streaming or before the second poll.
+    #[serde(default)]
+    pub stream_bitrate_kbps: Option<f64>,
+    /// Elapsed stream time in milliseconds (`GetStreamStatus.outputDuration`).
+    #[serde(default)]
+    pub stream_duration_ms: Option<u64>,
+    /// Elapsed recording time in milliseconds (`GetRecordStatus.outputDuration`).
+    #[serde(default)]
+    pub record_duration_ms: Option<u64>,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
@@ -28,7 +43,45 @@ impl Default for ObsSnapshot {
             streaming: false,
             recording: false,
             last_error: None,
+            stats: None,
+            stream_bitrate_kbps: None,
+            stream_duration_ms: None,
+            record_duration_ms: None,
             updated_at: OffsetDateTime::now_utc(),
+        }
+    }
+}
+
+/// Point-in-time performance stats from OBS's `GetStats` request.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+pub struct ObsStats {
+    pub cpu_usage_percent: f64,
+    pub memory_usage_mb: f64,
+    pub available_disk_space_mb: f64,
+    pub active_fps: f64,
+    pub average_frame_render_time_ms: f64,
+    pub render_skipped_frames: u64,
+    pub render_total_frames: u64,
+    pub output_skipped_frames: u64,
+    pub output_total_frames: u64,
+}
+
+impl ObsStats {
+    /// Parse a `GetStats` `responseData` JSON value; missing/malformed
+    /// fields default to `0.0`/`0` rather than failing the whole snapshot.
+    pub fn from_response(v: &serde_json::Value) -> Self {
+        let f = |key: &str| v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let u = |key: &str| v.get(key).and_then(|x| x.as_u64()).unwrap_or(0);
+        Self {
+            cpu_usage_percent: f("cpuUsage"),
+            memory_usage_mb: f("memoryUsage"),
+            available_disk_space_mb: f("availableDiskSpace"),
+            active_fps: f("activeFps"),
+            average_frame_render_time_ms: f("averageFrameRenderTime"),
+            render_skipped_frames: u("renderSkippedFrames"),
+            render_total_frames: u("renderTotalFrames"),
+            output_skipped_frames: u("outputSkippedFrames"),
+            output_total_frames: u("outputTotalFrames"),
         }
     }
 }
@@ -64,4 +117,36 @@ pub struct ServerStatus {
     pub obs_connected: bool,
     pub reconnecting: bool,
     pub last_error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn obs_stats_from_response_parses_all_fields() {
+        let v = serde_json::json!({
+            "cpuUsage": 12.5,
+            "memoryUsage": 512.0,
+            "availableDiskSpace": 100_000.0,
+            "activeFps": 59.94,
+            "averageFrameRenderTime": 3.2,
+            "renderSkippedFrames": 4,
+            "renderTotalFrames": 10_000,
+            "outputSkippedFrames": 1,
+            "outputTotalFrames": 9_999,
+        });
+        let stats = ObsStats::from_response(&v);
+        assert_eq!(stats.cpu_usage_percent, 12.5);
+        assert_eq!(stats.memory_usage_mb, 512.0);
+        assert_eq!(stats.active_fps, 59.94);
+        assert_eq!(stats.render_skipped_frames, 4);
+        assert_eq!(stats.output_total_frames, 9_999);
+    }
+
+    #[test]
+    fn obs_stats_from_response_defaults_missing_fields() {
+        let stats = ObsStats::from_response(&serde_json::json!({}));
+        assert_eq!(stats, ObsStats::default());
+    }
 }

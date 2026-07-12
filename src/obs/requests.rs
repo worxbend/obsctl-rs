@@ -111,6 +111,13 @@ pub fn get_record_status() -> RequestData {
     req("GetRecordStatus")
 }
 
+/// CPU/memory/disk/render stats (`GetStats`). Does not include stream
+/// bitrate; that's derived from `GetStreamStatus`'s `outputBytes` delta
+/// since obs-websocket has no direct bitrate field.
+pub fn get_stats() -> RequestData {
+    req("GetStats")
+}
+
 pub fn toggle_stream() -> RequestData {
     req("ToggleStream")
 }
