@@ -27,13 +27,13 @@ use crate::{
     },
 };
 
-pub async fn run(socket_path: &Path, refresh_ms: u64, theme_id: &str) -> Result<i32> {
+pub async fn run(socket_path: &Path, refresh_ms: u64, theme: Theme) -> Result<i32> {
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, socket_path, refresh_ms, theme_id).await;
+    let result = run_loop(&mut terminal, socket_path, refresh_ms, theme).await;
 
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)?;
@@ -45,9 +45,9 @@ async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     socket_path: &Path,
     refresh_ms: u64,
-    theme_id: &str,
+    theme: Theme,
 ) -> Result<i32> {
-    let mut model = TuiModel::with_theme(Theme::by_id(theme_id));
+    let mut model = TuiModel::with_theme(theme);
     let refresh = Duration::from_millis(refresh_ms.max(50));
 
     // Try to connect to daemon

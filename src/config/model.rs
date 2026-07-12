@@ -120,7 +120,11 @@ pub struct UiConfig {
     pub command_palette_prefix: String,
     #[serde(default = "default_true")]
     pub show_icons: bool,
+    /// Built-in theme id (see `obsctl tui` settings view), or `"custom"` to
+    /// use the palette defined in `custom_theme`.
     pub theme: String,
+    #[serde(default)]
+    pub custom_theme: Option<CustomThemeConfig>,
 }
 
 impl Default for UiConfig {
@@ -130,8 +134,29 @@ impl Default for UiConfig {
             command_palette_prefix: "/".to_string(),
             show_icons: true,
             theme: "default".to_string(),
+            custom_theme: None,
         }
     }
+}
+
+/// User-supplied palette for `ui.theme: custom`. Every color is an optional
+/// `"#RRGGBB"` hex string; unset fields fall back to the default theme's
+/// colors. See README.md "Custom Themes" for the full field reference.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomThemeConfig {
+    pub accent: Option<String>,
+    pub accent_alt: Option<String>,
+    pub fg: Option<String>,
+    pub muted: Option<String>,
+    pub border: Option<String>,
+    pub border_focus: Option<String>,
+    pub success: Option<String>,
+    pub warning: Option<String>,
+    pub danger: Option<String>,
+    pub info: Option<String>,
+    pub highlight_bg: Option<String>,
+    pub highlight_fg: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

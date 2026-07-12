@@ -284,7 +284,7 @@ fn run_tui(config_path: Option<PathBuf>) -> i32 {
         None => return 1,
     };
 
-    match rt.block_on(crate::tui::app::run(&socket_path, refresh_ms, &theme)) {
+    match rt.block_on(crate::tui::app::run(&socket_path, refresh_ms, theme)) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("tui error: {e}");
@@ -293,16 +293,30 @@ fn run_tui(config_path: Option<PathBuf>) -> i32 {
     }
 }
 
-/// Best-effort lookup of the configured TUI theme name; falls back to the
-/// default theme on any load error so a bad/missing config never blocks
-/// launching the TUI (the error path is already reported by
-/// `resolve_socket_config`).
-fn resolve_tui_theme(config_path: Option<&PathBuf>) -> String {
+/// Best-effort resolution of the configured TUI theme (built-in id or a
+/// `custom` palette); falls back to the default theme on any load error so
+/// a bad/missing config never blocks launching the TUI (the error path is
+/// already reported by `resolve_socket_config`).
+fn resolve_tui_theme(config_path: Option<&PathBuf>) -> crate::tui::theme::Theme {
     let effective_path = config_path.cloned().or_else(paths::config_path);
-    effective_path
+    let config = effective_path
         .and_then(|cp| loader::load_or_default(&cp).ok())
-        .map(|config| config.ui.theme)
-        .unwrap_or_else(|| model::Config::default().ui.theme)
+        .unwrap_or_else(model::Config::default);
+    let custom = config.ui.custom_theme.map(|c| crate::tui::theme::CustomThemeSpec {
+        accent: c.accent,
+        accent_alt: c.accent_alt,
+        fg: c.fg,
+        muted: c.muted,
+        border: c.border,
+        border_focus: c.border_focus,
+        success: c.success,
+        warning: c.warning,
+        danger: c.danger,
+        info: c.info,
+        highlight_bg: c.highlight_bg,
+        highlight_fg: c.highlight_fg,
+    });
+    crate::tui::theme::Theme::resolve(&config.ui.theme, custom.as_ref())
 }
 
 fn tokio_runtime(context: &str) -> Option<tokio::runtime::Runtime> {
