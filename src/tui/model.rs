@@ -5,6 +5,7 @@ use time::OffsetDateTime;
 use crate::{
     ipc::protocol::{LogEvent, LogLevel},
     obs::state::{AudioState, ObsSnapshot, SceneState, ServerStatus},
+    tui::theme::Theme,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -14,7 +15,7 @@ pub enum FocusPanel {
     Audio,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TuiModel {
     pub snapshot: Option<ObsSnapshot>,
     pub server_status: Option<ServerStatus>,
@@ -27,8 +28,29 @@ pub struct TuiModel {
     pub audio_cursor: usize,
     /// Latest RMS magnitude (0-1) per input name, updated from InputVolumeMeters events.
     pub meter_levels: HashMap<String, f32>,
+    /// Active color theme, chosen via config or the settings view.
+    pub theme: Theme,
     /// Cached visible (non-hidden) scenes; rebuilt in `clamp_cursors` after each snapshot update.
     cached_visible_scenes: Vec<SceneState>,
+}
+
+impl Default for TuiModel {
+    fn default() -> Self {
+        Self {
+            snapshot: None,
+            server_status: None,
+            logs: Vec::new(),
+            command_palette: CommandPaletteState::default(),
+            last_result: None,
+            connected_to_daemon: false,
+            focus: FocusPanel::default(),
+            scene_cursor: 0,
+            audio_cursor: 0,
+            meter_levels: HashMap::new(),
+            theme: Theme::default_theme(),
+            cached_visible_scenes: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +109,15 @@ impl From<LogEvent> for TuiLogEntry {
 
 impl TuiModel {
     pub const MAX_LOG_ENTRIES: usize = 200;
+
+    /// Build a model with the given starting theme (used at startup, once
+    /// the configured/custom theme has been resolved).
+    pub fn with_theme(theme: Theme) -> Self {
+        Self {
+            theme,
+            ..Self::default()
+        }
+    }
 
     pub fn push_log(&mut self, entry: TuiLogEntry) {
         self.logs.push(entry);

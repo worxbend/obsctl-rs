@@ -277,19 +277,32 @@ fn run_tui(config_path: Option<PathBuf>) -> i32 {
             return 1;
         }
     };
+    let theme = resolve_tui_theme(config_path.as_ref());
 
     let rt = match tokio_runtime("TUI") {
         Some(rt) => rt,
         None => return 1,
     };
 
-    match rt.block_on(crate::tui::app::run(&socket_path, refresh_ms)) {
+    match rt.block_on(crate::tui::app::run(&socket_path, refresh_ms, &theme)) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("tui error: {e}");
             1
         }
     }
+}
+
+/// Best-effort lookup of the configured TUI theme name; falls back to the
+/// default theme on any load error so a bad/missing config never blocks
+/// launching the TUI (the error path is already reported by
+/// `resolve_socket_config`).
+fn resolve_tui_theme(config_path: Option<&PathBuf>) -> String {
+    let effective_path = config_path.cloned().or_else(paths::config_path);
+    effective_path
+        .and_then(|cp| loader::load_or_default(&cp).ok())
+        .map(|config| config.ui.theme)
+        .unwrap_or_else(|| model::Config::default().ui.theme)
 }
 
 fn tokio_runtime(context: &str) -> Option<tokio::runtime::Runtime> {
