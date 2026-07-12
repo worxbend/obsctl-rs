@@ -1,17 +1,21 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::Line,
     widgets::{Block, Borders, List, ListItem},
 };
 
 use crate::{
     ipc::protocol::LogLevel,
-    tui::model::{TuiLogEntry, TuiModel},
+    tui::{
+        model::{TuiLogEntry, TuiModel},
+        theme::Theme,
+    },
 };
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
+    let theme = model.theme;
     let height = area.height.saturating_sub(2) as usize;
     let skip = model.logs.len().saturating_sub(height);
 
@@ -20,22 +24,25 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         .iter()
         .skip(skip)
         .map(|entry| {
-            let style = style_for_level(entry.level);
+            let style = style_for_level(entry.level, theme);
             ListItem::new(Line::styled(format_log_entry(entry), style))
         })
         .collect();
 
-    let block = Block::default().borders(Borders::ALL).title(" Logs ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title(" Logs ");
     f.render_widget(List::new(items).block(block), area);
 }
 
-fn style_for_level(level: LogLevel) -> Style {
+fn style_for_level(level: LogLevel, theme: Theme) -> Style {
     match level {
-        LogLevel::Trace => Style::default().fg(Color::DarkGray),
-        LogLevel::Debug => Style::default().fg(Color::Gray),
-        LogLevel::Info => Style::default().fg(Color::White),
-        LogLevel::Warn => Style::default().fg(Color::Yellow),
-        LogLevel::Error => Style::default().fg(Color::Red),
+        LogLevel::Trace => Style::default().fg(theme.muted),
+        LogLevel::Debug => Style::default().fg(theme.muted),
+        LogLevel::Info => Style::default().fg(theme.fg),
+        LogLevel::Warn => Style::default().fg(theme.warning),
+        LogLevel::Error => Style::default().fg(theme.danger),
     }
 }
 

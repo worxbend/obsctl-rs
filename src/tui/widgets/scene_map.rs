@@ -3,14 +3,15 @@ use std::collections::BTreeMap;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem},
 };
 
-use crate::tui::model::TuiModel;
+use crate::tui::{model::TuiModel, theme::Theme};
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
+    let theme = model.theme;
     let mut groups: BTreeMap<String, Vec<_>> = BTreeMap::new();
     let mut ungrouped = Vec::new();
 
@@ -28,22 +29,11 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         items.push(ListItem::new(Line::styled(
             format!("[{group}]"),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
         for s in scenes {
-            let marker = if s.active { "▶ " } else { "  " };
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(
-                    marker,
-                    Style::default().fg(if s.active {
-                        Color::Green
-                    } else {
-                        Color::DarkGray
-                    }),
-                ),
-                Span::raw(s.name.clone()),
-            ])));
+            items.push(scene_row(s, theme));
         }
     }
 
@@ -51,25 +41,28 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         if !groups.is_empty() {
             items.push(ListItem::new(Line::styled(
                 "[ungrouped]",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
         for s in &ungrouped {
-            let marker = if s.active { "▶ " } else { "  " };
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(
-                    marker,
-                    Style::default().fg(if s.active {
-                        Color::Green
-                    } else {
-                        Color::DarkGray
-                    }),
-                ),
-                Span::raw(s.name.clone()),
-            ])));
+            items.push(scene_row(s, theme));
         }
     }
 
-    let block = Block::default().borders(Borders::ALL).title(" Scene Map ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title(" Scene Map ");
     f.render_widget(List::new(items).block(block), area);
+}
+
+fn scene_row(s: &crate::obs::state::SceneState, theme: Theme) -> ListItem<'static> {
+    let marker = if s.active { "▶ " } else { "  " };
+    ListItem::new(Line::from(vec![
+        Span::styled(
+            marker,
+            Style::default().fg(if s.active { theme.success } else { theme.muted }),
+        ),
+        Span::styled(s.name.clone(), Style::default().fg(theme.fg)),
+    ]))
 }

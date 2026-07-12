@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
@@ -11,8 +11,10 @@ use crate::tui::model::TuiModel;
 const MAX_VISIBLE_COMPLETIONS: usize = 8;
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
+    let theme = model.theme;
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
         .title(" Command Palette ");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -21,9 +23,9 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 
     if let Some(result) = &model.last_result {
         let style = if result.starts_with("error") {
-            Style::default().fg(Color::Red)
+            Style::default().fg(theme.danger)
         } else {
-            Style::default().fg(Color::Green)
+            Style::default().fg(theme.success)
         };
         lines.push(Line::styled(result.clone(), style));
     } else {
@@ -35,16 +37,16 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             Span::styled(
                 "> ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(model.command_palette.input.clone()),
-            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled("█", Style::default().fg(theme.accent)),
         ])
     } else {
         Line::from(vec![Span::styled(
             " / or : to open command palette  q to quit  r reload  D dump",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )])
     };
     lines.push(prompt_line);
@@ -57,13 +59,12 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 }
 
 fn completion_line(model: &TuiModel) -> Line<'static> {
+    let theme = model.theme;
     let completions = &model.command_palette.completions;
     if completions.is_empty() {
         return Line::from(Span::styled(
             "  no completions",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
         ));
     }
 
@@ -74,10 +75,10 @@ fn completion_line(model: &TuiModel) -> Line<'static> {
         }
         let style = if Some(i) == model.command_palette.completion_idx {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(theme.muted)
         };
         spans.push(Span::styled(format!("[{completion}]"), style));
     }

@@ -302,20 +302,23 @@ fn resolve_tui_theme(config_path: Option<&PathBuf>) -> crate::tui::theme::Theme 
     let config = effective_path
         .and_then(|cp| loader::load_or_default(&cp).ok())
         .unwrap_or_else(model::Config::default);
-    let custom = config.ui.custom_theme.map(|c| crate::tui::theme::CustomThemeSpec {
-        accent: c.accent,
-        accent_alt: c.accent_alt,
-        fg: c.fg,
-        muted: c.muted,
-        border: c.border,
-        border_focus: c.border_focus,
-        success: c.success,
-        warning: c.warning,
-        danger: c.danger,
-        info: c.info,
-        highlight_bg: c.highlight_bg,
-        highlight_fg: c.highlight_fg,
-    });
+    let custom = config
+        .ui
+        .custom_theme
+        .map(|c| crate::tui::theme::CustomThemeSpec {
+            accent: c.accent,
+            accent_alt: c.accent_alt,
+            fg: c.fg,
+            muted: c.muted,
+            border: c.border,
+            border_focus: c.border_focus,
+            success: c.success,
+            warning: c.warning,
+            danger: c.danger,
+            info: c.info,
+            highlight_bg: c.highlight_bg,
+            highlight_fg: c.highlight_fg,
+        });
     crate::tui::theme::Theme::resolve(&config.ui.theme, custom.as_ref())
 }
 

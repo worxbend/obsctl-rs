@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
@@ -9,10 +9,12 @@ use ratatui::{
 use crate::tui::model::TuiModel;
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
+    let theme = model.theme;
+
     let daemon_status = if model.connected_to_daemon {
-        Span::styled("daemon: connected", Style::default().fg(Color::Green))
+        Span::styled("daemon: connected", Style::default().fg(theme.success))
     } else {
-        Span::styled("daemon: disconnected", Style::default().fg(Color::Red))
+        Span::styled("daemon: disconnected", Style::default().fg(theme.danger))
     };
 
     let obs_status = if model.obs_connected() {
@@ -23,14 +25,14 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             .unwrap_or("?");
         Span::styled(
             format!("OBS: connected (v{ver})"),
-            Style::default().fg(Color::Green),
+            Style::default().fg(theme.success),
         )
     } else {
-        Span::styled("OBS: disconnected", Style::default().fg(Color::Yellow))
+        Span::styled("OBS: disconnected", Style::default().fg(theme.warning))
     };
 
     let scene_span = if let Some(scene) = model.current_scene() {
-        Span::raw(format!("  scene: {scene}"))
+        Span::styled(format!("  scene: {scene}"), Style::default().fg(theme.fg))
     } else {
         Span::raw("")
     };
@@ -49,25 +51,29 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let stream_span = if streaming {
         Span::styled(
             "  ● LIVE",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.danger)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled("  ○ LIVE:off", Style::default().fg(Color::DarkGray))
+        Span::styled("  ○ LIVE:off", Style::default().fg(theme.muted))
     };
     let rec_span = if recording {
         Span::styled(
             "  ⏺ REC",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.danger)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled("  ○ REC:off", Style::default().fg(Color::DarkGray))
+        Span::styled("  ○ REC:off", Style::default().fg(theme.muted))
     };
 
     let line = Line::from(vec![
         Span::styled(
             "obsctl",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
@@ -79,7 +85,15 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         rec_span,
     ]);
 
-    let block = Block::default().borders(Borders::ALL).title(" obsctl-rs ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title(Span::styled(
+            " obsctl-rs ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(line), inner);

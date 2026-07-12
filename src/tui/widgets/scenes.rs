@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState},
 };
@@ -9,6 +9,7 @@ use ratatui::{
 use crate::tui::model::{FocusPanel, TuiModel};
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
+    let theme = model.theme;
     let focused = model.focus == FocusPanel::Scenes;
 
     let items: Vec<ListItem> = model
@@ -19,24 +20,20 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             let mut spans = vec![
                 Span::styled(
                     marker,
-                    Style::default().fg(if s.active {
-                        Color::Green
-                    } else {
-                        Color::DarkGray
-                    }),
+                    Style::default().fg(if s.active { theme.success } else { theme.muted }),
                 ),
-                Span::raw(s.name.as_str()),
+                Span::styled(s.name.as_str(), Style::default().fg(theme.fg)),
             ];
             if let Some(a) = &s.alias {
                 spans.push(Span::styled(
                     format!(" ({a})"),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.muted),
                 ));
             }
             if let Some(sc) = &s.shortcut {
                 spans.push(Span::styled(
                     format!(" [{sc}]"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme.warning),
                 ));
             }
 
@@ -50,9 +47,9 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         .collect();
 
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme.border_focus)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.border)
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -61,8 +58,8 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 
     let highlight_style = if focused {
         Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
+            .bg(theme.highlight_bg)
+            .fg(theme.highlight_fg)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::DIM)
