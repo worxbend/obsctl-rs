@@ -13,6 +13,13 @@ pub fn apply_server_message(model: &mut TuiModel, msg: ServerMessage) -> bool {
         match topic {
             Topic::State => {
                 if let Ok(snapshot) = serde_json::from_value::<ObsSnapshot>(data) {
+                    let previous_scene = model.current_scene().map(str::to_string);
+                    if let (Some(previous), Some(next)) =
+                        (previous_scene, snapshot.current_scene.as_deref())
+                        && previous != next
+                    {
+                        model.scene_flash = Some((next.to_string(), model.anim.frame));
+                    }
                     model.snapshot = Some(snapshot);
                     model.connected_to_daemon = true;
                     model.clamp_cursors();

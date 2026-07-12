@@ -63,6 +63,53 @@ fn state_event_updates_model_snapshot() {
 }
 
 #[test]
+fn scene_change_starts_flash_but_first_snapshot_does_not() {
+    let mut model = TuiModel::default();
+
+    // First snapshot: no prior scene to compare against, so no flash.
+    let first = make_snapshot(true);
+    apply_server_message(
+        &mut model,
+        ServerMessage::Event {
+            topic: Topic::State,
+            data: serde_json::to_value(&first).unwrap(),
+        },
+    );
+    assert!(model.scene_flash.is_none());
+
+    // Switch scenes: flash should start for the newly active scene.
+    let mut second = make_snapshot(true);
+    second.current_scene = Some("Cam".into());
+    second.scenes = vec![SceneState {
+        name: "Cam".into(),
+        active: true,
+        ..Default::default()
+    }];
+    apply_server_message(
+        &mut model,
+        ServerMessage::Event {
+            topic: Topic::State,
+            data: serde_json::to_value(&second).unwrap(),
+        },
+    );
+    assert_eq!(
+        model.scene_flash.as_ref().map(|(name, _)| name.as_str()),
+        Some("Cam")
+    );
+
+    // Same scene reported again: no new flash should be triggered (kept as-is).
+    let started_at = model.scene_flash.clone();
+    apply_server_message(
+        &mut model,
+        ServerMessage::Event {
+            topic: Topic::State,
+            data: serde_json::to_value(&second).unwrap(),
+        },
+    );
+    assert_eq!(model.scene_flash, started_at);
+}
+
+#[test]
 fn log_event_appends_to_logs() {
     let mut model = TuiModel::default();
 

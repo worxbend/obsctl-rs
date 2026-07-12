@@ -34,6 +34,10 @@ pub struct TuiModel {
     pub theme: Theme,
     /// Advances once per render tick; drives pulsing/spinner animations.
     pub anim: AnimClock,
+    /// (scene name, tick it became active) — drives the brief flash
+    /// highlight in the scenes panel right after a switch. Set by the
+    /// event applier when it observes `current_scene` change.
+    pub scene_flash: Option<(String, u64)>,
     /// Cached visible (non-hidden) scenes; rebuilt in `clamp_cursors` after each snapshot update.
     cached_visible_scenes: Vec<SceneState>,
 }
@@ -54,6 +58,7 @@ impl Default for TuiModel {
             meter_levels: HashMap::new(),
             theme: Theme::default_theme(),
             anim: AnimClock::default(),
+            scene_flash: None,
             cached_visible_scenes: Vec::new(),
         }
     }
