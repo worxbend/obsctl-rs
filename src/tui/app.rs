@@ -75,7 +75,10 @@ async fn run_splash(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                terminal.draw(|f| widgets::splash::render(f, theme, frame, total_frames))?;
+                terminal.draw(|f| {
+                    widgets::fill_background(f, theme);
+                    widgets::splash::render(f, theme, frame, total_frames);
+                })?;
                 if frame >= total_frames {
                     return Ok(());
                 }
@@ -403,6 +406,8 @@ async fn persist_theme_choice(config_path: Option<&Path>, theme_id: &str) -> Str
 }
 
 fn render(f: &mut ratatui::Frame, model: &TuiModel) {
+    widgets::fill_background(f, model.theme);
+
     if model.view == View::Settings {
         widgets::settings::render(f, f.area(), model);
         return;

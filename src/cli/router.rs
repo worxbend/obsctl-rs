@@ -313,6 +313,7 @@ fn resolve_tui_theme(config_path: Option<&PathBuf>) -> crate::tui::theme::Theme 
         .ui
         .custom_theme
         .map(|c| crate::tui::theme::CustomThemeSpec {
+            bg: c.bg,
             accent: c.accent,
             accent_alt: c.accent_alt,
             fg: c.fg,

@@ -122,6 +122,28 @@ fn buf_string(terminal: &Terminal<TestBackend>) -> String {
     out
 }
 
+// ── background fill ─────────────────────────────────────────────────────────
+
+#[test]
+fn fill_background_paints_every_cell_with_theme_background() {
+    use obsctl_rs::tui::theme::Theme;
+
+    let theme = Theme::by_id("nord");
+    let mut t = term(20, 6);
+    t.draw(|f| {
+        widgets::fill_background(f, theme);
+    })
+    .unwrap();
+
+    let buf = t.backend().buffer().clone();
+    for y in 0..buf.area().height {
+        for x in 0..buf.area().width {
+            let cell = buf.cell((x, y)).unwrap();
+            assert_eq!(cell.style().bg, Some(theme.bg));
+        }
+    }
+}
+
 // ── header widget ──────────────────────────────────────────────────────────
 
 #[test]

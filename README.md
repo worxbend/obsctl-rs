@@ -116,6 +116,8 @@ Set `ui.theme` to any of the built-in ids below, or `"custom"` to use a hand-def
 
 Built-in ids: `claude` (default), `codex`, `btop`, `nord`, `dracula`, `gruvbox`, `solarized-dark`, `monokai`, `one-dark`, `tokyo-night`, `catppuccin-mocha`, `rose-pine`, `mono` (TTY-safe, no truecolor). `default` is accepted as a legacy alias for `claude`.
 
+Every theme (except `mono`) paints its own background color over the whole UI rather than showing through the terminal emulator's own background. `mono` deliberately leaves the background untouched, since it exists for terminals/consoles where truecolor isn't reliable.
+
 ### Custom Themes
 
 Set `ui.theme: "custom"` and define any subset of colors under `ui.custom_theme` as `"#RRGGBB"` hex strings (with or without the `#`). Any color left unset falls back to the corresponding color from the default (`claude`) theme, so a minimal override — even just `accent` — produces a usable theme:
@@ -124,6 +126,7 @@ Set `ui.theme: "custom"` and define any subset of colors under `ui.custom_theme`
 ui:
   theme: "custom"
   custom_theme:
+    bg: "#282C34"            # terminal background, painted behind the whole UI
     accent: "#61AFEF"        # app name, focused borders, highlights
     accent_alt: "#C678DD"    # secondary accent (currently unused by most widgets)
     fg: "#ABB2BF"            # default body text

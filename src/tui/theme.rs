@@ -7,6 +7,8 @@ use ratatui::style::Color;
 pub struct Theme {
     pub id: &'static str,
     pub label: &'static str,
+    /// Base terminal background, painted behind the whole UI.
+    pub bg: Color,
     /// App name / primary brand accent.
     pub accent: Color,
     /// Secondary accent (links, alt highlights).
@@ -37,6 +39,7 @@ macro_rules! rgb {
 const CLAUDE: Theme = Theme {
     id: "claude",
     label: "Claude",
+    bg: rgb!(0x1B, 0x19, 0x16),
     accent: rgb!(0xD9, 0x77, 0x57),
     accent_alt: rgb!(0xE8, 0xC5, 0x9E),
     fg: rgb!(0xEC, 0xE8, 0xE1),
@@ -54,6 +57,7 @@ const CLAUDE: Theme = Theme {
 const CODEX: Theme = Theme {
     id: "codex",
     label: "Codex",
+    bg: rgb!(0x0A, 0x14, 0x12),
     accent: rgb!(0x37, 0xE0, 0xB0),
     accent_alt: rgb!(0x8A, 0xB4, 0xFF),
     fg: rgb!(0xE3, 0xE8, 0xE6),
@@ -71,6 +75,7 @@ const CODEX: Theme = Theme {
 const BTOP: Theme = Theme {
     id: "btop",
     label: "Btop",
+    bg: rgb!(0x0A, 0x14, 0x0A),
     accent: rgb!(0x6A, 0xE0, 0x5A),
     accent_alt: rgb!(0xF0, 0xE0, 0x50),
     fg: rgb!(0xD4, 0xE6, 0xD4),
@@ -88,6 +93,7 @@ const BTOP: Theme = Theme {
 const NORD: Theme = Theme {
     id: "nord",
     label: "Nord",
+    bg: rgb!(0x2E, 0x34, 0x40),
     accent: rgb!(0x88, 0xC0, 0xD0),
     accent_alt: rgb!(0x81, 0xA1, 0xC1),
     fg: rgb!(0xE5, 0xE9, 0xF0),
@@ -105,6 +111,7 @@ const NORD: Theme = Theme {
 const DRACULA: Theme = Theme {
     id: "dracula",
     label: "Dracula",
+    bg: rgb!(0x28, 0x2A, 0x36),
     accent: rgb!(0xBD, 0x93, 0xF9),
     accent_alt: rgb!(0xFF, 0x79, 0xC6),
     fg: rgb!(0xF8, 0xF8, 0xF2),
@@ -122,6 +129,9 @@ const DRACULA: Theme = Theme {
 const MONO: Theme = Theme {
     id: "mono",
     label: "Mono (TTY-safe)",
+    // Reset (not a fixed color) so this theme never overrides the user's
+    // own terminal background — that's the point of a "TTY-safe" theme.
+    bg: Color::Reset,
     accent: Color::White,
     accent_alt: Color::Gray,
     fg: Color::White,
@@ -139,6 +149,7 @@ const MONO: Theme = Theme {
 const GRUVBOX: Theme = Theme {
     id: "gruvbox",
     label: "Gruvbox",
+    bg: rgb!(0x28, 0x28, 0x28),
     accent: rgb!(0xFE, 0x80, 0x19),
     accent_alt: rgb!(0xD3, 0x86, 0x9B),
     fg: rgb!(0xEB, 0xDB, 0xB2),
@@ -156,6 +167,7 @@ const GRUVBOX: Theme = Theme {
 const SOLARIZED_DARK: Theme = Theme {
     id: "solarized-dark",
     label: "Solarized Dark",
+    bg: rgb!(0x00, 0x2B, 0x36),
     accent: rgb!(0x26, 0x8B, 0xD2),
     accent_alt: rgb!(0x2A, 0xA1, 0x98),
     fg: rgb!(0x93, 0xA1, 0xA1),
@@ -173,6 +185,7 @@ const SOLARIZED_DARK: Theme = Theme {
 const MONOKAI: Theme = Theme {
     id: "monokai",
     label: "Monokai",
+    bg: rgb!(0x27, 0x28, 0x22),
     accent: rgb!(0xA6, 0xE2, 0x2E),
     accent_alt: rgb!(0xAE, 0x81, 0xFF),
     fg: rgb!(0xF8, 0xF8, 0xF2),
@@ -190,6 +203,7 @@ const MONOKAI: Theme = Theme {
 const ONE_DARK: Theme = Theme {
     id: "one-dark",
     label: "One Dark",
+    bg: rgb!(0x28, 0x2C, 0x34),
     accent: rgb!(0x61, 0xAF, 0xEF),
     accent_alt: rgb!(0xC6, 0x78, 0xDD),
     fg: rgb!(0xAB, 0xB2, 0xBF),
@@ -207,6 +221,7 @@ const ONE_DARK: Theme = Theme {
 const TOKYO_NIGHT: Theme = Theme {
     id: "tokyo-night",
     label: "Tokyo Night",
+    bg: rgb!(0x1A, 0x1B, 0x26),
     accent: rgb!(0x7A, 0xA2, 0xF7),
     accent_alt: rgb!(0xBB, 0x9A, 0xF7),
     fg: rgb!(0xC0, 0xCA, 0xF5),
@@ -224,6 +239,7 @@ const TOKYO_NIGHT: Theme = Theme {
 const CATPPUCCIN_MOCHA: Theme = Theme {
     id: "catppuccin-mocha",
     label: "Catppuccin Mocha",
+    bg: rgb!(0x1E, 0x1E, 0x2E),
     accent: rgb!(0xCB, 0xA6, 0xF7),
     accent_alt: rgb!(0x89, 0xB4, 0xFA),
     fg: rgb!(0xCD, 0xD6, 0xF4),
@@ -241,6 +257,7 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
 const ROSE_PINE: Theme = Theme {
     id: "rose-pine",
     label: "Rose Pine",
+    bg: rgb!(0x19, 0x17, 0x24),
     accent: rgb!(0xC4, 0xA7, 0xE7),
     accent_alt: rgb!(0xEB, 0xBC, 0xBA),
     fg: rgb!(0xE0, 0xDE, 0xF4),
@@ -280,6 +297,7 @@ pub const CUSTOM_ID: &str = "custom";
 /// override (e.g. just `accent`) still produces a usable theme.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CustomThemeSpec {
+    pub bg: Option<String>,
     pub accent: Option<String>,
     pub accent_alt: Option<String>,
     pub fg: Option<String>,
@@ -343,6 +361,7 @@ impl Theme {
         Theme {
             id: CUSTOM_ID,
             label: "Custom",
+            bg: pick(&spec.bg, base.bg),
             accent: pick(&spec.accent, base.accent),
             accent_alt: pick(&spec.accent_alt, base.accent_alt),
             fg: pick(&spec.fg, base.fg),
@@ -442,5 +461,26 @@ mod tests {
         let theme = Theme::resolve("custom", None);
         assert_eq!(theme.id, CUSTOM_ID);
         assert_eq!(theme.accent, Theme::default_theme().accent);
+    }
+
+    #[test]
+    fn mono_theme_does_not_override_terminal_background() {
+        assert_eq!(MONO.bg, Color::Reset);
+    }
+
+    #[test]
+    fn from_custom_spec_overrides_background() {
+        let spec = CustomThemeSpec {
+            bg: Some("#101010".to_string()),
+            ..Default::default()
+        };
+        let theme = Theme::from_custom_spec(spec);
+        assert_eq!(theme.bg, Color::Rgb(0x10, 0x10, 0x10));
+    }
+
+    #[test]
+    fn from_custom_spec_falls_back_to_default_background() {
+        let theme = Theme::from_custom_spec(CustomThemeSpec::default());
+        assert_eq!(theme.bg, Theme::default_theme().bg);
     }
 }

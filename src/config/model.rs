@@ -145,6 +145,7 @@ impl Default for UiConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CustomThemeConfig {
+    pub bg: Option<String>,
     pub accent: Option<String>,
     pub accent_alt: Option<String>,
     pub fg: Option<String>,
