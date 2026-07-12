@@ -6,12 +6,18 @@ A local OBS Studio controller for obs-websocket 5.x, written in Rust with Ratatu
 
 ![obsctl-rs TUI](docs/images/tui-screenshot.png)
 
-The TUI provides a real-time dashboard with:
-- **Scenes panel** (`s` to focus) — navigate with `j`/`k` or arrow keys, `Enter` to switch
+The TUI provides a real-time, themeable dashboard with:
+- **Scenes panel** (`s` to focus) — navigate with `j`/`k` or arrow keys, `Enter` to switch; the newly active scene briefly flashes
 - **Audio panel** (`a` to focus) — `m` to mute/unmute, `h`/`l` or `←`/`→` to adjust volume ±5%, cava-style live level bars
-- **Logs panel** — streaming server and OBS event log
-- **Command palette** (`/` or `:`) — `/scene`, `/mute`, `/vol`, `/stream`, `/rec`
-- **Header** — daemon/OBS connection status, active scene, LIVE and REC indicators
+- **Profiles panel** (`p` to focus) — `Enter` to switch OBS profiles
+- **Status bar** — animated LIVE/REC badges (pulse while active, show elapsed duration) plus polled CPU%, FPS, memory, and derived stream bitrate
+- **Logs panel** — compact streaming server and OBS event log
+- **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/mute`, `/vol`, `/stream`, `/rec`; results stream in with a typewriter animation
+- **Header** — daemon/OBS connection status, active scene, active profile
+- **Settings view** (`F2`) — btop-style theme picker with live preview across the whole UI; `Enter` persists the choice, `Esc` reverts
+- A short animated splash screen (~2s, skippable by any keypress) on launch
+
+See [Themes](#themes) for the full list of built-in themes and how to define a custom palette.
 
 ## Architecture
 
@@ -89,7 +95,9 @@ ui:
   refresh_interval_ms: 250
   command_palette_prefix: "/"
   show_icons: true
-  theme: "default"
+  theme: "claude"       # built-in id, or "custom" — see Themes below
+  # custom_theme:
+  #   accent: "#D97757"
 scenes: []
 audio:
   inputs: []
@@ -101,6 +109,34 @@ keymap:
 ```
 
 **Security:** never set `connection.password` in plain text. Use `password_env` to point to an environment variable name.
+
+## Themes
+
+Set `ui.theme` to any of the built-in ids below, or `"custom"` to use a hand-defined palette. Themes can also be browsed and applied live from the TUI's settings view (`F2`).
+
+Built-in ids: `claude` (default), `codex`, `btop`, `nord`, `dracula`, `gruvbox`, `solarized-dark`, `monokai`, `one-dark`, `tokyo-night`, `catppuccin-mocha`, `rose-pine`, `mono` (TTY-safe, no truecolor). `default` is accepted as a legacy alias for `claude`.
+
+### Custom Themes
+
+Set `ui.theme: "custom"` and define any subset of colors under `ui.custom_theme` as `"#RRGGBB"` hex strings (with or without the `#`). Any color left unset falls back to the corresponding color from the default (`claude`) theme, so a minimal override — even just `accent` — produces a usable theme:
+
+```yaml
+ui:
+  theme: "custom"
+  custom_theme:
+    accent: "#61AFEF"        # app name, focused borders, highlights
+    accent_alt: "#C678DD"    # secondary accent (currently unused by most widgets)
+    fg: "#ABB2BF"            # default body text
+    muted: "#5C6370"         # dimmed/secondary text
+    border: "#3E4451"        # unfocused panel border
+    border_focus: "#61AFEF"  # focused panel border
+    success: "#98C379"       # connected/active/unmuted states
+    warning: "#E5C07B"       # OBS disconnected, shortcuts
+    danger: "#E06C75"        # errors, LIVE/REC badges
+    info: "#56B6C2"          # volume levels, stats readout
+    highlight_bg: "#61AFEF"  # selected list row background
+    highlight_fg: "#282C34"  # selected list row text
+```
 
 ## CLI Commands
 
@@ -128,6 +164,7 @@ Global options:
 | `obsctl server-status` | Show daemon status |
 | `obsctl obs-status` | Show OBS connection status |
 | `obsctl scene <target>` | Change current program scene |
+| `obsctl profile <target>` | Switch OBS profile |
 | `obsctl mute <target>` | Mute audio input |
 | `obsctl unmute <target>` | Unmute audio input |
 | `obsctl toggle-mute <target>` | Toggle audio input mute |
@@ -145,10 +182,14 @@ Global options:
 | `/` or `:` | Open command palette |
 | `Enter` | Submit palette command |
 | `Esc` | Cancel palette editing |
+| `F2` | Open/close the settings (theme) view |
+| `s` / `a` / `p` | Focus the scenes / audio / profiles panel |
 | `q` | Quit |
 | `r` | Reload config |
 | `D` | Dump config |
 | `Ctrl-C` | Quit or cancel palette |
+
+In the settings view: `↑`/`↓` (or `j`/`k`) live-preview a theme across the whole UI, `Enter` applies and persists it to `ui.theme`, `Esc`/`F2`/`q` reverts to the previous theme.
 
 ### TUI Command Palette
 
@@ -158,6 +199,8 @@ Type `/` to open the palette, then use any of:
 /help
 /scene <target>
 /set-scene <target>
+/profile <target>
+/set-profile <target>
 /mute <target>
 /unmute <target>
 /toggle-mute <target>
@@ -206,7 +249,7 @@ These mappings are separate because the same underlying condition can have diffe
 
 `obsctl` is daemon-first in normal use. Proxy commands connect to the local Unix socket, send one IPC command to the already-running daemon, wait for the correlated response, print the result, and exit. They do not connect directly to OBS and they do not auto-start the daemon.
 
-Proxy commands include `status`, `server-status`, `obs-status`, `scene`, `mute`, `unmute`, `toggle-mute`, `vol`, `volume`, `dump-config`, `reload-config`, `reconnect`, and `shutdown-server`.
+Proxy commands include `status`, `server-status`, `obs-status`, `scene`, `profile`, `mute`, `unmute`, `toggle-mute`, `vol`, `volume`, `dump-config`, `reload-config`, `reconnect`, and `shutdown-server`.
 
 Without `--json`, command output is concise and human-readable. Successful command results are printed to stdout. Diagnostics and errors are printed to stderr.
 
@@ -374,6 +417,8 @@ Current public OBS event payloads are:
 {"type":"event","topic":"events","data":{"type":"InputRemoved","input_name":"Mic"}}
 {"type":"event","topic":"events","data":{"type":"InputMuteStateChanged","input_name":"Mic","muted":true}}
 {"type":"event","topic":"events","data":{"type":"InputVolumeChanged","input_name":"Desktop Audio","volume_mul":0.75,"volume_db":-2.5}}
+{"type":"event","topic":"events","data":{"type":"CurrentProfileChanged","profile_name":"Streaming"}}
+{"type":"event","topic":"events","data":{"type":"ProfileListChanged"}}
 ```
 
 Scene-list mutation events from OBS, including scene created, removed, renamed, and reindexed notifications, are exposed publicly as `SceneListChanged`. The public payload does not preserve a reason field for those mutations.
