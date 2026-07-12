@@ -404,7 +404,7 @@ async fn fetch_and_publish_snapshot_from(
         });
 
     let cfg = config.lock().await;
-    let snapshot = build_snapshot(
+    let mut snapshot = build_snapshot(
         obs_version,
         ws_version,
         &scenes_raw,
@@ -418,6 +418,16 @@ async fn fetch_and_publish_snapshot_from(
         &current_profile,
     );
     drop(cfg);
+
+    // build_snapshot always starts stats/bitrate/durations at their zero
+    // value; carry over whatever the independent stats poller last saw so a
+    // scene/profile-list-triggered full refresh doesn't flicker the live
+    // bar back to "waiting" for up to a poll interval.
+    let previous = state.read().await;
+    snapshot.stats = previous.stats;
+    snapshot.stream_bitrate_kbps = previous.stream_bitrate_kbps;
+    snapshot.stream_duration_ms = previous.stream_duration_ms;
+    snapshot.record_duration_ms = previous.record_duration_ms;
 
     state.replace(snapshot).await;
     Ok(())
