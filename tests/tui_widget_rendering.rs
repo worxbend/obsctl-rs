@@ -139,6 +139,18 @@ fn header_renders_connected_state() {
 }
 
 #[test]
+fn header_renders_current_profile() {
+    let model = model_connected();
+    let mut t = term(110, 5);
+    t.draw(|f| {
+        widgets::header::render(f, Rect::new(0, 0, 110, 5), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("profile: Default"), "should show profile name");
+}
+
+#[test]
 fn header_renders_daemon_disconnected() {
     let model = model_daemon_disconnected();
     let mut t = term(80, 5);
@@ -148,6 +160,54 @@ fn header_renders_daemon_disconnected() {
     .unwrap();
     let out = buf_string(&t);
     assert!(out.contains("disconnected"), "should show disconnected");
+}
+
+// ── live bar widget ─────────────────────────────────────────────────────────
+
+#[test]
+fn live_bar_renders_off_state_and_stats_placeholder() {
+    let model = model_connected();
+    let mut t = term(100, 3);
+    t.draw(|f| {
+        widgets::live_bar::render(f, Rect::new(0, 0, 100, 3), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("LIVE off"), "should show LIVE off badge");
+    assert!(out.contains("REC off"), "should show REC off badge");
+    assert!(
+        out.contains("waiting"),
+        "should show stats placeholder when no stats yet; got: {out}"
+    );
+}
+
+#[test]
+fn live_bar_renders_active_stream_and_record_with_stats() {
+    let mut model = model_connected();
+    if let Some(snap) = model.snapshot.as_mut() {
+        snap.streaming = true;
+        snap.recording = true;
+        snap.stream_duration_ms = Some(65_000);
+        snap.record_duration_ms = Some(5_000);
+        snap.stream_bitrate_kbps = Some(4500.0);
+        snap.stats = Some(obsctl_rs::obs::state::ObsStats {
+            cpu_usage_percent: 12.5,
+            active_fps: 60.0,
+            memory_usage_mb: 512.0,
+            ..Default::default()
+        });
+    }
+    let mut t = term(100, 3);
+    t.draw(|f| {
+        widgets::live_bar::render(f, Rect::new(0, 0, 100, 3), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("LIVE"), "should show LIVE badge");
+    assert!(out.contains("01:05"), "should show stream duration");
+    assert!(out.contains("00:05"), "should show record duration");
+    assert!(out.contains("4500"), "should show bitrate");
+    assert!(out.contains("60.0"), "should show fps");
 }
 
 // ── connection widget ───────────────────────────────────────────────────────

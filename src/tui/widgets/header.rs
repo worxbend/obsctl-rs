@@ -37,36 +37,13 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         Span::raw("")
     };
 
-    let streaming = model
-        .snapshot
-        .as_ref()
-        .map(|s| s.streaming)
-        .unwrap_or(false);
-    let recording = model
-        .snapshot
-        .as_ref()
-        .map(|s| s.recording)
-        .unwrap_or(false);
-
-    let stream_span = if streaming {
+    let profile_span = if let Some(profile) = model.current_profile() {
         Span::styled(
-            "  ● LIVE",
-            Style::default()
-                .fg(theme.danger)
-                .add_modifier(Modifier::BOLD),
+            format!("  profile: {profile}"),
+            Style::default().fg(theme.muted),
         )
     } else {
-        Span::styled("  ○ LIVE:off", Style::default().fg(theme.muted))
-    };
-    let rec_span = if recording {
-        Span::styled(
-            "  ⏺ REC",
-            Style::default()
-                .fg(theme.danger)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled("  ○ REC:off", Style::default().fg(theme.muted))
+        Span::raw("")
     };
 
     let line = Line::from(vec![
@@ -81,8 +58,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         Span::raw("  "),
         obs_status,
         scene_span,
-        stream_span,
-        rec_span,
+        profile_span,
     ]);
 
     let block = Block::default()

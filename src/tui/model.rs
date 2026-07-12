@@ -158,6 +158,22 @@ impl TuiModel {
             .and_then(|s| s.current_profile.as_deref())
     }
 
+    pub fn stats(&self) -> Option<&crate::obs::state::ObsStats> {
+        self.snapshot.as_ref().and_then(|s| s.stats.as_ref())
+    }
+
+    pub fn stream_bitrate_kbps(&self) -> Option<f64> {
+        self.snapshot.as_ref().and_then(|s| s.stream_bitrate_kbps)
+    }
+
+    pub fn stream_duration_ms(&self) -> Option<u64> {
+        self.snapshot.as_ref().and_then(|s| s.stream_duration_ms)
+    }
+
+    pub fn record_duration_ms(&self) -> Option<u64> {
+        self.snapshot.as_ref().and_then(|s| s.record_duration_ms)
+    }
+
     pub fn current_scene(&self) -> Option<&str> {
         self.snapshot
             .as_ref()

@@ -5,6 +5,8 @@ use ratatui::{
 
 pub struct LayoutAreas {
     pub header: Rect,
+    /// Animated LIVE/REC banner + CPU/FPS/bitrate readout.
+    pub live_bar: Rect,
     pub scenes: Rect,
     pub audio: Rect,
     pub profiles: Rect,
@@ -21,6 +23,7 @@ pub fn compute(frame: &Frame) -> LayoutAreas {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
+            Constraint::Length(3),
             Constraint::Min(6),
             Constraint::Length(8),
             Constraint::Length(5),
@@ -28,9 +31,10 @@ pub fn compute(frame: &Frame) -> LayoutAreas {
         .split(area);
 
     let header = vertical[0];
-    let middle = vertical[1];
-    let logs = vertical[2];
-    let palette = vertical[3];
+    let live_bar = vertical[1];
+    let middle = vertical[2];
+    let logs = vertical[3];
+    let palette = vertical[4];
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -43,6 +47,7 @@ pub fn compute(frame: &Frame) -> LayoutAreas {
 
     LayoutAreas {
         header,
+        live_bar,
         scenes: columns[0],
         audio: columns[1],
         profiles: columns[2],

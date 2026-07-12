@@ -2,6 +2,7 @@ pub mod audio;
 pub mod command_palette;
 pub mod connection;
 pub mod header;
+pub mod live_bar;
 pub mod logs;
 pub mod profiles;
 pub mod scene_map;

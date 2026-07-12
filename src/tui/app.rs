@@ -292,6 +292,7 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) {
     }
 
     widgets::header::render(f, areas.header, model);
+    widgets::live_bar::render(f, areas.live_bar, model);
     widgets::scenes::render(f, areas.scenes, model);
     widgets::audio::render(f, areas.audio, model);
     widgets::profiles::render(f, areas.profiles, model);
