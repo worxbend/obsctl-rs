@@ -206,6 +206,10 @@ async fn handle_action(
             model.focus = FocusPanel::Audio;
             (false, None)
         }
+        TuiAction::FocusProfiles => {
+            model.focus = FocusPanel::Profiles;
+            (false, None)
+        }
         TuiAction::NavUp => {
             model.move_up();
             (false, None)
@@ -217,6 +221,14 @@ async fn handle_action(
         TuiAction::ActivateScene => {
             if let Some(name) = model.focused_scene().map(|s| s.name.clone()) {
                 let result = send_simple_with_target(socket_path, "set_scene", &name).await;
+                (false, Some(result))
+            } else {
+                (false, None)
+            }
+        }
+        TuiAction::ActivateProfile => {
+            if let Some(name) = model.focused_profile().map(str::to_string) {
+                let result = send_simple_with_target(socket_path, "set_profile", &name).await;
                 (false, Some(result))
             } else {
                 (false, None)
@@ -280,9 +292,10 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) {
     }
 
     widgets::header::render(f, areas.header, model);
-    widgets::scenes::render(f, areas.left_top, model);
-    widgets::audio::render(f, areas.left_bottom, model);
-    widgets::logs::render(f, areas.right, model);
+    widgets::scenes::render(f, areas.scenes, model);
+    widgets::audio::render(f, areas.audio, model);
+    widgets::profiles::render(f, areas.profiles, model);
+    widgets::logs::render(f, areas.logs, model);
     widgets::command_palette::render(f, areas.palette, model);
 }
 

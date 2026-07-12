@@ -3,5 +3,6 @@ pub mod command_palette;
 pub mod connection;
 pub mod header;
 pub mod logs;
+pub mod profiles;
 pub mod scene_map;
 pub mod scenes;

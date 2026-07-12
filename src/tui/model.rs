@@ -13,6 +13,7 @@ pub enum FocusPanel {
     #[default]
     Scenes,
     Audio,
+    Profiles,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +27,7 @@ pub struct TuiModel {
     pub focus: FocusPanel,
     pub scene_cursor: usize,
     pub audio_cursor: usize,
+    pub profile_cursor: usize,
     /// Latest RMS magnitude (0-1) per input name, updated from InputVolumeMeters events.
     pub meter_levels: HashMap<String, f32>,
     /// Active color theme, chosen via config or the settings view.
@@ -48,6 +50,7 @@ impl Default for TuiModel {
             focus: FocusPanel::default(),
             scene_cursor: 0,
             audio_cursor: 0,
+            profile_cursor: 0,
             meter_levels: HashMap::new(),
             theme: Theme::default_theme(),
             anim: AnimClock::default(),
@@ -169,6 +172,7 @@ impl TuiModel {
         match self.focus {
             FocusPanel::Scenes => self.scene_cursor = self.scene_cursor.saturating_sub(1),
             FocusPanel::Audio => self.audio_cursor = self.audio_cursor.saturating_sub(1),
+            FocusPanel::Profiles => self.profile_cursor = self.profile_cursor.saturating_sub(1),
         }
     }
 
@@ -186,6 +190,12 @@ impl TuiModel {
                     self.audio_cursor += 1;
                 }
             }
+            FocusPanel::Profiles => {
+                let max = self.profiles().len().saturating_sub(1);
+                if self.profile_cursor < max {
+                    self.profile_cursor += 1;
+                }
+            }
         }
     }
 
@@ -200,6 +210,8 @@ impl TuiModel {
         self.scene_cursor = self.scene_cursor.min(scene_max);
         let audio_max = self.audio_inputs().len().saturating_sub(1);
         self.audio_cursor = self.audio_cursor.min(audio_max);
+        let profile_max = self.profiles().len().saturating_sub(1);
+        self.profile_cursor = self.profile_cursor.min(profile_max);
     }
 
     pub fn focused_scene(&self) -> Option<&SceneState> {
@@ -208,6 +220,10 @@ impl TuiModel {
 
     pub fn focused_audio(&self) -> Option<&AudioState> {
         self.audio_inputs().get(self.audio_cursor)
+    }
+
+    pub fn focused_profile(&self) -> Option<&str> {
+        self.profiles().get(self.profile_cursor).map(String::as_str)
     }
 }
 
@@ -260,5 +276,26 @@ mod tests {
 
         assert_eq!(model.scenes().len(), 0);
         assert_eq!(model.scene_cursor, 0);
+    }
+
+    #[test]
+    fn profile_navigation_clamps_and_focuses() {
+        let mut model = TuiModel {
+            snapshot: Some(ObsSnapshot {
+                profiles: vec!["Default".to_string(), "Streaming".to_string()],
+                ..Default::default()
+            }),
+            focus: FocusPanel::Profiles,
+            ..Default::default()
+        };
+        model.clamp_cursors();
+
+        assert_eq!(model.focused_profile(), Some("Default"));
+        model.move_down();
+        assert_eq!(model.focused_profile(), Some("Streaming"));
+        model.move_down(); // already at last entry; stays put
+        assert_eq!(model.focused_profile(), Some("Streaming"));
+        model.move_up();
+        assert_eq!(model.focused_profile(), Some("Default"));
     }
 }

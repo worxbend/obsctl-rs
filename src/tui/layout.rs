@@ -5,9 +5,12 @@ use ratatui::{
 
 pub struct LayoutAreas {
     pub header: Rect,
-    pub left_top: Rect,
-    pub left_bottom: Rect,
-    pub right: Rect,
+    pub scenes: Rect,
+    pub audio: Rect,
+    pub profiles: Rect,
+    /// Slim strip under the main panels — deliberately short so logs stay
+    /// out of the way of the scenes/audio/profiles dashboard.
+    pub logs: Rect,
     pub palette: Rect,
 }
 
@@ -19,32 +22,31 @@ pub fn compute(frame: &Frame) -> LayoutAreas {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(6),
+            Constraint::Length(8),
             Constraint::Length(5),
         ])
         .split(area);
 
     let header = vertical[0];
     let middle = vertical[1];
-    let palette = vertical[2];
+    let logs = vertical[2];
+    let palette = vertical[3];
 
-    let horizontal = Layout::default()
+    let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
         .split(middle);
-
-    let left = horizontal[0];
-    let right = horizontal[1];
-
-    let left_split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(left);
 
     LayoutAreas {
         header,
-        left_top: left_split[0],
-        left_bottom: left_split[1],
-        right,
+        scenes: columns[0],
+        audio: columns[1],
+        profiles: columns[2],
+        logs,
         palette,
     }
 }

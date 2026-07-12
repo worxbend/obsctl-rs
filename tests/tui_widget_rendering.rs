@@ -65,6 +65,8 @@ fn snap_connected() -> ObsSnapshot {
         ],
         streaming: false,
         recording: false,
+        profiles: vec!["Default".into(), "Streaming".into()],
+        current_profile: Some("Default".into()),
         updated_at: OffsetDateTime::now_utc(),
         ..ObsSnapshot::default()
     }
@@ -315,6 +317,39 @@ fn audio_renders_long_name_without_panic() {
         widgets::audio::render(f, Rect::new(0, 0, 30, 6), &model);
     })
     .unwrap();
+}
+
+// ── profiles widget ─────────────────────────────────────────────────────────
+
+#[test]
+fn profiles_renders_active_profile_marker() {
+    let model = model_connected();
+    let mut t = term(60, 10);
+    t.draw(|f| {
+        widgets::profiles::render(f, Rect::new(0, 0, 60, 10), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("Profiles"), "should show Profiles title");
+    assert!(out.contains("Default"), "should show profile name");
+    assert!(out.contains("Streaming"), "should show all profiles");
+    assert!(out.contains("▶"), "should show active marker");
+}
+
+#[test]
+fn profiles_renders_empty_list_without_panic() {
+    let mut model = model_connected();
+    if let Some(ref mut snap) = model.snapshot {
+        snap.profiles.clear();
+        snap.current_profile = None;
+    }
+    let mut t = term(60, 10);
+    t.draw(|f| {
+        widgets::profiles::render(f, Rect::new(0, 0, 60, 10), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("Profiles"), "should still render block title");
 }
 
 // ── logs widget ──────────────────────────────────────────────────────────────

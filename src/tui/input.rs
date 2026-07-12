@@ -16,10 +16,13 @@ pub enum TuiAction {
     // Navigation
     FocusScenes,
     FocusAudio,
+    FocusProfiles,
     NavUp,
     NavDown,
     // Scene actions
     ActivateScene,
+    // Profile actions
+    ActivateProfile,
     // Audio actions
     ToggleMute,
     VolumeDown,
@@ -58,6 +61,7 @@ pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
         // Panel focus
         KeyCode::Char('s') => Some(TuiAction::FocusScenes),
         KeyCode::Char('a') => Some(TuiAction::FocusAudio),
+        KeyCode::Char('p') => Some(TuiAction::FocusProfiles),
 
         // Up/down navigation (arrow keys + vim j/k)
         KeyCode::Up | KeyCode::Char('k') => Some(TuiAction::NavUp),
@@ -65,6 +69,8 @@ pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
 
         // Activate selected scene (Enter, scenes panel only)
         KeyCode::Enter if model.focus == FocusPanel::Scenes => Some(TuiAction::ActivateScene),
+        // Activate selected profile (Enter, profiles panel only)
+        KeyCode::Enter if model.focus == FocusPanel::Profiles => Some(TuiAction::ActivateProfile),
 
         // Audio-panel actions
         KeyCode::Char('m') if model.focus == FocusPanel::Audio => Some(TuiAction::ToggleMute),
