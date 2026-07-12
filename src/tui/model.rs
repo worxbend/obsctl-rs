@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 use crate::{
     ipc::protocol::{LogEvent, LogLevel},
     obs::state::{AudioState, ObsSnapshot, SceneState, ServerStatus},
-    tui::theme::Theme,
+    tui::{anim::AnimClock, theme::Theme},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -30,6 +30,8 @@ pub struct TuiModel {
     pub meter_levels: HashMap<String, f32>,
     /// Active color theme, chosen via config or the settings view.
     pub theme: Theme,
+    /// Advances once per render tick; drives pulsing/spinner animations.
+    pub anim: AnimClock,
     /// Cached visible (non-hidden) scenes; rebuilt in `clamp_cursors` after each snapshot update.
     cached_visible_scenes: Vec<SceneState>,
 }
@@ -48,6 +50,7 @@ impl Default for TuiModel {
             audio_cursor: 0,
             meter_levels: HashMap::new(),
             theme: Theme::default_theme(),
+            anim: AnimClock::default(),
             cached_visible_scenes: Vec::new(),
         }
     }

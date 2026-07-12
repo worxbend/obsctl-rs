@@ -77,6 +77,7 @@ async fn run_loop(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
+                model.anim.tick();
                 terminal.draw(|f| render(f, &model))?;
             }
 
