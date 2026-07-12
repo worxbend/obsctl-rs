@@ -16,6 +16,14 @@ pub enum FocusPanel {
     Profiles,
 }
 
+/// Top-level screen the TUI is showing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum View {
+    #[default]
+    Main,
+    Settings,
+}
+
 #[derive(Debug, Clone)]
 pub struct TuiModel {
     pub snapshot: Option<ObsSnapshot>,
@@ -41,6 +49,13 @@ pub struct TuiModel {
     /// highlight in the scenes panel right after a switch. Set by the
     /// event applier when it observes `current_scene` change.
     pub scene_flash: Option<(String, u64)>,
+    /// Current top-level screen (main dashboard or the settings/theme picker).
+    pub view: View,
+    /// Cursor into `theme::ALL` while the settings view is open.
+    pub settings_cursor: usize,
+    /// Theme active before opening the settings view, restored on Esc
+    /// without confirming a new choice (live-preview-then-cancel, btop-style).
+    pub theme_preview_origin: Option<Theme>,
     /// Cached visible (non-hidden) scenes; rebuilt in `clamp_cursors` after each snapshot update.
     cached_visible_scenes: Vec<SceneState>,
 }
@@ -63,6 +78,9 @@ impl Default for TuiModel {
             theme: Theme::default_theme(),
             anim: AnimClock::default(),
             scene_flash: None,
+            view: View::default(),
+            settings_cursor: 0,
+            theme_preview_origin: None,
             cached_visible_scenes: Vec::new(),
         }
     }

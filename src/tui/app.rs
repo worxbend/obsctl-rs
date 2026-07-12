@@ -1,4 +1,8 @@
-use std::{io::stdout, path::Path, time::Duration};
+use std::{
+    io::stdout,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use time::OffsetDateTime;
 
@@ -12,6 +16,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
 use crate::{
+    config::{loader, writer},
     domain::{command::Command, parser, result::Result},
     ipc::protocol::{CommandPayload, LogLevel, ServerMessage},
     support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len},
@@ -20,20 +25,25 @@ use crate::{
         event_applier::apply_server_message,
         input::{TuiAction, handle_key},
         layout,
-        model::{FocusPanel, TuiLogEntry, TuiModel},
+        model::{FocusPanel, TuiLogEntry, TuiModel, View},
         session::{TuiEventSession, send_command},
-        theme::Theme,
+        theme::{self, Theme},
         widgets,
     },
 };
 
-pub async fn run(socket_path: &Path, refresh_ms: u64, theme: Theme) -> Result<i32> {
+pub async fn run(
+    socket_path: &Path,
+    refresh_ms: u64,
+    theme: Theme,
+    config_path: Option<PathBuf>,
+) -> Result<i32> {
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, socket_path, refresh_ms, theme).await;
+    let result = run_loop(&mut terminal, socket_path, refresh_ms, theme, config_path).await;
 
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)?;
@@ -46,6 +56,7 @@ async fn run_loop(
     socket_path: &Path,
     refresh_ms: u64,
     theme: Theme,
+    config_path: Option<PathBuf>,
 ) -> Result<i32> {
     let mut model = TuiModel::with_theme(theme);
     let refresh = Duration::from_millis(refresh_ms.max(50));
@@ -103,8 +114,14 @@ async fn run_loop(
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         if let Some(action) = handle_key(&model, key) {
-                            let (should_quit, result) =
-                                handle_action(action, &mut model, socket_path, &ipc_tx).await;
+                            let (should_quit, result) = handle_action(
+                                action,
+                                &mut model,
+                                socket_path,
+                                config_path.as_deref(),
+                                &ipc_tx,
+                            )
+                            .await;
                             if should_quit {
                                 return Ok(0);
                             }
@@ -150,6 +167,7 @@ async fn handle_action(
     action: TuiAction,
     model: &mut TuiModel,
     socket_path: &Path,
+    config_path: Option<&Path>,
     ipc_tx: &mpsc::Sender<std::result::Result<ServerMessage, String>>,
 ) -> (bool, Option<String>) {
     match action {
@@ -280,10 +298,65 @@ async fn handle_action(
             model.command_palette.cycle_prev();
             (false, None)
         }
+        TuiAction::OpenSettings => {
+            model.theme_preview_origin = Some(model.theme);
+            model.settings_cursor = model.theme.index();
+            model.view = View::Settings;
+            (false, None)
+        }
+        TuiAction::CloseSettings => {
+            if let Some(original) = model.theme_preview_origin.take() {
+                model.theme = original;
+            }
+            model.view = View::Main;
+            (false, None)
+        }
+        TuiAction::SettingsNavUp => {
+            model.settings_cursor = model.settings_cursor.saturating_sub(1);
+            model.theme = theme::ALL[model.settings_cursor];
+            (false, None)
+        }
+        TuiAction::SettingsNavDown => {
+            let max = theme::ALL.len().saturating_sub(1);
+            model.settings_cursor = (model.settings_cursor + 1).min(max);
+            model.theme = theme::ALL[model.settings_cursor];
+            (false, None)
+        }
+        TuiAction::ApplySettingsTheme => {
+            let chosen = theme::ALL[model.settings_cursor];
+            model.theme = chosen;
+            model.theme_preview_origin = None;
+            model.view = View::Main;
+            let result = persist_theme_choice(config_path, chosen.id).await;
+            (false, Some(result))
+        }
+    }
+}
+
+/// Best-effort write of the chosen theme id into `ui.theme` in the config
+/// file, preserving every other setting. Failures are reported to the
+/// palette result line but never block applying the theme in-memory.
+async fn persist_theme_choice(config_path: Option<&Path>, theme_id: &str) -> String {
+    let Some(path) = config_path else {
+        return "theme applied (no config file to persist to)".to_string();
+    };
+    let mut config = match loader::load_or_default(path) {
+        Ok(config) => config,
+        Err(e) => return format!("theme applied, but reading config failed: {e}"),
+    };
+    config.ui.theme = theme_id.to_string();
+    match writer::write_atomic(&config, path) {
+        Ok(()) => format!("theme set: {theme_id}"),
+        Err(e) => format!("theme applied, but saving config failed: {e}"),
     }
 }
 
 fn render(f: &mut ratatui::Frame, model: &TuiModel) {
+    if model.view == View::Settings {
+        widgets::settings::render(f, f.area(), model);
+        return;
+    }
+
     let areas = layout::compute(f);
 
     if !model.connected_to_daemon {
@@ -468,8 +541,27 @@ async fn send_simple(socket_path: &Path, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_TARGET_TOKEN_LENGTH, command_to_payload};
+    use super::{MAX_TARGET_TOKEN_LENGTH, command_to_payload, persist_theme_choice};
     use crate::domain::command::Command;
+
+    #[tokio::test]
+    async fn persist_theme_choice_writes_theme_id_and_preserves_other_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        crate::config::writer::write_default(&path).unwrap();
+
+        let msg = persist_theme_choice(Some(&path), "nord").await;
+        assert_eq!(msg, "theme set: nord");
+
+        let saved = crate::config::loader::load(&path).unwrap();
+        assert_eq!(saved.ui.theme, "nord");
+    }
+
+    #[tokio::test]
+    async fn persist_theme_choice_without_path_reports_in_memory_only() {
+        let msg = persist_theme_choice(None, "nord").await;
+        assert_eq!(msg, "theme applied (no config file to persist to)");
+    }
 
     #[test]
     fn command_to_payload_rejects_invalid_target_values() {

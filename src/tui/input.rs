@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::tui::model::{FocusPanel, TuiModel};
+use crate::tui::model::{FocusPanel, TuiModel, View};
 
 #[derive(Debug)]
 pub enum TuiAction {
@@ -30,6 +30,12 @@ pub enum TuiAction {
     // Palette completion
     CompleteNext,
     CompletePrev,
+    // Settings view
+    OpenSettings,
+    CloseSettings,
+    SettingsNavUp,
+    SettingsNavDown,
+    ApplySettingsTheme,
 }
 
 pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
@@ -48,7 +54,18 @@ pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
         };
     }
 
+    if model.view == View::Settings {
+        return match key.code {
+            KeyCode::Esc | KeyCode::F(2) | KeyCode::Char('q') => Some(TuiAction::CloseSettings),
+            KeyCode::Up | KeyCode::Char('k') => Some(TuiAction::SettingsNavUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(TuiAction::SettingsNavDown),
+            KeyCode::Enter => Some(TuiAction::ApplySettingsTheme),
+            _ => None,
+        };
+    }
+
     match key.code {
+        KeyCode::F(2) => Some(TuiAction::OpenSettings),
         KeyCode::Char('q') => Some(TuiAction::Quit),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(TuiAction::Quit)
@@ -82,5 +99,55 @@ pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
         }
 
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyEventKind;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn f2_opens_settings_from_main_view() {
+        let model = TuiModel::default();
+        assert!(matches!(
+            handle_key(&model, key(KeyCode::F(2))),
+            Some(TuiAction::OpenSettings)
+        ));
+    }
+
+    #[test]
+    fn settings_view_intercepts_navigation_and_close_keys() {
+        let mut model = TuiModel::default();
+        model.view = View::Settings;
+
+        assert!(matches!(
+            handle_key(&model, key(KeyCode::Down)),
+            Some(TuiAction::SettingsNavDown)
+        ));
+        assert!(matches!(
+            handle_key(&model, key(KeyCode::Up)),
+            Some(TuiAction::SettingsNavUp)
+        ));
+        assert!(matches!(
+            handle_key(&model, key(KeyCode::Enter)),
+            Some(TuiAction::ApplySettingsTheme)
+        ));
+        assert!(matches!(
+            handle_key(&model, key(KeyCode::Esc)),
+            Some(TuiAction::CloseSettings)
+        ));
+        // 'q' closes settings rather than quitting the whole app.
+        assert!(matches!(
+            handle_key(&model, key(KeyCode::Char('q'))),
+            Some(TuiAction::CloseSettings)
+        ));
+
+        // Sanity: KeyEventKind default is Press, matching the harness filter.
+        assert_eq!(key(KeyCode::Esc).kind, KeyEventKind::Press);
     }
 }

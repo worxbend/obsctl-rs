@@ -551,6 +551,33 @@ fn command_palette_renders_last_result() {
     );
 }
 
+// ── settings widget ─────────────────────────────────────────────────────────
+
+#[test]
+fn settings_renders_theme_list_and_preview() {
+    let model = model_connected();
+    let mut t = term(100, 20);
+    t.draw(|f| {
+        widgets::settings::render(f, Rect::new(0, 0, 100, 20), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("Settings"), "should show settings title");
+    assert!(out.contains("Themes"), "should show theme list title");
+    assert!(out.contains("Claude"), "should list the claude preset");
+    assert!(out.contains("Preview"), "should show a live preview panel");
+}
+
+#[test]
+fn settings_survives_minimum_terminal_size() {
+    let model = model_connected();
+    let mut t = term(20, 6);
+    t.draw(|f| {
+        widgets::settings::render(f, Rect::new(0, 0, 20, 6), &model);
+    })
+    .unwrap();
+}
+
 // ── small terminal edge case ─────────────────────────────────────────────────
 
 #[test]

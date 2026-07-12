@@ -277,14 +277,22 @@ fn run_tui(config_path: Option<PathBuf>) -> i32 {
             return 1;
         }
     };
-    let theme = resolve_tui_theme(config_path.as_ref());
+    let effective_config_path = config_path
+        .or_else(paths::config_path)
+        .or_else(paths::default_config_path);
+    let theme = resolve_tui_theme(effective_config_path.as_ref());
 
     let rt = match tokio_runtime("TUI") {
         Some(rt) => rt,
         None => return 1,
     };
 
-    match rt.block_on(crate::tui::app::run(&socket_path, refresh_ms, theme)) {
+    match rt.block_on(crate::tui::app::run(
+        &socket_path,
+        refresh_ms,
+        theme,
+        effective_config_path,
+    )) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("tui error: {e}");
@@ -298,10 +306,9 @@ fn run_tui(config_path: Option<PathBuf>) -> i32 {
 /// a bad/missing config never blocks launching the TUI (the error path is
 /// already reported by `resolve_socket_config`).
 fn resolve_tui_theme(config_path: Option<&PathBuf>) -> crate::tui::theme::Theme {
-    let effective_path = config_path.cloned().or_else(paths::config_path);
-    let config = effective_path
-        .and_then(|cp| loader::load_or_default(&cp).ok())
-        .unwrap_or_else(model::Config::default);
+    let config = config_path
+        .and_then(|cp| loader::load_or_default(cp).ok())
+        .unwrap_or_default();
     let custom = config
         .ui
         .custom_theme
