@@ -1,0 +1,26 @@
+name: obsctl-rs
+base: core24
+version: git
+grade: stable
+confinement: classic
+license: MIT
+summary: A local OBS Studio controller for obs-websocket 5.x
+description: |
+  obsctl-rs is a local OBS Studio controller for obs-websocket 5.x, written
+  in Rust with a Ratatui terminal UI. It ships a daemon, a CLI, and a TUI
+  that talk to each other over a Unix socket, with only the daemon
+  connecting directly to OBS.
+
+apps:
+  obsctl-rs:
+    command: bin/obsctl
+
+parts:
+  obsctl-rs:
+    plugin: rust
+    source: .
+    build-packages:
+      - pkg-config
+      - libssl-dev
+    stage-packages:
+      - libssl3
