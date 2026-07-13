@@ -48,4 +48,5 @@ jobs:
           files: |
             obsctl-${{ github.ref_name }}-linux-amd64.tar.gz
             obsctl-${{ github.ref_name }}-linux-amd64.tar.gz.sha256
+            scripts/install.sh
           generate_release_notes: true

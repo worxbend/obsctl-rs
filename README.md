@@ -28,6 +28,16 @@ OBS Studio <── obs-websocket 5.x ──> obsctl server <── Unix socket I
 
 **Hard rule:** only `obsctl server` connects directly to OBS. The CLI and TUI are thin IPC clients.
 
+## Install
+
+Download and install the latest Linux release into `~/.local/bin`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://github.com/worxbend/obsctl-rs/releases/latest/download/install.sh | sh
+```
+
+Set `OBSCTL_VERSION` to pin a specific release tag, or `OBSCTL_INSTALL_DIR` to install elsewhere. The script also adds the install directory to `PATH` in `~/.bashrc` and `~/.zshrc` if it's missing.
+
 ## Quick Start
 
 ```sh
