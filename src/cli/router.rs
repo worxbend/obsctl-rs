@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use rust_i18n::t;
+
 use crate::{
     cli::{
         args::{Cli, Commands, ServiceAction},
@@ -20,8 +22,20 @@ use crate::{
     },
 };
 
+/// Resolve `ui.locale` from the config that would be used (best-effort — a
+/// missing/invalid config file just means "no override, use defaults") and
+/// set it as the active locale before any user-facing output is printed.
+fn init_localization(config_path: Option<&std::path::Path>) {
+    let config_locale = config_path
+        .and_then(|cp| loader::load_or_default(cp).ok())
+        .and_then(|c| c.ui.locale);
+    crate::localization::init(config_path, config_locale.as_deref());
+}
+
 pub fn run(cli: Cli) -> i32 {
     let config_path = cli.config.clone().or_else(paths::config_path);
+
+    init_localization(config_path.as_deref());
 
     let level = effective_log_level(&cli);
 
@@ -107,26 +121,26 @@ fn run_init(config_path: Option<PathBuf>, force: bool) -> i32 {
     let path = match config_path.or_else(paths::default_config_path) {
         Some(p) => p,
         None => {
-            eprintln!("error: could not determine config directory");
+            eprintln!(
+                "{}",
+                t!("common.error", message = t!("cli.init.no_config_dir"))
+            );
             return 1;
         }
     };
 
     if path.exists() && !force {
-        eprintln!(
-            "Config already exists at {}. Use --force to overwrite.",
-            path.display()
-        );
+        eprintln!("{}", t!("cli.init.already_exists", path = path.display()));
         return 1;
     }
 
     match writer::write_default(&path) {
         Ok(()) => {
-            println!("Initialized config at {}", path.display());
+            println!("{}", t!("cli.init.success", path = path.display()));
             0
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{}", t!("common.error", message = e));
             1
         }
     }
@@ -136,7 +150,10 @@ fn run_validate_config(config_path: Option<PathBuf>) -> i32 {
     let path = match config_path.or_else(paths::config_path) {
         Some(p) => p,
         None => {
-            eprintln!("error: could not determine config path");
+            eprintln!(
+                "{}",
+                t!("common.error", message = t!("cli.validate.no_config_path"))
+            );
             return 2;
         }
     };
@@ -144,18 +161,21 @@ fn run_validate_config(config_path: Option<PathBuf>) -> i32 {
     let (_config, warnings) = match crate::config::loader::load_with_warnings(&path) {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{}", t!("common.error", message = e));
             return 2;
         }
     };
 
     for w in &warnings {
-        eprintln!("warning: {}", w.0);
+        eprintln!("{}", t!("common.warning", message = &w.0));
     }
     if warnings.is_empty() {
-        println!("Config is valid.");
+        println!("{}", t!("cli.validate.valid"));
     } else {
-        println!("Config is valid with {} warning(s).", warnings.len());
+        println!(
+            "{}",
+            t!("cli.validate.valid_with_warnings", count = warnings.len())
+        );
     }
     0
 }
@@ -172,7 +192,7 @@ fn run_server(config_path: Option<PathBuf>, headless: bool) -> i32 {
         && !headless
         && let Err(e) = first_time_setup(path)
     {
-        eprintln!("Setup failed: {e}");
+        eprintln!("{}", t!("cli.setup.failed", error = e));
         return 1;
     }
 
@@ -191,21 +211,19 @@ fn run_server(config_path: Option<PathBuf>, headless: bool) -> i32 {
 
 /// Interactively prompt for OBS connection details and write a minimal config file.
 fn first_time_setup(config_path: &std::path::Path) -> std::io::Result<()> {
-    eprintln!("No config found at {}.", config_path.display());
-    eprintln!("Let's create a minimal config.\n");
+    eprintln!(
+        "{}",
+        t!("cli.setup.no_config_found", path = config_path.display())
+    );
+    eprint!("{}", t!("cli.setup.create_minimal"));
 
     let stdin = std::io::stdin();
     let mut buf = String::new();
 
-    let host = prompt_line(&stdin, &mut buf, "OBS host", "127.0.0.1")?;
+    let host = prompt_line(&stdin, &mut buf, &t!("cli.setup.prompt_host"), "127.0.0.1")?;
     let port = prompt_port(&stdin, &mut buf)?;
     let password = loop {
-        let value = prompt_line(
-            &stdin,
-            &mut buf,
-            "OBS WebSocket password (blank = no auth)",
-            "",
-        )?;
+        let value = prompt_line(&stdin, &mut buf, &t!("cli.setup.prompt_password"), "")?;
         if let Err(error) = resolve_connection_password(Some(&value), "") {
             eprintln!("  {}", password_config_error_message(&error));
             continue;
@@ -225,20 +243,20 @@ fn first_time_setup(config_path: &std::path::Path) -> std::io::Result<()> {
     crate::config::writer::write(&config, config_path)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-    eprintln!("\nConfig written to {}.\n", config_path.display());
+    eprint!("{}", t!("cli.setup.written", path = config_path.display()));
     Ok(())
 }
 
 fn prompt_port(stdin: &std::io::Stdin, buf: &mut String) -> std::io::Result<u16> {
     loop {
-        let port_str = prompt_line(stdin, buf, "OBS port", "4455")?;
+        let port_str = prompt_line(stdin, buf, &t!("cli.setup.prompt_port"), "4455")?;
         match port_str.parse::<u16>() {
             Ok(0) => {
-                eprintln!("  Port must be in range 1-65535.");
+                eprintln!("{}", t!("cli.setup.port_out_of_range"));
             }
             Ok(port) => return Ok(port),
             Err(_) => {
-                eprintln!("  Invalid port, enter an integer 1-65535.");
+                eprintln!("{}", t!("cli.setup.port_invalid"));
             }
         }
     }
@@ -273,7 +291,7 @@ fn run_tui(config_path: Option<PathBuf>) -> i32 {
     let (socket_path, refresh_ms) = match resolve_socket_config(config_path.as_ref()) {
         Ok(values) => values,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{}", t!("common.error", message = e));
             return 1;
         }
     };
@@ -295,7 +313,7 @@ fn run_tui(config_path: Option<PathBuf>) -> i32 {
     )) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("tui error: {e}");
+            eprintln!("{}", t!("cli.tui.error", error = e));
             1
         }
     }
@@ -337,7 +355,17 @@ fn tokio_runtime(context: &str) -> Option<tokio::runtime::Runtime> {
     {
         Ok(rt) => Some(rt),
         Err(e) => {
-            eprintln!("error: failed to start async runtime for {context}: {e}");
+            eprintln!(
+                "{}",
+                t!(
+                    "common.error",
+                    message = t!(
+                        "cli.runtime.async_start_failed",
+                        context = context,
+                        error = e
+                    )
+                )
+            );
             None
         }
     }
@@ -350,7 +378,10 @@ fn run_service(action: ServiceAction) -> i32 {
     let unit_path = match systemd_user_service::unit_file_path() {
         Some(p) => p,
         None => {
-            eprintln!("error: could not determine systemd user unit directory");
+            eprintln!(
+                "{}",
+                t!("common.error", message = t!("cli.service.no_unit_dir"))
+            );
             return 1;
         }
     };
@@ -361,27 +392,33 @@ fn run_service(action: ServiceAction) -> i32 {
             let exec = match resolve_service_exec_path() {
                 Ok(exec) => exec,
                 Err(message) => {
-                    eprintln!("error: {message}");
+                    eprintln!("{}", t!("common.error", message = message));
                     return 1;
                 }
             };
             if let Err(e) = installer.install(&exec) {
-                eprintln!("error: {e}");
+                eprintln!("{}", t!("common.error", message = e));
                 return 1;
             }
-            println!("Service installed at {}", unit_path.display());
             println!(
-                "Enable with: {}",
-                systemd_user_service::SYSTEMCTL_ENABLE_HINT
+                "{}",
+                t!("cli.service.installed", path = unit_path.display())
+            );
+            println!(
+                "{}",
+                t!(
+                    "cli.service.enable_hint",
+                    hint = systemd_user_service::SYSTEMCTL_ENABLE_HINT
+                )
             );
             0
         }
         ServiceAction::Uninstall => {
             if let Err(e) = installer.uninstall() {
-                eprintln!("error: {e}");
+                eprintln!("{}", t!("common.error", message = e));
                 return 1;
             }
-            println!("Service uninstalled.");
+            println!("{}", t!("cli.service.uninstalled"));
             0
         }
         ServiceAction::Status => installer
@@ -710,20 +747,20 @@ mod tests {
 }
 
 fn service_action(installer: &ServiceInstaller<'_>, verb: &str) -> i32 {
-    let result = match verb {
-        "start" => installer.start(),
-        "stop" => installer.stop(),
-        "restart" => installer.restart(),
+    let (result, done_key) = match verb {
+        "start" => (installer.start(), "cli.service.action_started"),
+        "stop" => (installer.stop(), "cli.service.action_stopped"),
+        "restart" => (installer.restart(), "cli.service.action_restarted"),
         _ => unreachable!("unsupported verb"),
     };
 
     match result {
         Ok(_) => {
-            println!("Service {verb}ed.");
+            println!("{}", t!(done_key));
             0
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{}", t!("common.error", message = e));
             1
         }
     }
@@ -735,7 +772,7 @@ fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> 
     let (socket_path, _) = match resolve_socket_config(config_path.as_ref()) {
         Ok(values) => values,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{}", t!("common.error", message = e));
             return 1;
         }
     };
@@ -761,7 +798,16 @@ fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> 
         Commands::ToggleStream => ctx.toggle_stream(),
         Commands::ToggleRecord => ctx.toggle_record(),
         other => {
-            eprintln!("error: command {other:?} is not supported for server proxying");
+            eprintln!(
+                "{}",
+                t!(
+                    "common.error",
+                    message = t!(
+                        "cli.proxy.unsupported_command",
+                        command = format!("{other:?}")
+                    )
+                )
+            );
             1
         }
     }

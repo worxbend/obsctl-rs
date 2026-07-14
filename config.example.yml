@@ -71,6 +71,11 @@ ui:
   # Color theme (currently only "default" is supported).
   theme: "default"
 
+  # UI language: "en" or "uk". Unset (or unsupported) falls back to English.
+  # "uk" requires ~/.config/obsctl/locales/uk.yml — see contrib/locales/uk.yml
+  # and README.md's "Localization" section. Overridable via OBSCTL_LOCALE.
+  # locale: "en"
+
 # ── Scene aliases ──────────────────────────────────────────────────────────────
 # Map OBS scene names to short aliases and optional single-key shortcuts.
 # Use 'obsctl dump-config' to auto-populate this list from OBS.

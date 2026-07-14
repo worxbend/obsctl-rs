@@ -5,31 +5,30 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, Paragraph},
 };
+use rust_i18n::t;
 
 use crate::service::systemd_user_service::SYSTEMCTL_ENABLE_HINT;
 use crate::tui::model::TuiModel;
 
 pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
-    let err = model
-        .last_result
-        .as_deref()
-        .unwrap_or("Could not connect to obsctl daemon.");
+    let could_not_connect = t!("tui.connection.could_not_connect");
+    let err = model.last_result.as_deref().unwrap_or(&could_not_connect);
 
     let lines = vec![
         Line::styled(
-            "obsctl server is not running",
+            t!("tui.connection.daemon_not_running").into_owned(),
             Style::default().fg(theme.danger),
         ),
         Line::raw(""),
-        Line::styled(err, Style::default().fg(theme.warning)),
+        Line::styled(err.to_string(), Style::default().fg(theme.warning)),
         Line::raw(""),
-        Line::raw("Start the daemon with:"),
+        Line::raw(t!("tui.connection.start_daemon_with").into_owned()),
         Line::styled(
             "  obsctl server --headless",
             Style::default().fg(theme.info),
         ),
-        Line::raw("Or install the service:"),
+        Line::raw(t!("tui.connection.or_install_service").into_owned()),
         Line::styled("  obsctl service install", Style::default().fg(theme.info)),
         Line::styled(
             format!("  {SYSTEMCTL_ENABLE_HINT}"),
@@ -37,7 +36,7 @@ pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
         ),
         Line::raw(""),
         Line::styled(
-            "Press R to retry, q to quit.",
+            t!("tui.connection.press_r_to_retry").into_owned(),
             Style::default().fg(theme.muted),
         ),
     ];
@@ -45,7 +44,7 @@ pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
-        .title(" obsctl — daemon unavailable ");
+        .title(t!("tui.connection.title_unavailable").into_owned());
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(lines), inner);
@@ -56,35 +55,35 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let lines: Vec<Line> = if !model.connected_to_daemon {
         vec![
             Line::styled(
-                "Not connected to obsctl daemon.",
+                t!("tui.connection.not_connected").into_owned(),
                 Style::default().fg(theme.danger),
             ),
-            Line::raw("Press R to retry, q to quit."),
+            Line::raw(t!("tui.connection.press_r_to_retry").into_owned()),
         ]
     } else if let Some(snap) = &model.snapshot {
-        let mut v = vec![Line::from(format!(
-            "OBS: {}",
-            if snap.connected {
-                "connected"
-            } else {
-                "disconnected"
-            }
-        ))];
+        let status = if snap.connected {
+            t!("tui.connection.obs_connected")
+        } else {
+            t!("tui.connection.obs_disconnected")
+        };
+        let mut v = vec![Line::from(status.into_owned())];
         if let Some(e) = &snap.last_error {
             v.push(Line::styled(
-                format!("last error: {e}"),
+                t!("tui.connection.last_error", error = e).into_owned(),
                 Style::default().fg(theme.warning),
             ));
         }
         v
     } else {
-        vec![Line::raw("Waiting for state...")]
+        vec![Line::raw(
+            t!("tui.connection.waiting_for_state").into_owned(),
+        )]
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
-        .title(" Connection ");
+        .title(t!("tui.connection.title").into_owned());
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(lines), inner);

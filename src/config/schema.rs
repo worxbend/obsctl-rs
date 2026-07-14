@@ -32,6 +32,15 @@ pub fn validate(config: &Config) -> Result<Vec<ValidationWarning>> {
         ));
     }
 
+    if let Some(locale) = &config.ui.locale
+        && !crate::localization::SUPPORTED_LOCALES.contains(&locale.to_ascii_lowercase().as_str())
+    {
+        warnings.push(ValidationWarning(format!(
+            "ui.locale '{locale}' is not supported (supported: {}); falling back to en",
+            crate::localization::SUPPORTED_LOCALES.join(", ")
+        )));
+    }
+
     if config.reconnect.max_delay_ms < config.reconnect.initial_delay_ms {
         return Err(ObsctlError::ConfigInvalid(
             "reconnect.max_delay_ms must be >= initial_delay_ms".to_string(),

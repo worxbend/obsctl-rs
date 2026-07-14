@@ -125,6 +125,11 @@ pub struct UiConfig {
     pub theme: String,
     #[serde(default)]
     pub custom_theme: Option<CustomThemeConfig>,
+    /// UI language: `"en"` or `"uk"`. Unset (or unsupported) falls back to
+    /// English. Overridable via the `OBSCTL_LOCALE` env var. See README.md
+    /// "Localization" for how to add or override translations.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 impl Default for UiConfig {
@@ -135,6 +140,7 @@ impl Default for UiConfig {
             show_icons: true,
             theme: "default".to_string(),
             custom_theme: None,
+            locale: None,
         }
     }
 }

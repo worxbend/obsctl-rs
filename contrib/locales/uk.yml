@@ -1,0 +1,86 @@
+# Ukrainian translation for obsctl.
+#
+# This file is NOT compiled into the binary. To enable it, copy it into your
+# obsctl config directory's locales subdirectory, e.g.:
+#
+#   mkdir -p ~/.config/obsctl/locales
+#   cp contrib/locales/uk.yml ~/.config/obsctl/locales/uk.yml
+#
+# ...then set `ui.locale: uk` in config.yml (or export OBSCTL_LOCALE=uk).
+# Keep the key structure in sync with locales/en.yml — any key missing here
+# falls back to the embedded English string.
+
+common:
+  error: "помилка: %{message}"
+  warning: "попередження: %{message}"
+
+cli:
+  init:
+    no_config_dir: "не вдалося визначити каталог конфігурації"
+    already_exists: "Конфігурацію вже існує за шляхом %{path}. Використайте --force для перезапису."
+    success: "Конфігурацію ініціалізовано за шляхом %{path}"
+
+  validate:
+    no_config_path: "не вдалося визначити шлях до конфігурації"
+    valid: "Конфігурація коректна."
+    valid_with_warnings: "Конфігурація коректна, попереджень: %{count}."
+
+  setup:
+    no_config_found: "Конфігурацію не знайдено за шляхом %{path}."
+    create_minimal: "Створімо мінімальну конфігурацію.\n\n"
+    failed: "Не вдалося виконати налаштування: %{error}"
+    written: "\nКонфігурацію записано за шляхом %{path}.\n\n"
+    prompt_host: "Хост OBS"
+    prompt_port: "Порт OBS"
+    prompt_password: "Пароль OBS WebSocket (порожньо = без автентифікації)"
+    port_out_of_range: "  Порт має бути в діапазоні 1-65535."
+    port_invalid: "  Некоректний порт, введіть ціле число 1-65535."
+
+  tui:
+    error: "помилка tui: %{error}"
+
+  runtime:
+    async_start_failed: "не вдалося запустити асинхронне середовище виконання для %{context}: %{error}"
+
+  service:
+    no_unit_dir: "не вдалося визначити каталог користувацьких unit-файлів systemd"
+    installed: "Службу встановлено за шляхом %{path}"
+    enable_hint: "Увімкнути: %{hint}"
+    uninstalled: "Службу видалено."
+    action_started: "Службу запущено."
+    action_stopped: "Службу зупинено."
+    action_restarted: "Службу перезапущено."
+
+  proxy:
+    unsupported_command: "команда %{command} не підтримується для проксіювання через сервер"
+
+  client:
+    server_unavailable_intro: "сервер obsctl не запущено."
+    server_unavailable_start: "Запустіть його командою:"
+    server_unavailable_or_install: "Або встановіть службу:"
+    unexpected_event: "неочікувана подія замість відповіді"
+    json_encode_warning: "не вдалося закодувати вивід у JSON: %{error}"
+    error_with_code: "помилка [%{code}]: %{message}"
+
+tui:
+  header:
+    daemon_connected: "демон: з'єднано"
+    daemon_disconnected: "демон: не з'єднано"
+    obs_connected: "OBS: з'єднано (v%{version})"
+    obs_disconnected: "OBS: не з'єднано"
+    scene: "  сцена: %{scene}"
+    profile: "  профіль: %{profile}"
+
+  connection:
+    daemon_not_running: "сервер obsctl не запущено"
+    could_not_connect: "Не вдалося з'єднатися з демоном obsctl."
+    start_daemon_with: "Запустіть демон командою:"
+    or_install_service: "Або встановіть службу:"
+    press_r_to_retry: "Натисніть R, щоб повторити, q — для виходу."
+    not_connected: "Немає з'єднання з демоном obsctl."
+    obs_connected: "OBS: з'єднано"
+    obs_disconnected: "OBS: не з'єднано"
+    last_error: "остання помилка: %{error}"
+    waiting_for_state: "Очікування стану..."
+    title: " З'єднання "
+    title_unavailable: " obsctl — демон недоступний "

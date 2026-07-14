@@ -108,6 +108,7 @@ ui:
   theme: "claude"       # built-in id, or "custom" — see Themes below
   # custom_theme:
   #   accent: "#D97757"
+  # locale: "en"        # "en" or "uk" — see Localization below
 scenes: []
 audio:
   inputs: []
@@ -150,6 +151,30 @@ ui:
     highlight_bg: "#61AFEF"  # selected list row background
     highlight_fg: "#282C34"  # selected list row text
 ```
+
+## Localization
+
+obsctl currently ships two locales: English (`en`) and Ukrainian (`uk`). English is embedded in the binary and always works; Ukrainian is loaded from a locale file at runtime.
+
+Set the language via `ui.locale` in `config.yml`, or override it per-invocation with the `OBSCTL_LOCALE` env var (takes priority over the config value). An unset or unsupported value falls back to English; `obsctl validate-config` warns if `ui.locale` names an unsupported locale.
+
+To enable Ukrainian, copy the bundled translation into your config directory's `locales/` subfolder (next to `config.yml`) and select it:
+
+```sh
+mkdir -p ~/.config/obsctl/locales
+cp contrib/locales/uk.yml ~/.config/obsctl/locales/uk.yml
+```
+
+```yaml
+ui:
+  locale: "uk"
+```
+
+If `~/.config/obsctl/locales/uk.yml` isn't present, selecting `uk` silently falls back to the embedded English strings rather than erroring — a missing or broken locale file never blocks the CLI from running.
+
+You can also drop an `en.yml` into that same `locales/` directory to override or add to the embedded English strings (e.g. while working on a translation) without recompiling.
+
+**Coverage:** the CLI's `init`/`validate-config`/`service`/`server` output and error-message prefixes, plus the TUI's header and connection screens, are localized. Most other TUI widget text (scenes, audio, logs, settings, command palette) is still English-only; contributions adding more `t!()` conversions are welcome — see `locales/en.yml` for the existing key catalog and `src/localization.rs` for how translations are resolved.
 
 ## CLI Commands
 

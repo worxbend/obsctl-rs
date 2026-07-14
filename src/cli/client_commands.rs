@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use rust_i18n::t;
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -20,13 +21,10 @@ use crate::{
 
 fn server_unavailable_hint() -> String {
     format!(
-        "\
-obsctl server is not running.
-Start it with:
-  obsctl server --headless
-Or install the service:
-  obsctl service install
-  {}",
+        "{}\n{}\n  obsctl server --headless\n{}\n  obsctl service install\n  {}",
+        t!("cli.client.server_unavailable_intro"),
+        t!("cli.client.server_unavailable_start"),
+        t!("cli.client.server_unavailable_or_install"),
         SYSTEMCTL_ENABLE_HINT
     )
 }
@@ -86,7 +84,7 @@ impl ProxyCtx {
                 }
             }
             Ok(ServerMessage::Event { .. }) => {
-                self.emit_protocol_error("unexpected event instead of response")
+                self.emit_protocol_error(&t!("cli.client.unexpected_event"))
             }
             Err(e @ ObsctlError::ServerUnavailable { .. }) => self.emit_local_error(&e),
             Err(e) => self.emit_local_error(&e),
@@ -117,7 +115,7 @@ impl ProxyCtx {
                     self.emit_response_error(error.as_ref())
                 }
             }
-            Ok(_) => self.emit_protocol_error("unexpected event instead of response"),
+            Ok(_) => self.emit_protocol_error(&t!("cli.client.unexpected_event")),
             Err(e @ ObsctlError::ServerUnavailable { .. }) => self.emit_local_error(&e),
             Err(e) => self.emit_local_error(&e),
         }
@@ -206,7 +204,14 @@ impl ProxyCtx {
         if self.json_output {
             print_json_error(code, msg, exit_code);
         } else {
-            eprintln!("error [{code}]: {}", redact_message(msg));
+            eprintln!(
+                "{}",
+                t!(
+                    "cli.client.error_with_code",
+                    code = code,
+                    message = redact_message(msg)
+                )
+            );
         }
         exit_code
     }
@@ -237,7 +242,10 @@ impl ProxyCtx {
         } else if matches!(error, ObsctlError::ServerUnavailable { .. }) {
             eprintln!("{}", redact_message(error.to_string()));
         } else {
-            eprintln!("error: {}", redact_message(error.to_string()));
+            eprintln!(
+                "{}",
+                t!("common.error", message = redact_message(error.to_string()))
+            );
         }
         exit_code
     }
@@ -316,7 +324,13 @@ fn print_json_envelope(envelope: &serde_json::Value, fallback: &str) {
     match serde_json::to_string(envelope) {
         Ok(value) => println!("{value}"),
         Err(error) => {
-            eprintln!("warning: failed to encode JSON output: {error}");
+            eprintln!(
+                "{}",
+                t!(
+                    "common.warning",
+                    message = t!("cli.client.json_encode_warning", error = error)
+                )
+            );
             println!("{fallback}");
         }
     }

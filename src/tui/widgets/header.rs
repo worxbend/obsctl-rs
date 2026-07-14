@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
+use rust_i18n::t;
 
 use crate::tui::model::TuiModel;
 
@@ -12,9 +13,15 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
 
     let daemon_status = if model.connected_to_daemon {
-        Span::styled("daemon: connected", Style::default().fg(theme.success))
+        Span::styled(
+            t!("tui.header.daemon_connected").into_owned(),
+            Style::default().fg(theme.success),
+        )
     } else {
-        Span::styled("daemon: disconnected", Style::default().fg(theme.danger))
+        Span::styled(
+            t!("tui.header.daemon_disconnected").into_owned(),
+            Style::default().fg(theme.danger),
+        )
     };
 
     let obs_status = if model.obs_connected() {
@@ -24,22 +31,28 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             .and_then(|s| s.obs_studio_version.as_deref())
             .unwrap_or("?");
         Span::styled(
-            format!("OBS: connected (v{ver})"),
+            t!("tui.header.obs_connected", version = ver).into_owned(),
             Style::default().fg(theme.success),
         )
     } else {
-        Span::styled("OBS: disconnected", Style::default().fg(theme.warning))
+        Span::styled(
+            t!("tui.header.obs_disconnected").into_owned(),
+            Style::default().fg(theme.warning),
+        )
     };
 
     let scene_span = if let Some(scene) = model.current_scene() {
-        Span::styled(format!("  scene: {scene}"), Style::default().fg(theme.fg))
+        Span::styled(
+            t!("tui.header.scene", scene = scene).into_owned(),
+            Style::default().fg(theme.fg),
+        )
     } else {
         Span::raw("")
     };
 
     let profile_span = if let Some(profile) = model.current_profile() {
         Span::styled(
-            format!("  profile: {profile}"),
+            t!("tui.header.profile", profile = profile).into_owned(),
             Style::default().fg(theme.muted),
         )
     } else {

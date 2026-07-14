@@ -1,0 +1,82 @@
+# Default English strings, embedded into the obsctl binary at compile time.
+#
+# This file is the ultimate fallback: if no locale override files are found
+# under `<config_dir>/locales/`, these strings are always used regardless of
+# the configured `ui.locale`. See contrib/locales/uk.yml for the Ukrainian
+# translation shipped alongside the binary (copy it into `<config_dir>/locales/`
+# to enable it) and README.md's "Localization" section for details.
+
+common:
+  error: "error: %{message}"
+  warning: "warning: %{message}"
+
+cli:
+  init:
+    no_config_dir: "could not determine config directory"
+    already_exists: "Config already exists at %{path}. Use --force to overwrite."
+    success: "Initialized config at %{path}"
+
+  validate:
+    no_config_path: "could not determine config path"
+    valid: "Config is valid."
+    valid_with_warnings: "Config is valid with %{count} warning(s)."
+
+  setup:
+    no_config_found: "No config found at %{path}."
+    create_minimal: "Let's create a minimal config.\n\n"
+    failed: "Setup failed: %{error}"
+    written: "\nConfig written to %{path}.\n\n"
+    prompt_host: "OBS host"
+    prompt_port: "OBS port"
+    prompt_password: "OBS WebSocket password (blank = no auth)"
+    port_out_of_range: "  Port must be in range 1-65535."
+    port_invalid: "  Invalid port, enter an integer 1-65535."
+
+  tui:
+    error: "tui error: %{error}"
+
+  runtime:
+    async_start_failed: "failed to start async runtime for %{context}: %{error}"
+
+  service:
+    no_unit_dir: "could not determine systemd user unit directory"
+    installed: "Service installed at %{path}"
+    enable_hint: "Enable with: %{hint}"
+    uninstalled: "Service uninstalled."
+    action_started: "Service started."
+    action_stopped: "Service stopped."
+    action_restarted: "Service restarted."
+
+  proxy:
+    unsupported_command: "command %{command} is not supported for server proxying"
+
+  client:
+    server_unavailable_intro: "obsctl server is not running."
+    server_unavailable_start: "Start it with:"
+    server_unavailable_or_install: "Or install the service:"
+    unexpected_event: "unexpected event instead of response"
+    json_encode_warning: "failed to encode JSON output: %{error}"
+    error_with_code: "error [%{code}]: %{message}"
+
+tui:
+  header:
+    daemon_connected: "daemon: connected"
+    daemon_disconnected: "daemon: disconnected"
+    obs_connected: "OBS: connected (v%{version})"
+    obs_disconnected: "OBS: disconnected"
+    scene: "  scene: %{scene}"
+    profile: "  profile: %{profile}"
+
+  connection:
+    daemon_not_running: "obsctl server is not running"
+    could_not_connect: "Could not connect to obsctl daemon."
+    start_daemon_with: "Start the daemon with:"
+    or_install_service: "Or install the service:"
+    press_r_to_retry: "Press R to retry, q to quit."
+    not_connected: "Not connected to obsctl daemon."
+    obs_connected: "OBS: connected"
+    obs_disconnected: "OBS: disconnected"
+    last_error: "last error: %{error}"
+    waiting_for_state: "Waiting for state..."
+    title: " Connection "
+    title_unavailable: " obsctl — daemon unavailable "

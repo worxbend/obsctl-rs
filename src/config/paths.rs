@@ -1,5 +1,5 @@
 use crate::support::validation::read_env_path_token;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn default_config_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "obsctl").map(|d| d.config_dir().join("config.yml"))
@@ -17,6 +17,18 @@ pub fn config_path() -> Option<PathBuf> {
         return Some(candidate);
     }
     default_config_path()
+}
+
+/// Directory that holds locale override files (`en.yml`, `uk.yml`, ...),
+/// sitting alongside whichever config file is in effect. Falls back to the
+/// default config directory when `config_path` is `None` (e.g. no config
+/// file could be resolved at all).
+pub fn locales_dir(config_path: Option<&Path>) -> Option<PathBuf> {
+    let base = match config_path {
+        Some(p) => p.parent().map(Path::to_path_buf),
+        None => default_config_path().and_then(|p| p.parent().map(Path::to_path_buf)),
+    }?;
+    Some(base.join("locales"))
 }
 
 pub fn default_log_path() -> Option<PathBuf> {
@@ -83,6 +95,22 @@ mod tests {
         with_obsctl_config_env(Some("  /tmp/obsctl.yml  "), || {
             assert_eq!(config_path(), Some(PathBuf::from("/tmp/obsctl.yml")));
         });
+    }
+
+    #[test]
+    fn locales_dir_sits_beside_given_config_path() {
+        let dir = locales_dir(Some(Path::new("/tmp/obsctl-test/config.yml"))).unwrap();
+        assert_eq!(dir, PathBuf::from("/tmp/obsctl-test/locales"));
+    }
+
+    #[test]
+    fn locales_dir_falls_back_to_default_config_dir() {
+        let expected = default_config_path()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("locales");
+        assert_eq!(locales_dir(None), Some(expected));
     }
 
     #[test]
