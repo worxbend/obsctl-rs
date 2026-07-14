@@ -789,6 +789,7 @@ fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> 
         Commands::ShutdownServer => ctx.shutdown_server(),
         Commands::Scene { target } => ctx.scene(&target),
         Commands::Profile { target } => ctx.profile(&target),
+        Commands::Collection { target } => ctx.scene_collection(&target),
         Commands::Mute { target } => ctx.mute(&target),
         Commands::Unmute { target } => ctx.unmute(&target),
         Commands::ToggleMute { target } => ctx.toggle_mute(&target),

@@ -10,12 +10,15 @@ The TUI provides a real-time, themeable dashboard with:
 - **Scenes panel** (`s` to focus) — navigate with `j`/`k` or arrow keys, `Enter` to switch; the newly active scene briefly flashes
 - **Audio panel** (`a` to focus) — `m` to mute/unmute, `h`/`l` or `←`/`→` to adjust volume ±5%, cava-style live level bars
 - **Profiles panel** (`p` to focus) — `Enter` to switch OBS profiles
+- **Collections panel** (`c` to focus) — `Enter` to switch OBS scene collections
 - **Status bar** — animated LIVE/REC badges (pulse while active, show elapsed duration) plus polled CPU%, FPS, memory, and derived stream bitrate
 - **Logs panel** — compact streaming server and OBS event log
-- **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/mute`, `/vol`, `/stream`, `/rec`; results stream in with a typewriter animation
+- **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/collection`, `/mute`, `/vol`, `/stream`, `/rec`; results stream in with a typewriter animation
 - **Header** — daemon/OBS connection status, active scene, active profile
 - **Settings view** (`F2`, `Ctrl-T`, or `/themes`) — btop-style theme picker with live preview across the whole UI; `Enter` persists the choice, `Esc` reverts
 - A short animated splash screen (~2s, skippable by any keypress) on launch
+
+Dashboard layout, top to bottom: header, status bar, a scenes/audio row (larger, since those lists tend to be longer), a profiles/collections row (smaller), logs, and the command palette.
 
 See [Themes](#themes) for the full list of built-in themes and how to define a custom palette.
 
@@ -203,6 +206,7 @@ Global options:
 | `obsctl obs-status` | Show OBS connection status |
 | `obsctl scene <target>` | Change current program scene |
 | `obsctl profile <target>` | Switch OBS profile |
+| `obsctl collection <target>` (alias `scene-collection`) | Switch OBS scene collection |
 | `obsctl mute <target>` | Mute audio input |
 | `obsctl unmute <target>` | Unmute audio input |
 | `obsctl toggle-mute <target>` | Toggle audio input mute |
@@ -221,7 +225,7 @@ Global options:
 | `Enter` | Submit palette command |
 | `Esc` | Cancel palette editing |
 | `F2` or `Ctrl-T` | Open/close the settings (theme) view |
-| `s` / `a` / `p` | Focus the scenes / audio / profiles panel |
+| `s` / `a` / `p` / `c` | Focus the scenes / audio / profiles / collections panel |
 | `q` | Quit |
 | `r` | Reload config |
 | `D` | Dump config |
@@ -240,6 +244,8 @@ Type `/` to open the palette, then use any of:
 /set-scene <target>
 /profile <target>
 /set-profile <target>
+/collection <target>
+/scene-collection <target>
 /mute <target>
 /unmute <target>
 /toggle-mute <target>

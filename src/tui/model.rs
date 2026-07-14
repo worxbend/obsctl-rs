@@ -14,6 +14,7 @@ pub enum FocusPanel {
     Scenes,
     Audio,
     Profiles,
+    Collections,
 }
 
 /// Top-level screen the TUI is showing.
@@ -39,6 +40,7 @@ pub struct TuiModel {
     pub scene_cursor: usize,
     pub audio_cursor: usize,
     pub profile_cursor: usize,
+    pub collection_cursor: usize,
     /// Latest RMS magnitude (0-1) per input name, updated from InputVolumeMeters events.
     pub meter_levels: HashMap<String, f32>,
     /// Active color theme, chosen via config or the settings view.
@@ -74,6 +76,7 @@ impl Default for TuiModel {
             scene_cursor: 0,
             audio_cursor: 0,
             profile_cursor: 0,
+            collection_cursor: 0,
             meter_levels: HashMap::new(),
             theme: Theme::default_theme(),
             anim: AnimClock::default(),
@@ -204,6 +207,19 @@ impl TuiModel {
             .and_then(|s| s.current_profile.as_deref())
     }
 
+    pub fn scene_collections(&self) -> &[String] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.scene_collections.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn current_scene_collection(&self) -> Option<&str> {
+        self.snapshot
+            .as_ref()
+            .and_then(|s| s.current_scene_collection.as_deref())
+    }
+
     pub fn stats(&self) -> Option<&crate::obs::state::ObsStats> {
         self.snapshot.as_ref().and_then(|s| s.stats.as_ref())
     }
@@ -235,6 +251,9 @@ impl TuiModel {
             FocusPanel::Scenes => self.scene_cursor = self.scene_cursor.saturating_sub(1),
             FocusPanel::Audio => self.audio_cursor = self.audio_cursor.saturating_sub(1),
             FocusPanel::Profiles => self.profile_cursor = self.profile_cursor.saturating_sub(1),
+            FocusPanel::Collections => {
+                self.collection_cursor = self.collection_cursor.saturating_sub(1)
+            }
         }
     }
 
@@ -258,6 +277,12 @@ impl TuiModel {
                     self.profile_cursor += 1;
                 }
             }
+            FocusPanel::Collections => {
+                let max = self.scene_collections().len().saturating_sub(1);
+                if self.collection_cursor < max {
+                    self.collection_cursor += 1;
+                }
+            }
         }
     }
 
@@ -274,6 +299,8 @@ impl TuiModel {
         self.audio_cursor = self.audio_cursor.min(audio_max);
         let profile_max = self.profiles().len().saturating_sub(1);
         self.profile_cursor = self.profile_cursor.min(profile_max);
+        let collection_max = self.scene_collections().len().saturating_sub(1);
+        self.collection_cursor = self.collection_cursor.min(collection_max);
     }
 
     pub fn focused_scene(&self) -> Option<&SceneState> {
@@ -286,6 +313,12 @@ impl TuiModel {
 
     pub fn focused_profile(&self) -> Option<&str> {
         self.profiles().get(self.profile_cursor).map(String::as_str)
+    }
+
+    pub fn focused_scene_collection(&self) -> Option<&str> {
+        self.scene_collections()
+            .get(self.collection_cursor)
+            .map(String::as_str)
     }
 }
 
@@ -359,6 +392,27 @@ mod tests {
         assert_eq!(model.focused_profile(), Some("Streaming"));
         model.move_up();
         assert_eq!(model.focused_profile(), Some("Default"));
+    }
+
+    #[test]
+    fn scene_collection_navigation_clamps_and_focuses() {
+        let mut model = TuiModel {
+            snapshot: Some(ObsSnapshot {
+                scene_collections: vec!["Podcast".to_string(), "Gaming".to_string()],
+                ..Default::default()
+            }),
+            focus: FocusPanel::Collections,
+            ..Default::default()
+        };
+        model.clamp_cursors();
+
+        assert_eq!(model.focused_scene_collection(), Some("Podcast"));
+        model.move_down();
+        assert_eq!(model.focused_scene_collection(), Some("Gaming"));
+        model.move_down(); // already at last entry; stays put
+        assert_eq!(model.focused_scene_collection(), Some("Gaming"));
+        model.move_up();
+        assert_eq!(model.focused_scene_collection(), Some("Podcast"));
     }
 
     #[test]

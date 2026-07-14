@@ -99,6 +99,9 @@ impl CommandExecutor {
                 ServerCommand::GetSnapshot => self.cmd_get_snapshot().await,
                 ServerCommand::SetScene => self.cmd_set_scene(&payload.args).await,
                 ServerCommand::SetProfile => self.cmd_set_profile(&payload.args).await,
+                ServerCommand::SetSceneCollection => {
+                    self.cmd_set_scene_collection(&payload.args).await
+                }
                 ServerCommand::Mute => self.cmd_set_mute(&payload.args, true).await,
                 ServerCommand::Unmute => self.cmd_set_mute(&payload.args, false).await,
                 ServerCommand::ToggleMute => self.cmd_toggle_mute(&payload.args).await,
@@ -200,6 +203,26 @@ impl CommandExecutor {
             .await?;
         info!("Profile set to: {target}");
         Ok(json!({ "message": format!("profile set: {target}") }))
+    }
+
+    async fn cmd_set_scene_collection(&self, args: &Value) -> crate::domain::result::Result<Value> {
+        let target = required_string(args, "target")?;
+        let client = self.require_obs().await?;
+
+        let snap = self.state.read().await;
+        let known = snap.scene_collections.iter().any(|c| c == &target);
+        drop(snap);
+        if !known {
+            return Err(ObsctlError::ObsRequestFailed(format!(
+                "unknown scene collection: {target}"
+            )));
+        }
+
+        client
+            .request(requests::set_current_scene_collection(&target)?)
+            .await?;
+        info!("Scene collection set to: {target}");
+        Ok(json!({ "message": format!("scene collection set: {target}") }))
     }
 
     async fn cmd_set_mute(
@@ -489,6 +512,7 @@ enum ServerCommand {
     GetSnapshot,
     SetScene,
     SetProfile,
+    SetSceneCollection,
     Mute,
     Unmute,
     ToggleMute,
@@ -516,7 +540,7 @@ impl ServerCommand {
             | Self::DumpConfig
             | Self::ToggleStream
             | Self::ToggleRecord => validate_empty_payload(args, self.name()),
-            Self::SetScene | Self::SetProfile => {
+            Self::SetScene | Self::SetProfile | Self::SetSceneCollection => {
                 validate_object_args(args, self.name(), &["target"])
             }
             Self::Mute | Self::Unmute | Self::ToggleMute => {
@@ -534,6 +558,7 @@ impl ServerCommand {
             Self::GetSnapshot => "get_snapshot",
             Self::SetScene => "set_scene",
             Self::SetProfile => "set_profile",
+            Self::SetSceneCollection => "set_scene_collection",
             Self::Mute => "mute",
             Self::Unmute => "unmute",
             Self::ToggleMute => "toggle_mute",
@@ -557,6 +582,7 @@ fn parse_server_command(name: &str) -> Result<ServerCommand> {
         "get_snapshot" => Ok(ServerCommand::GetSnapshot),
         "set_scene" => Ok(ServerCommand::SetScene),
         "set_profile" => Ok(ServerCommand::SetProfile),
+        "set_scene_collection" => Ok(ServerCommand::SetSceneCollection),
         "mute" => Ok(ServerCommand::Mute),
         "unmute" => Ok(ServerCommand::Unmute),
         "toggle_mute" => Ok(ServerCommand::ToggleMute),
@@ -777,6 +803,7 @@ mod tests {
             ("get_snapshot", ServerCommand::GetSnapshot),
             ("set_scene", ServerCommand::SetScene),
             ("set_profile", ServerCommand::SetProfile),
+            ("set_scene_collection", ServerCommand::SetSceneCollection),
             ("mute", ServerCommand::Mute),
             ("unmute", ServerCommand::Unmute),
             ("toggle_mute", ServerCommand::ToggleMute),

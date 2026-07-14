@@ -227,6 +227,10 @@ pub enum ObsEventPayload {
         profile_name: String,
     },
     ProfileListChanged,
+    CurrentSceneCollectionChanged {
+        scene_collection_name: String,
+    },
+    SceneCollectionListChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -466,6 +470,8 @@ mod tests {
             ObsEventPayload::RecordStateChanged { .. } => {}
             ObsEventPayload::CurrentProfileChanged { .. } => {}
             ObsEventPayload::ProfileListChanged => {}
+            ObsEventPayload::CurrentSceneCollectionChanged { .. } => {}
+            ObsEventPayload::SceneCollectionListChanged => {}
         }
     }
 
@@ -686,6 +692,8 @@ mod tests {
                     "recording": false,
                     "profiles": [],
                     "current_profile": null,
+                    "scene_collections": [],
+                    "current_scene_collection": null,
                     "last_error": null,
                     "stats": null,
                     "stream_bitrate_kbps": null,
@@ -790,6 +798,19 @@ mod tests {
             (
                 ObsEventPayload::ProfileListChanged,
                 json!({ "type": "ProfileListChanged" }),
+            ),
+            (
+                ObsEventPayload::CurrentSceneCollectionChanged {
+                    scene_collection_name: "Podcast".to_string(),
+                },
+                json!({
+                    "type": "CurrentSceneCollectionChanged",
+                    "scene_collection_name": "Podcast"
+                }),
+            ),
+            (
+                ObsEventPayload::SceneCollectionListChanged,
+                json!({ "type": "SceneCollectionListChanged" }),
             ),
         ];
 

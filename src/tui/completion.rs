@@ -5,6 +5,7 @@ const ALL_COMMANDS: &[&str] = &[
     "/themes",
     "/scene",
     "/profile",
+    "/collection",
     "/mute",
     "/unmute",
     "/toggle-mute",
@@ -78,6 +79,19 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
         "/profile" | "/set-profile" => {
             let mut candidates: Vec<String> = model
                 .profiles()
+                .iter()
+                .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
+                .cloned()
+                .collect();
+            sort_candidates(&mut candidates, arg_prefix);
+            candidates
+                .into_iter()
+                .map(|c| format!("{cmd} {c}"))
+                .collect()
+        }
+        "/collection" | "/set-collection" | "/scene-collection" => {
+            let mut candidates: Vec<String> = model
+                .scene_collections()
                 .iter()
                 .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
                 .cloned()
@@ -201,6 +215,18 @@ mod tests {
         let result = compute("/profile S", &model);
         assert!(result.contains(&"/profile Streaming".to_string()));
         assert!(!result.iter().any(|s| s.contains("Default")));
+    }
+
+    #[test]
+    fn collection_arg_filter() {
+        let mut model = make_model(vec![], vec![]);
+        model.snapshot = Some(ObsSnapshot {
+            scene_collections: vec!["Podcast".to_string(), "Gaming".to_string()],
+            ..Default::default()
+        });
+        let result = compute("/collection G", &model);
+        assert!(result.contains(&"/collection Gaming".to_string()));
+        assert!(!result.iter().any(|s| s.contains("Podcast")));
     }
 
     #[test]

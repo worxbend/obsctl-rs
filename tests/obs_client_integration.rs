@@ -195,6 +195,48 @@ fn set_current_profile_request_is_dispatched() {
 }
 
 #[test]
+fn get_scene_collection_list_request_returns_collections_and_current() {
+    rt().block_on(async {
+        let server = spawn_fake_obs(false, None).await;
+        let (client, _, _, _) = connect_to_fake(server.addr, None).await;
+
+        let result = client
+            .request(requests::get_scene_collection_list())
+            .await
+            .expect("get_scene_collection_list");
+        assert_eq!(
+            result
+                .get("currentSceneCollectionName")
+                .and_then(|v| v.as_str()),
+            Some("Podcast")
+        );
+        let collections = result
+            .get("sceneCollections")
+            .and_then(|v| v.as_array())
+            .expect("sceneCollections array");
+        assert_eq!(collections.len(), 2);
+        server.shutdown();
+    });
+}
+
+#[test]
+fn set_current_scene_collection_request_is_dispatched() {
+    rt().block_on(async {
+        let server = spawn_fake_obs(false, None).await;
+        let (client, _, _, _) = connect_to_fake(server.addr, None).await;
+
+        let result = client
+            .request(requests::set_current_scene_collection("Gaming").unwrap())
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected SetCurrentSceneCollection to succeed"
+        );
+        server.shutdown();
+    });
+}
+
+#[test]
 fn set_current_program_scene_request_is_dispatched() {
     rt().block_on(async {
         let mut server = spawn_fake_obs(false, None).await;

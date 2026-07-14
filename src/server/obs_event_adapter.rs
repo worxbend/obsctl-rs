@@ -51,6 +51,12 @@ pub fn normalize_obs_event(event: &ObsEvent) -> Option<ObsEventPayload> {
             })
         }
         ObsEvent::ProfileListChanged => Some(ObsEventPayload::ProfileListChanged),
+        ObsEvent::CurrentSceneCollectionChanged {
+            scene_collection_name,
+        } => Some(ObsEventPayload::CurrentSceneCollectionChanged {
+            scene_collection_name: scene_collection_name.clone(),
+        }),
+        ObsEvent::SceneCollectionListChanged => Some(ObsEventPayload::SceneCollectionListChanged),
         ObsEvent::Other { .. } => None,
     }
 }
@@ -105,5 +111,24 @@ mod tests {
             payload,
             Some(ObsEventPayload::RecordStateChanged { active: false })
         );
+    }
+
+    #[test]
+    fn scene_collection_changed_creates_public_payload() {
+        let payload = normalize_obs_event(&ObsEvent::CurrentSceneCollectionChanged {
+            scene_collection_name: "Podcast".to_string(),
+        });
+        assert_eq!(
+            payload,
+            Some(ObsEventPayload::CurrentSceneCollectionChanged {
+                scene_collection_name: "Podcast".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn scene_collection_list_changed_creates_public_payload() {
+        let payload = normalize_obs_event(&ObsEvent::SceneCollectionListChanged);
+        assert_eq!(payload, Some(ObsEventPayload::SceneCollectionListChanged));
     }
 }

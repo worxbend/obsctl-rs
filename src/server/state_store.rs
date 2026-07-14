@@ -221,6 +221,20 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
             // Full refresh needed; the supervisor will fetch a new snapshot.
             true
         }
+        ObsEvent::CurrentSceneCollectionChanged {
+            scene_collection_name,
+        } => {
+            if snapshot.current_scene_collection.as_deref() == Some(&scene_collection_name) {
+                return false;
+            }
+            snapshot.current_scene_collection = Some(scene_collection_name);
+            snapshot.updated_at = OffsetDateTime::now_utc();
+            true
+        }
+        ObsEvent::SceneCollectionListChanged => {
+            // Full refresh needed; the supervisor will fetch a new snapshot.
+            true
+        }
         // High-frequency; don't update the snapshot or broadcast.
         ObsEvent::InputVolumeMeters { .. } => false,
         ObsEvent::Other { .. } => false,
@@ -241,6 +255,8 @@ pub fn build_snapshot(
     recording: bool,
     profiles: &[String],
     current_profile: &str,
+    scene_collections: &[String],
+    current_scene_collection: &str,
 ) -> ObsSnapshot {
     let scenes: Vec<SceneState> = scenes
         .iter()
@@ -286,6 +302,9 @@ pub fn build_snapshot(
         recording,
         profiles: profiles.to_vec(),
         current_profile: (!current_profile.is_empty()).then(|| current_profile.to_string()),
+        scene_collections: scene_collections.to_vec(),
+        current_scene_collection: (!current_scene_collection.is_empty())
+            .then(|| current_scene_collection.to_string()),
         updated_at: OffsetDateTime::now_utc(),
         ..ObsSnapshot::default()
     }
@@ -433,9 +452,32 @@ mod tests {
             false,
             &["Default".to_string(), "Streaming".to_string()],
             "Streaming",
+            &["Podcast".to_string(), "Gaming".to_string()],
+            "Gaming",
         );
         assert_eq!(snapshot.profiles, vec!["Default", "Streaming"]);
         assert_eq!(snapshot.current_profile.as_deref(), Some("Streaming"));
+        assert_eq!(snapshot.scene_collections, vec!["Podcast", "Gaming"]);
+        assert_eq!(snapshot.current_scene_collection.as_deref(), Some("Gaming"));
+    }
+
+    #[tokio::test]
+    async fn apply_event_scene_collection_change() {
+        let store = make_store();
+        let snap = ObsSnapshot {
+            current_scene_collection: Some("Podcast".to_string()),
+            ..ObsSnapshot::default()
+        };
+        store.replace(snap).await;
+
+        store
+            .apply_event(ObsEvent::CurrentSceneCollectionChanged {
+                scene_collection_name: "Gaming".to_string(),
+            })
+            .await;
+
+        let current = store.read().await;
+        assert_eq!(current.current_scene_collection.as_deref(), Some("Gaming"));
     }
 
     #[tokio::test]

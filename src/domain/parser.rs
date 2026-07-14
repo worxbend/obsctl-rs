@@ -53,6 +53,17 @@ pub fn parse(input: &str) -> Result<Command> {
                 target: sanitize_target(maybe_target)?,
             })
         }
+        "collection" | "set-collection" | "scene-collection" => {
+            if args.len() != 1 {
+                return Err(ObsctlError::CommandParseError(format!(
+                    "collection expects 1 argument, got {}",
+                    args.len()
+                )));
+            }
+            Ok(Command::SetSceneCollection {
+                target: sanitize_target(maybe_target)?,
+            })
+        }
         "mute" => {
             if args.len() != 1 {
                 return Err(ObsctlError::CommandParseError(format!(
@@ -222,6 +233,24 @@ mod tests {
         );
         assert!(parse("profile").is_err());
         assert!(parse("profile a b").is_err());
+    }
+
+    #[test]
+    fn parse_scene_collection_command() {
+        assert_eq!(
+            parse("collection Podcast").unwrap(),
+            Command::SetSceneCollection {
+                target: "Podcast".to_string()
+            }
+        );
+        assert_eq!(
+            parse("scene-collection Podcast").unwrap(),
+            Command::SetSceneCollection {
+                target: "Podcast".to_string()
+            }
+        );
+        assert!(parse("collection").is_err());
+        assert!(parse("collection a b").is_err());
     }
 
     #[test]

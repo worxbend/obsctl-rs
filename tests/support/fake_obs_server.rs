@@ -460,6 +460,10 @@ fn default_response(request_type: &str) -> Value {
             "currentProfileName": "Default",
             "profiles": ["Default", "Streaming"],
         }),
+        "GetSceneCollectionList" => json!({
+            "currentSceneCollectionName": "Podcast",
+            "sceneCollections": ["Podcast", "Gaming"],
+        }),
         _ => Value::Null,
     }
 }

@@ -17,6 +17,12 @@ pub struct ObsSnapshot {
     /// Name of the currently active OBS profile.
     #[serde(default)]
     pub current_profile: Option<String>,
+    /// All OBS scene collection names (`GetSceneCollectionList.sceneCollections`).
+    #[serde(default)]
+    pub scene_collections: Vec<String>,
+    /// Name of the currently active OBS scene collection.
+    #[serde(default)]
+    pub current_scene_collection: Option<String>,
     pub last_error: Option<String>,
     /// CPU/memory/disk/render performance stats, polled periodically from
     /// `GetStats`. `None` until the first poll completes after connecting.
@@ -50,6 +56,8 @@ impl Default for ObsSnapshot {
             recording: false,
             profiles: Vec::new(),
             current_profile: None,
+            scene_collections: Vec::new(),
+            current_scene_collection: None,
             last_error: None,
             stats: None,
             stream_bitrate_kbps: None,

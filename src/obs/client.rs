@@ -16,12 +16,17 @@ use crate::obs::validation::extract_resource_names;
 use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
 const ES_GENERAL: u32 = 1;
+/// Profile and scene-collection change/list events live under this scope in
+/// obs-websocket, not `General` — without it, OBS never sends
+/// `CurrentProfileChanged`/`ProfileListChanged`/`CurrentSceneCollectionChanged`/
+/// `SceneCollectionListChanged` to this client.
+const ES_CONFIG: u32 = 2;
 const ES_SCENES: u32 = 4;
 const ES_INPUTS: u32 = 8;
 const ES_OUTPUTS: u32 = 64;
 const ES_INPUT_VOLUME_METERS: u32 = 65536;
 const EVENT_SUBSCRIPTIONS: u32 =
-    ES_GENERAL | ES_SCENES | ES_INPUTS | ES_OUTPUTS | ES_INPUT_VOLUME_METERS;
+    ES_GENERAL | ES_CONFIG | ES_SCENES | ES_INPUTS | ES_OUTPUTS | ES_INPUT_VOLUME_METERS;
 
 /// Events emitted by the OBS client to its supervisor.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +64,10 @@ pub enum ObsEvent {
         profile_name: String,
     },
     ProfileListChanged,
+    CurrentSceneCollectionChanged {
+        scene_collection_name: String,
+    },
+    SceneCollectionListChanged,
     Other {
         event_type: String,
         data: Value,
@@ -606,6 +615,13 @@ async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
             },
         },
         "ProfileListChanged" => ObsEvent::ProfileListChanged,
+        "CurrentSceneCollectionChanged" => ObsEvent::CurrentSceneCollectionChanged {
+            scene_collection_name: match required_str("sceneCollectionName") {
+                Some(value) => value,
+                None => return,
+            },
+        },
+        "SceneCollectionListChanged" => ObsEvent::SceneCollectionListChanged,
         _ => ObsEvent::Other {
             event_type,
             data: event_data,
@@ -677,6 +693,43 @@ mod tests {
             dispatch_event(data, &tx).await;
             let event = rx.recv().await.unwrap();
             assert!(matches!(event, ObsEvent::ProfileListChanged));
+        });
+    }
+
+    #[test]
+    fn obs_event_dispatches_scene_collection_change() {
+        let data = serde_json::json!({
+            "eventType": "CurrentSceneCollectionChanged",
+            "eventData": { "sceneCollectionName": "Podcast" }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            let event = rx.recv().await.unwrap();
+            match event {
+                ObsEvent::CurrentSceneCollectionChanged {
+                    scene_collection_name,
+                } => {
+                    assert_eq!(scene_collection_name, "Podcast");
+                }
+                _ => panic!("wrong event type"),
+            }
+        });
+    }
+
+    #[test]
+    fn obs_event_dispatches_scene_collection_list_changed() {
+        let data = serde_json::json!({
+            "eventType": "SceneCollectionListChanged",
+            "eventData": {}
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            let event = rx.recv().await.unwrap();
+            assert!(matches!(event, ObsEvent::SceneCollectionListChanged));
         });
     }
 

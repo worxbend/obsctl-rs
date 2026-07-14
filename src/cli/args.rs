@@ -68,6 +68,11 @@ pub enum Commands {
         #[arg(value_parser = non_blank_trimmed)]
         target: String,
     },
+    #[command(alias = "scene-collection")]
+    Collection {
+        #[arg(value_parser = non_blank_trimmed)]
+        target: String,
+    },
     Mute {
         #[arg(value_parser = non_blank_trimmed)]
         target: String,

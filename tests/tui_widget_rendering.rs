@@ -67,6 +67,8 @@ fn snap_connected() -> ObsSnapshot {
         recording: false,
         profiles: vec!["Default".into(), "Streaming".into()],
         current_profile: Some("Default".into()),
+        scene_collections: vec!["Podcast".into(), "Gaming".into()],
+        current_scene_collection: Some("Podcast".into()),
         updated_at: OffsetDateTime::now_utc(),
         ..ObsSnapshot::default()
     }
@@ -432,6 +434,76 @@ fn profiles_renders_empty_list_without_panic() {
     .unwrap();
     let out = buf_string(&t);
     assert!(out.contains("Profiles"), "should still render block title");
+}
+
+// ── collections widget ──────────────────────────────────────────────────────
+
+#[test]
+fn collections_renders_active_collection_marker() {
+    let model = model_connected();
+    let mut t = term(60, 10);
+    t.draw(|f| {
+        widgets::collections::render(f, Rect::new(0, 0, 60, 10), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("Collections"), "should show Collections title");
+    assert!(out.contains("Podcast"), "should show collection name");
+    assert!(out.contains("Gaming"), "should show all collections");
+    assert!(out.contains("▶"), "should show active marker");
+}
+
+#[test]
+fn collections_renders_empty_list_without_panic() {
+    let mut model = model_connected();
+    if let Some(ref mut snap) = model.snapshot {
+        snap.scene_collections.clear();
+        snap.current_scene_collection = None;
+    }
+    let mut t = term(60, 10);
+    t.draw(|f| {
+        widgets::collections::render(f, Rect::new(0, 0, 60, 10), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.contains("Collections"),
+        "should still render block title"
+    );
+}
+
+// ── full dashboard layout ────────────────────────────────────────────────────
+
+#[test]
+fn full_dashboard_renders_all_panels_with_new_layout() {
+    use obsctl_rs::tui::layout;
+
+    let model = model_connected();
+    let mut t = term(100, 40);
+    t.draw(|f| {
+        let areas = layout::compute(f);
+        widgets::header::render(f, areas.header, &model);
+        widgets::live_bar::render(f, areas.live_bar, &model);
+        widgets::scenes::render(f, areas.scenes, &model);
+        widgets::audio::render(f, areas.audio, &model);
+        widgets::profiles::render(f, areas.profiles, &model);
+        widgets::collections::render(f, areas.collections, &model);
+        widgets::logs::render(f, areas.logs, &model);
+        widgets::command_palette::render(f, areas.palette, &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("Scenes"), "scenes panel should render");
+    assert!(out.contains("Audio"), "audio panel should render");
+    assert!(out.contains("Profiles"), "profiles panel should render");
+    assert!(
+        out.contains("Collections"),
+        "collections panel should render"
+    );
+    assert!(out.contains("Main"), "scene name should render");
+    assert!(out.contains("Mic"), "audio input name should render");
+    assert!(out.contains("Streaming"), "profile name should render");
+    assert!(out.contains("Gaming"), "collection name should render");
 }
 
 // ── logs widget ──────────────────────────────────────────────────────────────

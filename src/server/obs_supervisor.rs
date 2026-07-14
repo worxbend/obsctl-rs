@@ -201,7 +201,9 @@ impl ObsSupervisor {
             while let Some(event) = event_rx.recv().await {
                 let needs_full_refresh = matches!(
                     event,
-                    ObsEvent::SceneListChanged | ObsEvent::ProfileListChanged
+                    ObsEvent::SceneListChanged
+                        | ObsEvent::ProfileListChanged
+                        | ObsEvent::SceneCollectionListChanged
                 );
 
                 // Log notable remote OBS changes before applying them.
@@ -403,6 +405,26 @@ async fn fetch_and_publish_snapshot_from(
             (Vec::new(), String::new())
         });
 
+    let (scene_collections, current_scene_collection) = client
+        .request(requests::get_scene_collection_list())
+        .await
+        .ok()
+        .map(|v| {
+            let collections = crate::obs::validation::extract_string_array(&v, "sceneCollections")
+                .ok()
+                .unwrap_or_default();
+            let current = v
+                .get("currentSceneCollectionName")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string();
+            (collections, current)
+        })
+        .unwrap_or_else(|| {
+            warn!("Malformed or missing GetSceneCollectionList response");
+            (Vec::new(), String::new())
+        });
+
     let cfg = config.lock().await;
     let mut snapshot = build_snapshot(
         obs_version,
@@ -416,6 +438,8 @@ async fn fetch_and_publish_snapshot_from(
         recording,
         &profiles,
         &current_profile,
+        &scene_collections,
+        &current_scene_collection,
     );
     drop(cfg);
 
@@ -541,6 +565,12 @@ fn log_obs_event(hub: &BroadcastHub, event: &ObsEvent) {
             Some(format!("OBS: profile changed → {profile_name}"))
         }
         ProfileListChanged => Some("OBS: profile list changed".to_string()),
+        CurrentSceneCollectionChanged {
+            scene_collection_name,
+        } => Some(format!(
+            "OBS: scene collection changed → {scene_collection_name}"
+        )),
+        SceneCollectionListChanged => Some("OBS: scene collection list changed".to_string()),
         // High-frequency or uninteresting — don't flood the log.
         InputVolumeMeters { .. } | Other { .. } => None,
     };

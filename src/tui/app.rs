@@ -276,6 +276,10 @@ async fn handle_action(
             model.focus = FocusPanel::Profiles;
             (false, None)
         }
+        TuiAction::FocusCollections => {
+            model.focus = FocusPanel::Collections;
+            (false, None)
+        }
         TuiAction::NavUp => {
             model.move_up();
             (false, None)
@@ -295,6 +299,15 @@ async fn handle_action(
         TuiAction::ActivateProfile => {
             if let Some(name) = model.focused_profile().map(str::to_string) {
                 let result = send_simple_with_target(socket_path, "set_profile", &name).await;
+                (false, Some(result))
+            } else {
+                (false, None)
+            }
+        }
+        TuiAction::ActivateCollection => {
+            if let Some(name) = model.focused_scene_collection().map(str::to_string) {
+                let result =
+                    send_simple_with_target(socket_path, "set_scene_collection", &name).await;
                 (false, Some(result))
             } else {
                 (false, None)
@@ -425,6 +438,7 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) {
     widgets::scenes::render(f, areas.scenes, model);
     widgets::audio::render(f, areas.audio, model);
     widgets::profiles::render(f, areas.profiles, model);
+    widgets::collections::render(f, areas.collections, model);
     widgets::logs::render(f, areas.logs, model);
     widgets::command_palette::render(f, areas.palette, model);
 }
@@ -441,8 +455,8 @@ async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
         Ok(Command::Quit) => "quit".to_string(),
         Ok(Command::Themes) => "themes".to_string(),
         Ok(Command::Help) => {
-            "Commands: /scene /profile /mute /unmute /toggle-mute /vol /stream /rec /status \
-             /obs-status /server-status /reload-config /dump-config /validate-config \
+            "Commands: /scene /profile /collection /mute /unmute /toggle-mute /vol /stream /rec \
+             /status /obs-status /server-status /reload-config /dump-config /validate-config \
              /themes /reconnect /quit"
                 .to_string()
         }
@@ -493,6 +507,13 @@ fn command_to_payload(cmd: Command) -> std::result::Result<CommandPayload, Strin
         Command::SetProfile { target } => {
             let target = sanitize_target_arg(&target)?;
             ("set_profile", serde_json::json!({ "target": target }))
+        }
+        Command::SetSceneCollection { target } => {
+            let target = sanitize_target_arg(&target)?;
+            (
+                "set_scene_collection",
+                serde_json::json!({ "target": target }),
+            )
         }
         Command::Mute { target } => {
             let target = sanitize_target_arg(&target)?;

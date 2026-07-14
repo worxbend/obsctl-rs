@@ -130,6 +130,18 @@ pub fn set_current_profile(profile_name: &str) -> RequestResult<RequestData> {
     ))
 }
 
+pub fn get_scene_collection_list() -> RequestData {
+    req("GetSceneCollectionList")
+}
+
+pub fn set_current_scene_collection(scene_collection_name: &str) -> RequestResult<RequestData> {
+    let scene_collection_name = validate_name(scene_collection_name, "sceneCollectionName")?;
+    Ok(req_with(
+        "SetCurrentSceneCollection",
+        json!({ "sceneCollectionName": scene_collection_name }),
+    ))
+}
+
 pub fn toggle_stream() -> RequestData {
     req("ToggleStream")
 }
@@ -157,6 +169,13 @@ mod tests {
     }
 
     #[test]
+    fn set_scene_collection_includes_name() {
+        let r = set_current_scene_collection("Podcast Setup").unwrap();
+        let data = r.request_data.unwrap();
+        assert_eq!(data["sceneCollectionName"], "Podcast Setup");
+    }
+
+    #[test]
     fn set_volume_includes_mul() {
         let r = set_input_volume("Mic", 0.5).unwrap();
         let data = r.request_data.unwrap();
@@ -178,6 +197,7 @@ mod tests {
         assert!(set_input_mute(&long_name, true).is_err());
         assert!(toggle_input_mute(&long_name).is_err());
         assert!(get_input_volume(&long_name).is_err());
+        assert!(set_current_scene_collection(&long_name).is_err());
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub enum Command {
     ShutdownServer,
     SetScene { target: String },
     SetProfile { target: String },
+    SetSceneCollection { target: String },
     Mute { target: String },
     Unmute { target: String },
     ToggleMute { target: String },
