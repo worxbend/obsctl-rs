@@ -226,6 +226,7 @@ Global options:
 | `Esc` | Cancel palette editing |
 | `F2` or `Ctrl-T` | Open/close the settings (theme) view |
 | `s` / `a` / `p` / `c` | Focus the scenes / audio / profiles / collections panel |
+| `Ctrl-←/→/↑/↓` or `Ctrl-h/j/k/l` | Move focus between panels spatially (2x2 grid) |
 | `q` | Quit |
 | `r` | Reload config |
 | `D` | Dump config |

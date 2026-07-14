@@ -280,6 +280,22 @@ async fn handle_action(
             model.focus = FocusPanel::Collections;
             (false, None)
         }
+        TuiAction::FocusPaneLeft => {
+            model.focus = model.focus.left();
+            (false, None)
+        }
+        TuiAction::FocusPaneRight => {
+            model.focus = model.focus.right();
+            (false, None)
+        }
+        TuiAction::FocusPaneUp => {
+            model.focus = model.focus.up();
+            (false, None)
+        }
+        TuiAction::FocusPaneDown => {
+            model.focus = model.focus.down();
+            (false, None)
+        }
         TuiAction::NavUp => {
             model.move_up();
             (false, None)

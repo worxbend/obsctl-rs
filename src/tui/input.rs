@@ -18,6 +18,12 @@ pub enum TuiAction {
     FocusAudio,
     FocusProfiles,
     FocusCollections,
+    // Cross-panel navigation (Ctrl+arrows / Ctrl+hjkl), spatial across the
+    // Scenes/Audio/Profiles/Collections 2x2 grid.
+    FocusPaneLeft,
+    FocusPaneRight,
+    FocusPaneUp,
+    FocusPaneDown,
     NavUp,
     NavDown,
     // Scene actions
@@ -87,6 +93,22 @@ pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('p') => Some(TuiAction::FocusProfiles),
         KeyCode::Char('c') => Some(TuiAction::FocusCollections),
 
+        // Cross-panel navigation (Ctrl+arrows or Ctrl+hjkl). Checked before
+        // the plain arrow/hjkl bindings below so the Ctrl modifier takes
+        // priority regardless of which panel is focused.
+        KeyCode::Left | KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::FocusPaneLeft)
+        }
+        KeyCode::Right | KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::FocusPaneRight)
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::FocusPaneUp)
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(TuiAction::FocusPaneDown)
+        }
+
         // Up/down navigation (arrow keys + vim j/k)
         KeyCode::Up | KeyCode::Char('k') => Some(TuiAction::NavUp),
         KeyCode::Down | KeyCode::Char('j') => Some(TuiAction::NavDown),
@@ -120,6 +142,72 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_arrows_navigate_between_panes() {
+        let model = TuiModel::default();
+        assert!(matches!(
+            handle_key(&model, ctrl_key(KeyCode::Right)),
+            Some(TuiAction::FocusPaneRight)
+        ));
+        assert!(matches!(
+            handle_key(&model, ctrl_key(KeyCode::Left)),
+            Some(TuiAction::FocusPaneLeft)
+        ));
+        assert!(matches!(
+            handle_key(&model, ctrl_key(KeyCode::Down)),
+            Some(TuiAction::FocusPaneDown)
+        ));
+        assert!(matches!(
+            handle_key(&model, ctrl_key(KeyCode::Up)),
+            Some(TuiAction::FocusPaneUp)
+        ));
+    }
+
+    #[test]
+    fn ctrl_vim_keys_navigate_between_panes() {
+        let model = TuiModel::default();
+        assert!(matches!(
+            handle_key(&model, ctrl_key(KeyCode::Char('l'))),
+            Some(TuiAction::FocusPaneRight)
+        ));
+        assert!(matches!(
+            handle_key(&model, ctrl_key(KeyCode::Char('h'))),
+            Some(TuiAction::FocusPaneLeft)
+        ));
+        assert!(matches!(
+            handle_key(&model, ctrl_key(KeyCode::Char('j'))),
+            Some(TuiAction::FocusPaneDown)
+        ));
+        assert!(matches!(
+            handle_key(&model, ctrl_key(KeyCode::Char('k'))),
+            Some(TuiAction::FocusPaneUp)
+        ));
+    }
+
+    #[test]
+    fn ctrl_pane_navigation_takes_priority_over_audio_volume_keys() {
+        let mut model = TuiModel::default();
+        model.focus = FocusPanel::Audio;
+        // Without Ctrl, Left/h and Right/l adjust volume while Audio is focused.
+        assert!(matches!(
+            handle_key(&model, key(KeyCode::Left)),
+            Some(TuiAction::VolumeDown)
+        ));
+        // With Ctrl, the same keys switch panes instead.
+        assert!(matches!(
+            handle_key(&model, ctrl_key(KeyCode::Left)),
+            Some(TuiAction::FocusPaneLeft)
+        ));
+        assert!(matches!(
+            handle_key(&model, ctrl_key(KeyCode::Char('h'))),
+            Some(TuiAction::FocusPaneLeft)
+        ));
     }
 
     #[test]

@@ -8,13 +8,54 @@ use crate::{
     tui::{anim::AnimClock, theme::Theme},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusPanel {
     #[default]
     Scenes,
     Audio,
     Profiles,
     Collections,
+}
+
+impl FocusPanel {
+    /// Panels are arranged as a 2x2 grid:
+    /// ```text
+    /// Scenes    Audio
+    /// Profiles  Collections
+    /// ```
+    /// These map Ctrl+arrow / Ctrl+hjkl navigation across that grid; moving
+    /// past an edge is a no-op (stays on the current panel).
+    pub fn left(self) -> Self {
+        match self {
+            Self::Audio => Self::Scenes,
+            Self::Collections => Self::Profiles,
+            other => other,
+        }
+    }
+
+    pub fn right(self) -> Self {
+        match self {
+            Self::Scenes => Self::Audio,
+            Self::Profiles => Self::Collections,
+            other => other,
+        }
+    }
+
+    pub fn up(self) -> Self {
+        match self {
+            Self::Profiles => Self::Scenes,
+            Self::Collections => Self::Audio,
+            other => other,
+        }
+    }
+
+    pub fn down(self) -> Self {
+        match self {
+            Self::Scenes => Self::Profiles,
+            Self::Audio => Self::Collections,
+            other => other,
+        }
+    }
 }
 
 /// Top-level screen the TUI is showing.
@@ -326,6 +367,30 @@ impl TuiModel {
 mod tests {
     use super::*;
     use crate::obs::state::{ObsSnapshot, SceneState};
+
+    #[test]
+    fn focus_panel_grid_navigation_moves_across_rows_and_columns() {
+        assert_eq!(FocusPanel::Scenes.right(), FocusPanel::Audio);
+        assert_eq!(FocusPanel::Audio.left(), FocusPanel::Scenes);
+        assert_eq!(FocusPanel::Profiles.right(), FocusPanel::Collections);
+        assert_eq!(FocusPanel::Collections.left(), FocusPanel::Profiles);
+        assert_eq!(FocusPanel::Scenes.down(), FocusPanel::Profiles);
+        assert_eq!(FocusPanel::Profiles.up(), FocusPanel::Scenes);
+        assert_eq!(FocusPanel::Audio.down(), FocusPanel::Collections);
+        assert_eq!(FocusPanel::Collections.up(), FocusPanel::Audio);
+    }
+
+    #[test]
+    fn focus_panel_grid_navigation_is_a_no_op_past_an_edge() {
+        assert_eq!(FocusPanel::Scenes.left(), FocusPanel::Scenes);
+        assert_eq!(FocusPanel::Scenes.up(), FocusPanel::Scenes);
+        assert_eq!(FocusPanel::Audio.right(), FocusPanel::Audio);
+        assert_eq!(FocusPanel::Audio.up(), FocusPanel::Audio);
+        assert_eq!(FocusPanel::Profiles.left(), FocusPanel::Profiles);
+        assert_eq!(FocusPanel::Profiles.down(), FocusPanel::Profiles);
+        assert_eq!(FocusPanel::Collections.right(), FocusPanel::Collections);
+        assert_eq!(FocusPanel::Collections.down(), FocusPanel::Collections);
+    }
 
     fn make_scene(name: &str, hidden: bool) -> SceneState {
         SceneState {
