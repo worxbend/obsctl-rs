@@ -364,6 +364,19 @@ async fn dispatch_message(
     }
 }
 
+/// Convert a decibel magnitude (as reported by OBS's `InputVolumeMeters`
+/// event) to a linear 0-1 multiplier, matching the "linear magnitude" scale
+/// `ObsEvent::InputVolumeMeters` and the TUI's audio meter expect. Non-finite
+/// input (silence) collapses to `0.0`; values above 0 dBFS (clipping) yield a
+/// multiplier greater than 1.0, which callers are expected to clamp.
+fn db_to_linear_mul(db: f32) -> f32 {
+    if !db.is_finite() {
+        0.0
+    } else {
+        10f32.powf(db / 20.0)
+    }
+}
+
 async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
     let event_type = match data.get("eventType").and_then(|v| v.as_str()) {
         Some(event_type) => {
@@ -560,20 +573,26 @@ async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
                             continue;
                         }
                     };
-                    match raw.as_f64() {
-                        Some(v) if v.is_finite() => {
-                            if v < 0.0 {
+                    // OBS reports magnitude in dBFS (via libobs's mul_to_db),
+                    // which is negative for any signal below 0 dBFS and
+                    // non-finite (-infinity) for silence. Non-finite floats
+                    // round-trip through OBS's JSON encoder as `null` — the
+                    // normal reading for a quiet/silent channel, not malformed
+                    // data — so treat it as -infinity dB (i.e. zero magnitude)
+                    // rather than rejecting the whole event.
+                    let db = if raw.is_null() {
+                        f32::NEG_INFINITY
+                    } else {
+                        match raw.as_f64() {
+                            Some(v) if v.is_finite() => v as f32,
+                            Some(_) | None => {
                                 had_invalid_entry = true;
                                 continue;
                             }
-                            let value = v as f32;
-                            max_mag = Some(max_mag.map_or(value, |current| current.max(value)));
                         }
-                        Some(_) | None => {
-                            had_invalid_entry = true;
-                            continue;
-                        }
-                    }
+                    };
+                    let value = db_to_linear_mul(db);
+                    max_mag = Some(max_mag.map_or(value, |current: f32| current.max(value)));
                 }
                 let max_mag = match max_mag {
                     Some(value) => value,
@@ -877,12 +896,14 @@ mod tests {
     }
 
     #[test]
-    fn obs_event_drops_invalid_volume_meters_with_negative_level() {
+    fn obs_event_accepts_negative_db_meter_level() {
+        // OBS reports magnitude in dBFS: negative values are the normal case
+        // for any signal quieter than 0 dBFS, not malformed data.
         let data = serde_json::json!({
             "eventType": "InputVolumeMeters",
             "eventData": {
                 "inputs": [
-                    { "inputName": "Mic", "inputLevelsMul": [[-0.25]] }
+                    { "inputName": "Mic", "inputLevelsMul": [[-20.0]] }
                 ]
             }
         });
@@ -890,8 +911,52 @@ mod tests {
         rt.block_on(async {
             let (tx, mut rx) = mpsc::channel(8);
             dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+            let event = rx.recv().await.expect("event should not be dropped");
+            match event {
+                ObsEvent::InputVolumeMeters { inputs } => {
+                    assert_eq!(inputs.len(), 1);
+                    assert_eq!(inputs[0].0, "Mic");
+                    // -20 dBFS -> mul = 10^(-20/20) = 0.1
+                    assert!((inputs[0].1 - 0.1).abs() < 1e-4, "got {}", inputs[0].1);
+                }
+                _ => panic!("wrong event type"),
+            }
         });
+    }
+
+    #[test]
+    fn obs_event_treats_null_meter_channel_as_silence() {
+        // A non-finite magnitude (true silence, -infinity dB) round-trips
+        // through OBS's JSON encoder as `null`; it must not be treated as
+        // malformed data.
+        let data = serde_json::json!({
+            "eventType": "InputVolumeMeters",
+            "eventData": {
+                "inputs": [
+                    { "inputName": "Mic", "inputLevelsMul": [[null]] }
+                ]
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            let event = rx.recv().await.expect("event should not be dropped");
+            match event {
+                ObsEvent::InputVolumeMeters { inputs } => {
+                    assert_eq!(inputs, vec![("Mic".to_string(), 0.0)]);
+                }
+                _ => panic!("wrong event type"),
+            }
+        });
+    }
+
+    #[test]
+    fn db_to_linear_mul_converts_known_values() {
+        assert!((db_to_linear_mul(0.0) - 1.0).abs() < 1e-6);
+        assert!((db_to_linear_mul(-20.0) - 0.1).abs() < 1e-4);
+        assert_eq!(db_to_linear_mul(f32::NEG_INFINITY), 0.0);
+        assert_eq!(db_to_linear_mul(f32::NAN), 0.0);
     }
 
     #[test]
