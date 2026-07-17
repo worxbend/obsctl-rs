@@ -12,7 +12,7 @@ The TUI provides a real-time, themeable command center with animated gradient ch
 - **Profiles panel** (`p` to focus) — `Enter` to switch OBS profiles
 - **Collections panel** (`c` to focus) — `Enter` to switch OBS scene collections
 - **Telemetry deck** — animated LIVE/REC badges, elapsed durations, CPU and bitrate sparklines, FPS, memory, and stream bitrate
-- **Logs panel** — severity glyphs, colored targets, timestamps, and a compact streaming server/OBS event feed
+- **Logs panel** — severity glyphs, colored targets and timestamps, plus semantic highlighting for actions, status/error keywords, commands, numbers, and live OBS scene/profile/collection/input names
 - **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/collection`, `/mute`, `/vol`, `/stream`, `/rec`; delimited message results stream in with a typewriter animation
 - **Header** — animated gradient identity, daemon/OBS connection chips, active scene/profile, and render frame indicator
 - **Settings view** (`F2`, `Ctrl-T`, or `/themes`) — btop-style theme picker with live preview across the whole UI; `Enter` persists the choice, `Esc` reverts
