@@ -128,7 +128,7 @@ keymap:
 
 Set `ui.theme` to any of the built-in ids below, or `"custom"` to use a hand-defined palette. Themes can also be browsed and applied live from the TUI's settings view (`F2`, `Ctrl-T`, or `/themes` in the command palette).
 
-Built-in ids: `claude` (default), `codex`, `btop`, `nord`, `dracula`, `gruvbox`, `solarized-dark`, `monokai`, `one-dark`, `tokyo-night`, `catppuccin-mocha`, `rose-pine`, `mono` (TTY-safe, no truecolor). `default` is accepted as a legacy alias for `claude`.
+Built-in ids: `claude` (default), `codex`, `btop`, `nord`, `dracula`, `gruvbox`, `solarized-dark`, `monokai`, `one-dark`, `tokyo-night`, `catppuccin-mocha`, `rose-pine`, `kanagawa-wave`, `everforest-dark`, `ayu-mirage`, `github-dark`, `solarized-light`, `catppuccin-latte`, `github-light`, `rose-pine-dawn`, `night-owl`, `material-ocean`, `horizon`, `iceberg`, `moonfly`, `synthwave-84`, `matrix`, `zenburn`, and `mono` (TTY-safe, no truecolor). `default` is accepted as a legacy alias for `claude`.
 
 Every theme (except `mono`) paints its own background color over the whole UI rather than showing through the terminal emulator's own background. `mono` deliberately leaves the background untouched, since it exists for terminals/consoles where truecolor isn't reliable.
 

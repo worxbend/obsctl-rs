@@ -68,7 +68,8 @@ ui:
   # Show Unicode icons in the TUI scene/audio lists.
   show_icons: true
 
-  # Color theme (currently only "default" is supported).
+  # Built-in color theme id, or "custom" for a palette defined as documented
+  # in README.md. Press F2 in the TUI to browse all themes with live preview.
   theme: "default"
 
   # UI language: "en" or "uk". Unset (or unsupported) falls back to English.

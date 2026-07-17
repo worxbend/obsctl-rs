@@ -707,6 +707,24 @@ fn settings_renders_theme_list_and_preview() {
 }
 
 #[test]
+fn settings_scrolls_to_the_last_theme() {
+    let mut model = model_connected();
+    let last = obsctl_rs::tui::theme::ALL.len() - 1;
+    model.settings_cursor = last;
+    model.theme = obsctl_rs::tui::theme::ALL[last];
+
+    let mut t = term(100, 20);
+    t.draw(|f| {
+        widgets::settings::render(f, Rect::new(0, 0, 100, 20), &model);
+    })
+    .unwrap();
+
+    let out = buf_string(&t);
+    assert!(out.contains("Mono (TTY-safe)"));
+    assert!(out.contains("Preview: Mono (TTY-safe)"));
+}
+
+#[test]
 fn settings_survives_minimum_terminal_size() {
     let model = model_connected();
     let mut t = term(20, 6);
