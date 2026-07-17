@@ -28,11 +28,11 @@ pub fn compute(frame: &Frame) -> LayoutAreas {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(4),
+            Constraint::Length(4),
             Constraint::Min(6),
-            Constraint::Length(8),
-            Constraint::Length(5),
+            Constraint::Length(7),
+            Constraint::Length(4),
         ])
         .split(area);
 
@@ -114,11 +114,11 @@ mod tests {
     }
 
     #[test]
-    fn header_live_bar_logs_and_palette_are_unchanged() {
+    fn chrome_rows_have_room_for_rich_status_content() {
         let areas = compute_for(100, 40);
-        assert_eq!(areas.header.height, 3);
-        assert_eq!(areas.live_bar.height, 3);
-        assert_eq!(areas.logs.height, 8);
-        assert_eq!(areas.palette.height, 5);
+        assert_eq!(areas.header.height, 4);
+        assert_eq!(areas.live_bar.height, 4);
+        assert_eq!(areas.logs.height, 7);
+        assert_eq!(areas.palette.height, 4);
     }
 }

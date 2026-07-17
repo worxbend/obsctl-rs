@@ -40,6 +40,8 @@ pub async fn run(
     socket_path: &Path,
     refresh_ms: u64,
     theme: Theme,
+    show_icons: bool,
+    advanced_ui: bool,
     config_path: Option<PathBuf>,
 ) -> Result<i32> {
     enable_raw_mode()?;
@@ -49,10 +51,26 @@ pub async fn run(
 
     {
         let mut splash_events = EventStream::new();
-        run_splash(&mut terminal, &mut splash_events, theme).await?;
+        run_splash(
+            &mut terminal,
+            &mut splash_events,
+            theme,
+            show_icons,
+            advanced_ui,
+        )
+        .await?;
     }
 
-    let result = run_loop(&mut terminal, socket_path, refresh_ms, theme, config_path).await;
+    let result = run_loop(
+        &mut terminal,
+        socket_path,
+        refresh_ms,
+        theme,
+        show_icons,
+        advanced_ui,
+        config_path,
+    )
+    .await;
 
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)?;
@@ -66,6 +84,8 @@ async fn run_splash(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     events: &mut EventStream,
     theme: Theme,
+    show_icons: bool,
+    advanced_ui: bool,
 ) -> Result<()> {
     let total_frames =
         (SPLASH_DURATION.as_millis() / SPLASH_FRAME_INTERVAL.as_millis().max(1)) as u64;
@@ -77,7 +97,14 @@ async fn run_splash(
             _ = ticker.tick() => {
                 terminal.draw(|f| {
                     widgets::fill_background(f, theme);
-                    widgets::splash::render(f, theme, frame, total_frames);
+                    widgets::splash::render_with_appearance(
+                        f,
+                        theme,
+                        frame,
+                        total_frames,
+                        show_icons,
+                        advanced_ui,
+                    );
                 })?;
                 if frame >= total_frames {
                     return Ok(());
@@ -100,9 +127,11 @@ async fn run_loop(
     socket_path: &Path,
     refresh_ms: u64,
     theme: Theme,
+    show_icons: bool,
+    advanced_ui: bool,
     config_path: Option<PathBuf>,
 ) -> Result<i32> {
-    let mut model = TuiModel::with_theme(theme);
+    let mut model = TuiModel::with_appearance(theme, show_icons, advanced_ui);
     let refresh = Duration::from_millis(refresh_ms.max(50));
 
     // Try to connect to daemon

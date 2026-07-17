@@ -3,10 +3,10 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::Paragraph,
 };
 
-use crate::tui::model::TuiModel;
+use crate::tui::{model::TuiModel, widgets::chrome};
 
 const MAX_VISIBLE_COMPLETIONS: usize = 8;
 /// Reveal speed of the last-result typewriter animation, in characters per
@@ -15,10 +15,21 @@ const RESULT_REVEAL_CHARS_PER_TICK: usize = 3;
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border))
-        .title(" Command Palette ");
+    let block = chrome::panel(
+        model.symbol("⌘", ">"),
+        "Command Palette",
+        if model.command_palette.active {
+            model.symbol(
+                "type command  ↵ run  esc close",
+                "type command  Enter run  Esc close",
+            )
+        } else {
+            "/ open  F2 themes  q quit"
+        },
+        model.command_palette.completions.len(),
+        model.command_palette.active,
+        model,
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -35,11 +46,17 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             .unwrap_or("");
         if revealed.len() < full.len() {
             lines.push(Line::from(vec![
-                Span::styled(revealed.to_string(), style),
-                Span::styled("▌", Style::default().fg(theme.accent)),
+                Span::styled(format!("{}  {revealed}", model.symbol("✉", "msg:")), style),
+                Span::styled(
+                    if model.advanced_ui { "▌" } else { "_" },
+                    Style::default().fg(theme.accent),
+                ),
             ]));
         } else {
-            lines.push(Line::styled(revealed.to_string(), style));
+            lines.push(Line::styled(
+                format!("{}  {revealed}", model.symbol("✉", "msg:")),
+                style,
+            ));
         }
     } else {
         lines.push(Line::raw(""));
@@ -48,17 +65,24 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let prompt_line = if model.command_palette.active {
         Line::from(vec![
             Span::styled(
-                "> ",
+                format!("{}  ", model.symbol("❯", ">")),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(model.command_palette.input.clone()),
-            Span::styled("█", Style::default().fg(theme.accent)),
+            Span::styled(
+                if model.advanced_ui { "█" } else { "_" },
+                Style::default().fg(theme.accent),
+            ),
         ])
     } else {
         Line::from(vec![Span::styled(
-            " / or : palette  F2/Ctrl-T themes  q quit  r reload  D dump",
+            if model.advanced_ui {
+                "  ◈  / or : command  │  F2 themes  │  r reload  │  D dump  │  q quit"
+            } else {
+                "  >  / or : command  |  F2 themes  |  r reload  |  D dump  |  q quit"
+            },
             Style::default().fg(theme.muted),
         )])
     };

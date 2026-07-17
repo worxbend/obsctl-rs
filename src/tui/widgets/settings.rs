@@ -3,10 +3,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use crate::tui::{model::TuiModel, theme};
+use crate::tui::{anim, model::TuiModel, theme, widgets::chrome};
 
 /// Full-screen settings view — currently just the theme picker, styled
 /// after btop's theme switcher: arrow keys live-preview a theme across the
@@ -15,10 +15,32 @@ use crate::tui::{model::TuiModel, theme};
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
 
+    let title = if model.advanced_ui {
+        anim::gradient_line(
+            " ⚙ Settings // Appearance Lab // ↑↓ preview · Enter apply · Esc cancel ",
+            theme.accent,
+            theme.accent_alt,
+            model.anim.frame,
+            true,
+        )
+    } else {
+        Line::styled(
+            " Settings // Appearance // arrows preview | Enter apply | Esc cancel ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
     let outer = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Double)
         .border_style(Style::default().fg(theme.border_focus))
-        .title(" Settings — ↑/↓ preview · Enter apply · Esc/F2 cancel ");
+        .title(title);
+    let outer = if model.advanced_ui {
+        outer
+    } else {
+        outer.border_set(chrome::ASCII_BORDER)
+    };
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
@@ -36,11 +58,12 @@ fn render_theme_list(f: &mut Frame, area: Rect, model: &TuiModel) {
     let items: Vec<ListItem> = theme::ALL
         .iter()
         .map(|t| {
+            let cell = if model.advanced_ui { "██" } else { "##" };
             let swatch = Line::from(vec![
-                Span::styled("██", Style::default().fg(t.accent)),
-                Span::styled("██", Style::default().fg(t.success)),
-                Span::styled("██", Style::default().fg(t.warning)),
-                Span::styled("██", Style::default().fg(t.danger)),
+                Span::styled(cell, Style::default().fg(t.accent)),
+                Span::styled(cell, Style::default().fg(t.success)),
+                Span::styled(cell, Style::default().fg(t.warning)),
+                Span::styled(cell, Style::default().fg(t.danger)),
                 Span::raw("  "),
                 Span::raw(t.label),
             ]);
@@ -50,8 +73,14 @@ fn render_theme_list(f: &mut Frame, area: Rect, model: &TuiModel) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
-        .title(" Themes ");
+        .title(format!(" Themes // {:02} palettes ", theme::ALL.len()));
+    let block = if model.advanced_ui {
+        block
+    } else {
+        block.border_set(chrome::ASCII_BORDER)
+    };
 
     let highlight_style = Style::default()
         .bg(theme.highlight_bg)
@@ -74,38 +103,87 @@ fn render_preview(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border_focus))
         .title(format!(" Preview: {} ", theme.label));
+    let block = if model.advanced_ui {
+        block
+    } else {
+        block.border_set(chrome::ASCII_BORDER)
+    };
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let lines = vec![
-        Line::from(Span::styled(
-            "obsctl-rs",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::raw(""),
-        Line::from(Span::styled("● LIVE", Style::default().fg(theme.danger))),
-        Line::from(Span::styled(
-            "✓ connected",
-            Style::default().fg(theme.success),
-        )),
-        Line::from(Span::styled(
-            "⚠ warning",
-            Style::default().fg(theme.warning),
-        )),
-        Line::from(Span::styled("ℹ info", Style::default().fg(theme.info))),
-        Line::from(Span::styled("muted text", Style::default().fg(theme.muted))),
-        Line::raw(""),
-        Line::from(Span::styled(
-            " selected row ",
-            Style::default()
-                .bg(theme.highlight_bg)
-                .fg(theme.highlight_fg),
-        )),
-    ];
+    let lines = if model.advanced_ui {
+        vec![
+            anim::gradient_line(
+                "◈ OBSCTL // THEME PREVIEW",
+                theme.accent,
+                theme.accent_alt,
+                model.anim.frame,
+                true,
+            ),
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled("● LIVE", Style::default().fg(theme.danger)),
+                Span::styled("   ◉ REC", Style::default().fg(theme.warning)),
+                Span::styled("   ◆ SCENE ACTIVE", Style::default().fg(theme.accent)),
+            ]),
+            Line::from(Span::styled(
+                "✓ connected",
+                Style::default().fg(theme.success),
+            )),
+            Line::from(Span::styled(
+                "⚠ warning",
+                Style::default().fg(theme.warning),
+            )),
+            Line::from(Span::styled("ℹ info", Style::default().fg(theme.info))),
+            Line::from(vec![
+                Span::styled("▰▰▰▰", Style::default().fg(theme.success)),
+                Span::styled("▰▰▰", Style::default().fg(theme.warning)),
+                Span::styled("▰▰", Style::default().fg(theme.danger)),
+                Span::styled("▱▱▱  -12.4 dB", Style::default().fg(theme.muted)),
+            ]),
+            Line::from(Span::styled(
+                "CPU  ▁▂▃▅▄▆▇█▆▄   NET  ▁▁▂▃▅▇▅▃",
+                Style::default().fg(theme.info),
+            )),
+            Line::from(Span::styled("muted text", Style::default().fg(theme.muted))),
+            Line::raw(""),
+            Line::from(Span::styled(
+                " selected row ",
+                Style::default()
+                    .bg(theme.highlight_bg)
+                    .fg(theme.highlight_fg),
+            )),
+        ]
+    } else {
+        vec![
+            Line::styled("OBSCTL // THEME PREVIEW", Style::default().fg(theme.accent)),
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled("* LIVE", Style::default().fg(theme.danger)),
+                Span::styled("   * REC", Style::default().fg(theme.warning)),
+                Span::styled("   > SCENE ACTIVE", Style::default().fg(theme.accent)),
+            ]),
+            Line::styled("+ connected", Style::default().fg(theme.success)),
+            Line::styled("! warning", Style::default().fg(theme.warning)),
+            Line::styled("i info", Style::default().fg(theme.info)),
+            Line::styled("#######...  -12.4 dB", Style::default().fg(theme.success)),
+            Line::styled(
+                "CPU  .-=+*#*+   NET  ..-=*#+-",
+                Style::default().fg(theme.info),
+            ),
+            Line::styled("muted text", Style::default().fg(theme.muted)),
+            Line::raw(""),
+            Line::styled(
+                " selected row ",
+                Style::default()
+                    .bg(theme.highlight_bg)
+                    .fg(theme.highlight_fg),
+            ),
+        ]
+    };
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
     f.render_widget(paragraph, inner);

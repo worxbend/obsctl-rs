@@ -1,14 +1,15 @@
 use ratatui::{
     Frame,
     layout::Rect,
+    style::Modifier,
     style::Style,
-    text::Line,
-    widgets::{Block, Borders, Paragraph},
+    text::{Line, Span},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 use rust_i18n::t;
 
 use crate::service::systemd_user_service::SYSTEMCTL_ENABLE_HINT;
-use crate::tui::model::TuiModel;
+use crate::tui::{anim, model::TuiModel, widgets::chrome};
 
 pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
@@ -16,10 +17,18 @@ pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
     let err = model.last_result.as_deref().unwrap_or(&could_not_connect);
 
     let lines = vec![
-        Line::styled(
-            t!("tui.connection.daemon_not_running").into_owned(),
-            Style::default().fg(theme.danger),
-        ),
+        Line::from(vec![
+            Span::styled(
+                format!("{}  ", model.symbol("⚠", "!")),
+                Style::default().fg(theme.danger),
+            ),
+            Span::styled(
+                t!("tui.connection.daemon_not_running").into_owned(),
+                Style::default()
+                    .fg(theme.danger)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
         Line::raw(""),
         Line::styled(err.to_string(), Style::default().fg(theme.warning)),
         Line::raw(""),
@@ -41,10 +50,43 @@ pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
         ),
     ];
 
+    let unavailable_title = t!("tui.connection.title_unavailable");
+    let unavailable_title = if model.advanced_ui {
+        unavailable_title.into_owned()
+    } else {
+        unavailable_title.replace('—', "-")
+    };
+    let title = if model.advanced_ui {
+        anim::gradient_line(
+            &unavailable_title,
+            theme.danger,
+            theme.warning,
+            model.anim.frame,
+            true,
+        )
+    } else {
+        Line::styled(
+            unavailable_title,
+            Style::default()
+                .fg(theme.danger)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let border_color = if model.advanced_ui {
+        anim::blend(theme.danger, theme.warning, model.anim.pulse(24))
+    } else {
+        theme.danger
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border))
-        .title(t!("tui.connection.title_unavailable").into_owned());
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(border_color))
+        .title(title);
+    let block = if model.advanced_ui {
+        block
+    } else {
+        block.border_set(chrome::ASCII_BORDER)
+    };
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(lines), inner);
@@ -82,8 +124,14 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
         .title(t!("tui.connection.title").into_owned());
+    let block = if model.advanced_ui {
+        block
+    } else {
+        block.border_set(chrome::ASCII_BORDER)
+    };
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(lines), inner);

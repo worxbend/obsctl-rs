@@ -118,6 +118,10 @@ impl Default for ReconnectConfig {
 pub struct UiConfig {
     pub refresh_interval_ms: u64,
     pub command_palette_prefix: String,
+    /// Enables gradients, Unicode meters, rich borders, and animated terminal
+    /// art. Disable for legacy terminals that only render basic ASCII safely.
+    #[serde(default = "default_true")]
+    pub advanced_ui: bool,
     #[serde(default = "default_true")]
     pub show_icons: bool,
     /// Built-in theme id (see `obsctl tui` settings view), or `"custom"` to
@@ -137,6 +141,7 @@ impl Default for UiConfig {
         Self {
             refresh_interval_ms: 250,
             command_palette_prefix: "/".to_string(),
+            advanced_ui: true,
             show_icons: true,
             theme: "default".to_string(),
             custom_theme: None,
@@ -215,4 +220,24 @@ impl Default for KeymapConfig {
 
 fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advanced_ui_is_enabled_by_default() {
+        assert!(Config::default().ui.advanced_ui);
+        let config: Config = serde_yaml::from_str("version: 1\nui: {}\n").unwrap();
+        assert!(config.ui.advanced_ui);
+    }
+
+    #[test]
+    fn advanced_ui_can_be_disabled_from_yaml() {
+        let config: Config =
+            serde_yaml::from_str("version: 1\nui:\n  advanced_ui: false\n").unwrap();
+        assert!(!config.ui.advanced_ui);
+        assert!(config.ui.show_icons);
+    }
 }

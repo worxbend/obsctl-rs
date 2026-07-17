@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod chrome;
 pub mod collections;
 pub mod command_palette;
 pub mod connection;

@@ -6,17 +6,17 @@ A local OBS Studio controller for obs-websocket 5.x, written in Rust with Ratatu
 
 ![obsctl-rs TUI](docs/images/tui-screenshot.png)
 
-The TUI provides a real-time, themeable dashboard with:
+The TUI provides a real-time, themeable command center with animated gradient chrome, rounded/heavy focus borders, Unicode symbols, and responsive layouts. The advanced interface is enabled by default; set `ui.advanced_ui: false` for a simplified ASCII-safe TTY mode, or `ui.show_icons: false` to hide icons while retaining the other advanced elements:
 - **Scenes panel** (`s` to focus) — navigate with `j`/`k` or arrow keys, `Enter` to switch; the newly active scene briefly flashes
-- **Audio panel** (`a` to focus) — `m` to mute/unmute, `h`/`l` or `←`/`→` to adjust volume ±5%, cava-style live level bars
+- **Audio panel** (`a` to focus) — `m` to mute/unmute, `h`/`l` or `←`/`→` to adjust volume ±5%, segmented multi-color dB meters
 - **Profiles panel** (`p` to focus) — `Enter` to switch OBS profiles
 - **Collections panel** (`c` to focus) — `Enter` to switch OBS scene collections
-- **Status bar** — animated LIVE/REC badges (pulse while active, show elapsed duration) plus polled CPU%, FPS, memory, and derived stream bitrate
-- **Logs panel** — compact streaming server and OBS event log
-- **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/collection`, `/mute`, `/vol`, `/stream`, `/rec`; results stream in with a typewriter animation
-- **Header** — daemon/OBS connection status, active scene, active profile
+- **Telemetry deck** — animated LIVE/REC badges, elapsed durations, CPU and bitrate sparklines, FPS, memory, and stream bitrate
+- **Logs panel** — severity glyphs, colored targets, timestamps, and a compact streaming server/OBS event feed
+- **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/collection`, `/mute`, `/vol`, `/stream`, `/rec`; delimited message results stream in with a typewriter animation
+- **Header** — animated gradient identity, daemon/OBS connection chips, active scene/profile, and render frame indicator
 - **Settings view** (`F2`, `Ctrl-T`, or `/themes`) — btop-style theme picker with live preview across the whole UI; `Enter` persists the choice, `Esc` reverts
-- A short animated splash screen (~2s, skippable by any keypress) on launch
+- A responsive animated splash (~2s, skippable by any keypress) with a large block logo, slither and liquid-wave loaders, a multi-color progress rail, and staged boot messages
 
 Dashboard layout, top to bottom: header, status bar, a scenes/audio row (larger, since those lists tend to be longer), a profiles/collections row (smaller), logs, and the command palette.
 
@@ -107,6 +107,7 @@ reconnect:
 ui:
   refresh_interval_ms: 250
   command_palette_prefix: "/"
+  advanced_ui: true
   show_icons: true
   theme: "claude"       # built-in id, or "custom" — see Themes below
   # custom_theme:
@@ -123,6 +124,12 @@ keymap:
 ```
 
 **Security:** never set `connection.password` in plain text. Use `password_env` to point to an environment variable name.
+
+### TTY compatibility
+
+`ui.advanced_ui` defaults to `true` and enables the animated logo, Unicode borders, icons, segmented meters, sparklines, and gradient titles. Set it to `false` for an ASCII-safe interface: the dashboard, settings, connection view, and splash then use `+|-` borders, ASCII meters and graphs, plain titles, and ASCII status markers. This switch forces ASCII fallbacks even when `show_icons` remains enabled.
+
+`ui.show_icons: false` is a narrower option that hides emoji and decorative symbols while preserving the rest of the advanced interface. For terminals without reliable truecolor support, combine `advanced_ui: false` with `theme: "mono"`.
 
 ## Themes
 

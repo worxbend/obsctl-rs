@@ -3,7 +3,10 @@
 //! tracks the configured refresh interval rather than raw wall-clock time —
 //! this keeps redraw-triggered draws (IPC events) from skewing pulse speed.
 
-use ratatui::style::Color;
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AnimClock {
@@ -46,6 +49,71 @@ pub fn blend(a: Color, b: Color, t: f32) -> Color {
         }
         _ => a,
     }
+}
+
+/// Build an animated per-character gradient. The wave makes headings feel
+/// alive without changing layout or relying on terminal-specific effects.
+pub fn gradient_line(text: &str, from: Color, to: Color, frame: u64, bold: bool) -> Line<'static> {
+    let width = text.chars().count().max(1) as f32;
+    let spans = text
+        .chars()
+        .enumerate()
+        .map(|(index, ch)| {
+            let position = index as f32 / width;
+            let wave = ((position * std::f32::consts::TAU) + frame as f32 * 0.12).sin();
+            let color = blend(from, to, wave * 0.5 + 0.5);
+            let mut style = Style::default().fg(color);
+            if bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            Span::styled(ch.to_string(), style)
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
+}
+
+/// Render numeric history as a compact Unicode sparkline. Empty history is
+/// represented by a dim baseline so the dashboard does not jump as data arrives.
+pub fn sparkline(values: &[f64], width: usize) -> String {
+    const BARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if width == 0 {
+        return String::new();
+    }
+    if values.is_empty() {
+        return "▁".repeat(width);
+    }
+
+    let start = values.len().saturating_sub(width);
+    let visible = &values[start..];
+    let max = visible.iter().copied().fold(0.0_f64, f64::max).max(1.0);
+    let mut result = "▁".repeat(width.saturating_sub(visible.len()));
+    for value in visible {
+        let normalized = (value / max).clamp(0.0, 1.0);
+        let index = (normalized * (BARS.len() - 1) as f64).round() as usize;
+        result.push(BARS[index]);
+    }
+    result
+}
+
+/// ASCII-only history graph for terminals without Unicode block support.
+pub fn sparkline_ascii(values: &[f64], width: usize) -> String {
+    const LEVELS: &[u8] = b".-=+*#";
+    if width == 0 {
+        return String::new();
+    }
+    if values.is_empty() {
+        return ".".repeat(width);
+    }
+    let visible = &values[values.len().saturating_sub(width)..];
+    let min = visible.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = visible.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let range = (max - min).max(f64::EPSILON);
+    let mut result = ".".repeat(width.saturating_sub(visible.len()));
+    for value in visible {
+        let index = (((value - min) / range) * (LEVELS.len() - 1) as f64).round() as usize;
+        result.push(LEVELS[index.min(LEVELS.len() - 1)] as char);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -112,5 +180,24 @@ mod tests {
     #[test]
     fn blend_falls_back_to_first_color_for_non_rgb() {
         assert_eq!(blend(Color::Red, Color::Blue, 0.5), Color::Red);
+    }
+
+    #[test]
+    fn gradient_line_preserves_text() {
+        let line = gradient_line("OBS", Color::Rgb(0, 0, 0), Color::Rgb(255, 0, 0), 3, true);
+        let rendered: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(rendered, "OBS");
+    }
+
+    #[test]
+    fn sparkline_is_fixed_width_and_tracks_peaks() {
+        assert_eq!(sparkline(&[], 4), "▁▁▁▁");
+        let line = sparkline(&[0.0, 5.0, 10.0], 4);
+        assert_eq!(line.chars().count(), 4);
+        assert!(line.ends_with('█'));
     }
 }

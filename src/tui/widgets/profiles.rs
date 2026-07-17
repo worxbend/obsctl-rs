@@ -3,10 +3,13 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{List, ListItem, ListState},
 };
 
-use crate::tui::model::{FocusPanel, TuiModel};
+use crate::tui::{
+    model::{FocusPanel, TuiModel},
+    widgets::chrome,
+};
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
@@ -16,9 +19,14 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let items: Vec<ListItem> = model
         .profiles()
         .iter()
-        .map(|name| {
+        .enumerate()
+        .map(|(index, name)| {
             let active = Some(name.as_str()) == current;
-            let marker = if active { "▶ " } else { "  " };
+            let marker = if active {
+                model.symbol("▶", ">")
+            } else {
+                model.symbol("◇", " ")
+            };
             let style = if active {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
@@ -26,7 +34,11 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    marker,
+                    format!(" {:02} ", index + 1),
+                    Style::default().fg(theme.muted),
+                ),
+                Span::styled(
+                    format!("{marker} "),
                     Style::default().fg(if active { theme.success } else { theme.muted }),
                 ),
                 Span::styled(name.as_str(), Style::default().fg(theme.fg)),
@@ -35,15 +47,14 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         })
         .collect();
 
-    let border_style = if focused {
-        Style::default().fg(theme.border_focus)
-    } else {
-        Style::default().fg(theme.border)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Profiles [p] · Enter to switch ")
-        .border_style(border_style);
+    let block = chrome::panel(
+        model.symbol("🎛", "P"),
+        "Profiles",
+        model.symbol("[p]  ↵ switch", "[p]  Enter switch"),
+        model.profiles().len(),
+        focused,
+        model,
+    );
 
     let highlight_style = if focused {
         Style::default()

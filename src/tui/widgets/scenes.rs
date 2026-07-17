@@ -3,12 +3,13 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{List, ListItem, ListState},
 };
 
 use crate::tui::{
     anim,
     model::{FocusPanel, TuiModel},
+    widgets::chrome,
 };
 
 /// How many ticks the just-switched-to scene stays highlighted.
@@ -21,8 +22,13 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let items: Vec<ListItem> = model
         .scenes()
         .iter()
-        .map(|s| {
-            let marker = if s.active { "▶ " } else { "  " };
+        .enumerate()
+        .map(|(index, s)| {
+            let marker = if s.active {
+                model.symbol("▶", ">")
+            } else {
+                model.symbol("◇", " ")
+            };
             let flash_t = flash_intensity(model, &s.name);
             let active_color = if flash_t > 0.0 {
                 anim::blend(theme.success, theme.accent, flash_t)
@@ -31,7 +37,11 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             };
             let mut spans = vec![
                 Span::styled(
-                    marker,
+                    format!(" {:02} ", index + 1),
+                    Style::default().fg(theme.muted),
+                ),
+                Span::styled(
+                    format!("{marker} "),
                     Style::default().fg(if s.active { active_color } else { theme.muted }),
                 ),
                 Span::styled(
@@ -55,6 +65,16 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
                     Style::default().fg(theme.warning),
                 ));
             }
+            if let Some(group) = &s.group {
+                spans.push(Span::styled(
+                    if model.advanced_ui {
+                        format!("  ⟨{group}⟩")
+                    } else {
+                        format!("  [{group}]")
+                    },
+                    Style::default().fg(theme.accent_alt),
+                ));
+            }
 
             let style = if s.active {
                 Style::default().add_modifier(Modifier::BOLD)
@@ -65,15 +85,14 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         })
         .collect();
 
-    let border_style = if focused {
-        Style::default().fg(theme.border_focus)
-    } else {
-        Style::default().fg(theme.border)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Scenes [s] · Enter to switch ")
-        .border_style(border_style);
+    let block = chrome::panel(
+        model.symbol("🎬", "S"),
+        "Scenes",
+        model.symbol("[s]  ↵ switch", "[s]  Enter switch"),
+        model.scenes().len(),
+        focused,
+        model,
+    );
 
     let highlight_style = if focused {
         Style::default()

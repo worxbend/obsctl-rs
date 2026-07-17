@@ -3,87 +3,145 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 use rust_i18n::t;
 
-use crate::tui::model::TuiModel;
+use crate::tui::{anim, model::TuiModel, widgets::chrome};
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
-
-    let daemon_status = if model.connected_to_daemon {
-        Span::styled(
-            t!("tui.header.daemon_connected").into_owned(),
-            Style::default().fg(theme.success),
+    let pulse = model.anim.pulse(30);
+    let border = if model.advanced_ui {
+        anim::blend(theme.border, theme.accent, pulse * 0.45)
+    } else {
+        theme.border
+    };
+    let title = if model.advanced_ui {
+        anim::gradient_line(
+            " ◈ OBSCTL // BROADCAST COMMAND CENTER ",
+            theme.accent,
+            theme.accent_alt,
+            model.anim.frame,
+            true,
         )
     } else {
-        Span::styled(
-            t!("tui.header.daemon_disconnected").into_owned(),
-            Style::default().fg(theme.danger),
+        Line::styled(
+            " OBSCTL // BROADCAST COMMAND CENTER ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )
     };
-
-    let obs_status = if model.obs_connected() {
-        let ver = model
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.obs_studio_version.as_deref())
-            .unwrap_or("?");
-        Span::styled(
-            t!("tui.header.obs_connected", version = ver).into_owned(),
-            Style::default().fg(theme.success),
-        )
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border))
+        .title(title);
+    let block = if model.advanced_ui {
+        block
     } else {
-        Span::styled(
-            t!("tui.header.obs_disconnected").into_owned(),
-            Style::default().fg(theme.warning),
-        )
+        block.border_set(chrome::ASCII_BORDER)
     };
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    let scene_span = if let Some(scene) = model.current_scene() {
+    let brand_icon = model.symbol("⚡", "#");
+    let first = Line::from(vec![
         Span::styled(
-            t!("tui.header.scene", scene = scene).into_owned(),
-            Style::default().fg(theme.fg),
-        )
-    } else {
-        Span::raw("")
-    };
-
-    let profile_span = if let Some(profile) = model.current_profile() {
-        Span::styled(
-            t!("tui.header.profile", profile = profile).into_owned(),
-            Style::default().fg(theme.muted),
-        )
-    } else {
-        Span::raw("")
-    };
-
-    let line = Line::from(vec![
-        Span::styled(
-            "obsctl",
+            format!("{brand_icon} obsctl"),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
-        daemon_status,
-        Span::raw("  "),
-        obs_status,
-        scene_span,
-        profile_span,
+        Span::styled(
+            "  studio automation console",
+            Style::default().fg(theme.muted),
+        ),
+        Span::styled(
+            if model.advanced_ui {
+                "  •  "
+            } else {
+                "  |  "
+            },
+            Style::default().fg(theme.border),
+        ),
+        Span::styled(
+            format!("frame {:06}", model.anim.frame),
+            Style::default().fg(theme.info),
+        ),
     ]);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border))
-        .title(Span::styled(
-            " obsctl-rs ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    f.render_widget(Paragraph::new(line), inner);
+    let daemon_text = if model.connected_to_daemon {
+        t!("tui.header.daemon_connected").into_owned()
+    } else {
+        t!("tui.header.daemon_disconnected").into_owned()
+    };
+    let daemon = status_chip(
+        &daemon_text,
+        model.connected_to_daemon,
+        model.rich_ui(),
+        theme.success,
+        theme.danger,
+    );
+
+    let obs_text = if model.obs_connected() {
+        let version = model
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.obs_studio_version.as_deref())
+            .unwrap_or("?");
+        t!("tui.header.obs_connected", version = version).into_owned()
+    } else {
+        t!("tui.header.obs_disconnected").into_owned()
+    };
+    let obs = status_chip(
+        &obs_text,
+        model.obs_connected(),
+        model.rich_ui(),
+        theme.success,
+        theme.warning,
+    );
+
+    let mut status = vec![daemon, Span::raw("  "), obs];
+    if let Some(scene) = model.current_scene() {
+        status.extend([
+            Span::styled(
+                if model.advanced_ui { "  ◆ " } else { "  > " },
+                Style::default().fg(theme.accent_alt),
+            ),
+            Span::styled(
+                t!("tui.header.scene", scene = scene).into_owned(),
+                Style::default().fg(theme.fg),
+            ),
+        ]);
+    }
+    if let Some(profile) = model.current_profile() {
+        status.extend([
+            Span::styled(
+                if model.advanced_ui { "  ◇ " } else { "  - " },
+                Style::default().fg(theme.info),
+            ),
+            Span::styled(
+                t!("tui.header.profile", profile = profile).into_owned(),
+                Style::default().fg(theme.muted),
+            ),
+        ]);
+    }
+
+    f.render_widget(Paragraph::new(vec![first, Line::from(status)]), inner);
+}
+
+fn status_chip(
+    text: &str,
+    active: bool,
+    fancy: bool,
+    active_color: ratatui::style::Color,
+    inactive_color: ratatui::style::Color,
+) -> Span<'static> {
+    let color = if active { active_color } else { inactive_color };
+    Span::styled(
+        format!("{} {text}", chrome::status_dot(active, fancy)),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
 }

@@ -86,6 +86,15 @@ pub struct TuiModel {
     pub meter_levels: HashMap<String, f32>,
     /// Active color theme, chosen via config or the settings view.
     pub theme: Theme,
+    /// Whether rich Unicode icons/emoji are enabled. When false, widgets use
+    /// compact ASCII fallbacks for restricted terminals.
+    pub show_icons: bool,
+    /// Whether rich borders, Unicode charts, gradients, and terminal art are
+    /// enabled. False selects the simplified ASCII-safe rendering path.
+    pub advanced_ui: bool,
+    /// Short rolling histories used by the animated status sparklines.
+    pub cpu_history: Vec<f64>,
+    pub bitrate_history: Vec<f64>,
     /// Advances once per render tick; drives pulsing/spinner animations.
     pub anim: AnimClock,
     /// (scene name, tick it became active) — drives the brief flash
@@ -120,6 +129,10 @@ impl Default for TuiModel {
             collection_cursor: 0,
             meter_levels: HashMap::new(),
             theme: Theme::default_theme(),
+            show_icons: true,
+            advanced_ui: true,
+            cpu_history: Vec::new(),
+            bitrate_history: Vec::new(),
             anim: AnimClock::default(),
             scene_flash: None,
             view: View::default(),
@@ -193,6 +206,38 @@ impl TuiModel {
         Self {
             theme,
             ..Self::default()
+        }
+    }
+
+    pub fn with_appearance(theme: Theme, show_icons: bool, advanced_ui: bool) -> Self {
+        Self {
+            theme,
+            show_icons,
+            advanced_ui,
+            ..Self::default()
+        }
+    }
+
+    pub fn symbol(&self, rich: &'static str, ascii: &'static str) -> &'static str {
+        if self.rich_ui() { rich } else { ascii }
+    }
+
+    pub fn rich_ui(&self) -> bool {
+        self.show_icons && self.advanced_ui
+    }
+
+    pub fn record_metric_sample(&mut self) {
+        const HISTORY_LIMIT: usize = 32;
+        if let Some(stats) = self.stats() {
+            self.cpu_history.push(stats.cpu_usage_percent);
+        }
+        if let Some(bitrate) = self.stream_bitrate_kbps() {
+            self.bitrate_history.push(bitrate);
+        }
+        for history in [&mut self.cpu_history, &mut self.bitrate_history] {
+            if history.len() > HISTORY_LIMIT {
+                history.drain(0..history.len() - HISTORY_LIMIT);
+            }
         }
     }
 
@@ -457,6 +502,18 @@ mod tests {
         assert_eq!(model.focused_profile(), Some("Streaming"));
         model.move_up();
         assert_eq!(model.focused_profile(), Some("Default"));
+    }
+
+    #[test]
+    fn metric_history_is_bounded() {
+        let mut model = TuiModel {
+            cpu_history: (0..40).map(f64::from).collect(),
+            bitrate_history: (0..40).map(f64::from).collect(),
+            ..Default::default()
+        };
+        model.record_metric_sample();
+        assert_eq!(model.cpu_history.len(), 32);
+        assert_eq!(model.bitrate_history.len(), 32);
     }
 
     #[test]

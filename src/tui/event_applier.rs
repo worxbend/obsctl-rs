@@ -23,6 +23,7 @@ pub fn apply_server_message(model: &mut TuiModel, msg: ServerMessage) -> bool {
                     model.snapshot = Some(snapshot);
                     model.connected_to_daemon = true;
                     model.clamp_cursors();
+                    model.record_metric_sample();
                 }
                 return true;
             }

@@ -371,6 +371,21 @@ fn audio_renders_mute_and_volume() {
 }
 
 #[test]
+fn audio_uses_ascii_symbols_when_icons_are_disabled() {
+    let mut model = model_connected();
+    model.show_icons = false;
+    let mut t = term(80, 10);
+    t.draw(|f| {
+        widgets::audio::render(f, Rect::new(0, 0, 80, 10), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(!out.contains("🔊"));
+    assert!(!out.contains("🔇"));
+    assert!(out.contains("A Mic"));
+}
+
+#[test]
 fn audio_renders_empty_list_without_panic() {
     let mut model = model_connected();
     if let Some(ref mut snap) = model.snapshot {
@@ -660,10 +675,37 @@ fn splash_renders_wordmark_tagline_and_progress_bar() {
         "should show the wordmark; got: {out}"
     );
     assert!(
-        out.contains("OBS Studio Controller"),
+        out.contains("Broadcast control, without breaking flow."),
         "should show the tagline; got: {out}"
     );
-    assert!(out.contains('['), "should show a progress bar; got: {out}");
+    assert!(
+        out.contains("0%"),
+        "should show progress percentage; got: {out}"
+    );
+    assert!(
+        out.contains("SYNC"),
+        "should show animated loader; got: {out}"
+    );
+    assert!(out.contains("LIVE"), "should show animated live identity");
+}
+
+#[test]
+fn splash_renders_large_logo_and_layered_loaders() {
+    let mut t = term(100, 20);
+    t.draw(|f| {
+        widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 12, 40);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("██████"), "should render large OBSCTL logo");
+    assert!(
+        out.contains("Scenes, audio, profiles, recording, and live telemetry"),
+        "should describe the app"
+    );
+    assert!(out.contains("STUDIO LINK"), "should render the boot card");
+    assert!(out.contains("LIVE"), "should render the live badge");
+    assert!(out.contains("SIGNAL"), "should render slither loader");
+    assert!(out.contains("LIQUID"), "should render liquid-wave loader");
 }
 
 #[test]
@@ -687,6 +729,65 @@ fn splash_survives_minimum_terminal_size() {
         widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 5, 40);
     })
     .unwrap();
+}
+
+#[test]
+fn simplified_ui_renders_the_dashboard_and_splash_as_ascii_only() {
+    let mut model = model_connected();
+    model.advanced_ui = false;
+    // Icons remain enabled in config by default; simplified mode must still
+    // force every widget onto its ASCII fallback.
+    model.show_icons = true;
+    model.meter_levels.insert("Mic".into(), 0.42);
+
+    let mut dashboard = term(120, 34);
+    dashboard
+        .draw(|f| {
+            widgets::header::render(f, Rect::new(0, 0, 120, 4), &model);
+            widgets::live_bar::render(f, Rect::new(0, 4, 120, 4), &model);
+            widgets::scenes::render(f, Rect::new(0, 8, 40, 10), &model);
+            widgets::audio::render(f, Rect::new(40, 8, 40, 10), &model);
+            widgets::profiles::render(f, Rect::new(80, 8, 20, 10), &model);
+            widgets::collections::render(f, Rect::new(100, 8, 20, 10), &model);
+            widgets::logs::render(f, Rect::new(0, 18, 120, 8), &model);
+            widgets::command_palette::render(f, Rect::new(0, 26, 120, 4), &model);
+        })
+        .unwrap();
+    let dashboard_output = buf_string(&dashboard);
+    assert!(
+        dashboard_output.is_ascii(),
+        "simplified dashboard emitted non-ASCII characters: {dashboard_output}"
+    );
+
+    let mut settings = term(100, 20);
+    settings
+        .draw(|f| widgets::settings::render(f, f.area(), &model))
+        .unwrap();
+    assert!(buf_string(&settings).is_ascii());
+
+    let mut unavailable = term(100, 20);
+    unavailable
+        .draw(|f| widgets::connection::render_unavailable(f, f.area(), &model))
+        .unwrap();
+    let unavailable_output = buf_string(&unavailable);
+    assert!(
+        unavailable_output.is_ascii(),
+        "simplified connection view emitted non-ASCII characters: {unavailable_output}"
+    );
+
+    let mut splash = term(100, 20);
+    splash
+        .draw(|f| {
+            widgets::splash::render_with_appearance(f, model.theme, 12, 40, false, false);
+        })
+        .unwrap();
+    let splash_output = buf_string(&splash);
+    assert!(
+        splash_output.is_ascii(),
+        "simplified splash emitted non-ASCII characters: {splash_output}"
+    );
+    assert!(splash_output.contains("OBSCTL STARTUP"));
+    assert!(splash_output.contains("LIVE"));
 }
 
 // ── settings widget ─────────────────────────────────────────────────────────

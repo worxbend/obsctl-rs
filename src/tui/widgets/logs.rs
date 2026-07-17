@@ -2,8 +2,8 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::Style,
-    text::Line,
-    widgets::{Block, Borders, List, ListItem},
+    text::{Line, Span},
+    widgets::{List, ListItem},
 };
 
 use crate::{
@@ -11,11 +11,11 @@ use crate::{
     tui::{
         model::{TuiLogEntry, TuiModel},
         theme::Theme,
+        widgets::chrome,
     },
 };
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
-    let theme = model.theme;
     let height = area.height.saturating_sub(2) as usize;
     let skip = model.logs.len().saturating_sub(height);
 
@@ -23,17 +23,55 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         .logs
         .iter()
         .skip(skip)
-        .map(|entry| {
-            let style = style_for_level(entry.level, theme);
-            ListItem::new(Line::styled(format_log_entry(entry), style))
-        })
+        .map(|entry| ListItem::new(log_line(entry, model)))
         .collect();
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border))
-        .title(" Logs ");
+    let block = chrome::panel(
+        model.symbol("📡", "L"),
+        "Logs // Event Stream",
+        "live daemon feed",
+        model.logs.len(),
+        false,
+        model,
+    );
     f.render_widget(List::new(items).block(block), area);
+}
+
+fn log_line(entry: &TuiLogEntry, model: &TuiModel) -> Line<'static> {
+    let theme = model.theme;
+    let time = format!(
+        "{:02}:{:02}:{:02}",
+        entry.timestamp.hour(),
+        entry.timestamp.minute(),
+        entry.timestamp.second()
+    );
+    let marker = match entry.level {
+        LogLevel::Trace => model.symbol("·", "."),
+        LogLevel::Debug => model.symbol("◦", "."),
+        LogLevel::Info => model.symbol("●", "i"),
+        LogLevel::Warn => model.symbol("▲", "!"),
+        LogLevel::Error => model.symbol("◆", "x"),
+    };
+    let style = style_for_level(entry.level, theme);
+    let mut spans = vec![
+        Span::styled(format!(" {marker} "), style),
+        Span::styled(time, Style::default().fg(theme.muted)),
+        Span::styled(
+            format!(" {:<5} ", level_label(entry.level)),
+            style.add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+    ];
+    if let Some(target) = entry.target.as_deref().filter(|target| !target.is_empty()) {
+        spans.push(Span::styled(
+            format!("{target}  "),
+            Style::default().fg(theme.accent_alt),
+        ));
+    }
+    spans.push(Span::styled(
+        entry.message.clone(),
+        Style::default().fg(theme.fg),
+    ));
+    Line::from(spans)
 }
 
 fn style_for_level(level: LogLevel, theme: Theme) -> Style {
@@ -43,23 +81,6 @@ fn style_for_level(level: LogLevel, theme: Theme) -> Style {
         LogLevel::Info => Style::default().fg(theme.fg),
         LogLevel::Warn => Style::default().fg(theme.warning),
         LogLevel::Error => Style::default().fg(theme.danger),
-    }
-}
-
-fn format_log_entry(entry: &TuiLogEntry) -> String {
-    let time = format!(
-        "{:02}:{:02}:{:02}",
-        entry.timestamp.hour(),
-        entry.timestamp.minute(),
-        entry.timestamp.second()
-    );
-    let level = level_label(entry.level);
-
-    match entry.target.as_deref() {
-        Some(target) if !target.is_empty() => {
-            format!("{time} {level:<5} {target}: {}", entry.message)
-        }
-        _ => format!("{time} {level:<5} {}", entry.message),
     }
 }
 

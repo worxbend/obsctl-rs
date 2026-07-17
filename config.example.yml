@@ -65,7 +65,11 @@ ui:
   # Character that opens the command palette in the TUI.
   command_palette_prefix: "/"
 
-  # Show Unicode icons in the TUI scene/audio lists.
+  # Rich Unicode borders, meters, gradients, and animated splash art.
+  # Set false for ASCII-only or limited TTYs. Enabled by default.
+  advanced_ui: true
+
+  # Show Unicode icons throughout the advanced TUI.
   show_icons: true
 
   # Built-in color theme id, or "custom" for a palette defined as documented
