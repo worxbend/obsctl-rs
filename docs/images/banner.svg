@@ -1,0 +1,107 @@
+<svg width="1280" height="360" viewBox="0 0 1280 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="obsctl — a local OBS Studio command center for your terminal">
+  <defs>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#E8C59E"/>
+      <stop offset="0.5" stop-color="#D97757"/>
+      <stop offset="1" stop-color="#C25B3C"/>
+    </linearGradient>
+    <linearGradient id="accentLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#D97757"/>
+      <stop offset="1" stop-color="#D97757" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="bgGlow" cx="0.24" cy="0.35" r="0.7">
+      <stop offset="0" stop-color="#D97757" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#D97757" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="blur" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+  </defs>
+
+  <!-- backdrop -->
+  <rect width="1280" height="360" rx="28" fill="#1B1916"/>
+  <rect width="1280" height="360" rx="28" fill="url(#bgGlow)"/>
+  <rect x="1" y="1" width="1278" height="358" rx="27" fill="none" stroke="#4A4640" stroke-width="1.5"/>
+
+  <!-- ===== left: identity ===== -->
+  <!-- broadcast arcs behind the mark -->
+  <g fill="none" stroke="#D97757" stroke-linecap="round">
+    <path d="M92 132 A44 44 0 0 1 92 200" stroke-width="6" opacity="0.85"/>
+    <path d="M116 116 A68 68 0 0 1 116 216" stroke-width="5" opacity="0.45"/>
+    <path d="M140 100 A92 92 0 0 1 140 232" stroke-width="4" opacity="0.22"/>
+  </g>
+  <circle cx="68" cy="166" r="17" fill="#E06C5F"/>
+  <circle cx="68" cy="166" r="17" fill="none" stroke="#F0A79E" stroke-width="1.5" opacity="0.7"/>
+
+  <!-- wordmark -->
+  <text x="176" y="150" font-family="'DejaVu Sans Mono','SFMono-Regular',Menlo,Consolas,monospace" font-size="92" font-weight="700" fill="url(#wordmark)" letter-spacing="-2">obsctl</text>
+  <rect x="176" y="176" width="360" height="4" rx="2" fill="url(#accentLine)"/>
+
+  <!-- tagline -->
+  <text x="178" y="222" font-family="'DejaVu Sans','Segoe UI',Helvetica,Arial,sans-serif" font-size="25" font-weight="600" fill="#ECE8E1">A fast, local command center for OBS Studio</text>
+  <text x="178" y="258" font-family="'DejaVu Sans Mono','SFMono-Regular',Menlo,Consolas,monospace" font-size="17" fill="#8A867D">Rust · Ratatui · obs-websocket 5.x · daemon · TUI · CLI</text>
+
+  <!-- prompt line -->
+  <g font-family="'DejaVu Sans Mono','SFMono-Regular',Menlo,Consolas,monospace" font-size="19">
+    <text x="178" y="304" fill="#87B37B" font-weight="700">❯</text>
+    <text x="202" y="304" fill="#ECE8E1">obsctl</text>
+    <text x="284" y="304" fill="#7BA9C7">tui</text>
+    <rect x="322" y="290" width="11" height="20" rx="2" fill="#D97757"/>
+  </g>
+
+  <!-- ===== right: mini dashboard mock ===== -->
+  <g transform="translate(792,44)">
+    <rect x="0" y="0" width="452" height="272" rx="18" fill="#211E1A" stroke="#4A4640" stroke-width="1.5"/>
+
+    <!-- header chips -->
+    <rect x="18" y="18" width="70" height="26" rx="8" fill="#1B1916" stroke="#87B37B" stroke-width="1.5"/>
+    <circle cx="34" cy="31" r="4.5" fill="#87B37B"/>
+    <text x="46" y="35" font-family="monospace" font-size="12" fill="#87B37B">OBS</text>
+    <rect x="96" y="18" width="66" height="26" rx="8" fill="#E06C5F"/>
+    <circle cx="112" cy="31" r="4.5" fill="#1B1916"/>
+    <text x="123" y="35" font-family="monospace" font-size="12" font-weight="700" fill="#1B1916">LIVE</text>
+    <text x="360" y="35" font-family="monospace" font-size="12" fill="#8A867D">◷ 01:24:07</text>
+
+    <!-- scenes panel -->
+    <rect x="18" y="60" width="204" height="128" rx="12" fill="#1B1916" stroke="#D97757" stroke-width="2"/>
+    <text x="34" y="82" font-family="monospace" font-size="13" font-weight="700" fill="#D97757">Scenes</text>
+    <rect x="30" y="94" width="180" height="22" rx="6" fill="#D97757"/>
+    <text x="42" y="109" font-family="monospace" font-size="12" fill="#1B1916">▸ Main</text>
+    <text x="42" y="133" font-family="monospace" font-size="12" fill="#ECE8E1">BRB</text>
+    <text x="42" y="155" font-family="monospace" font-size="12" fill="#ECE8E1">Starting Soon</text>
+    <text x="42" y="177" font-family="monospace" font-size="12" fill="#8A867D">Outro</text>
+
+    <!-- audio panel -->
+    <rect x="230" y="60" width="204" height="128" rx="12" fill="#1B1916" stroke="#4A4640" stroke-width="1.5"/>
+    <text x="246" y="82" font-family="monospace" font-size="13" font-weight="700" fill="#ECE8E1">Audio</text>
+    <text x="246" y="106" font-family="monospace" font-size="12" fill="#ECE8E1">🔊 Mic</text>
+    <text x="398" y="106" font-family="monospace" font-size="11" fill="#7BA9C7">70%</text>
+    <!-- meter row 1 -->
+    <g>
+      <rect x="246" y="114" width="12" height="8" rx="2" fill="#87B37B"/>
+      <rect x="262" y="114" width="12" height="8" rx="2" fill="#87B37B"/>
+      <rect x="278" y="114" width="12" height="8" rx="2" fill="#87B37B"/>
+      <rect x="294" y="114" width="12" height="8" rx="2" fill="#E0B44C"/>
+      <rect x="310" y="114" width="12" height="8" rx="2" fill="#E0B44C"/>
+      <rect x="326" y="114" width="12" height="8" rx="2" fill="#E06C5F" opacity="0.4"/>
+      <rect x="342" y="114" width="12" height="8" rx="2" fill="#E06C5F" opacity="0.25"/>
+    </g>
+    <text x="246" y="150" font-family="monospace" font-size="12" fill="#8A867D">🔇 Desktop</text>
+    <text x="392" y="150" font-family="monospace" font-size="11" fill="#8A867D">45%</text>
+    <g opacity="0.5">
+      <rect x="246" y="158" width="12" height="8" rx="2" fill="#87B37B"/>
+      <rect x="262" y="158" width="12" height="8" rx="2" fill="#87B37B"/>
+      <rect x="278" y="158" width="12" height="8" rx="2" fill="#87B37B"/>
+      <rect x="294" y="158" width="12" height="8" rx="2" fill="#4A4640"/>
+      <rect x="310" y="158" width="12" height="8" rx="2" fill="#4A4640"/>
+    </g>
+
+    <!-- telemetry / sparkline -->
+    <rect x="18" y="198" width="416" height="56" rx="12" fill="#1B1916" stroke="#4A4640" stroke-width="1.5"/>
+    <text x="34" y="220" font-family="monospace" font-size="11" fill="#8A867D">CPU</text>
+    <text x="150" y="220" font-family="monospace" font-size="11" fill="#8A867D">BITRATE</text>
+    <text x="360" y="220" font-family="monospace" font-size="11" fill="#87B37B">6042 kb/s</text>
+    <polyline points="34,242 52,236 70,240 88,228 106,232 124,222 142,230 160,218 178,226 196,214 214,222 232,212" fill="none" stroke="#7BA9C7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <polyline points="252,240 268,234 284,238 300,226 316,236 332,224 348,232 364,220 380,230 396,216 412,224" fill="none" stroke="#D97757" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

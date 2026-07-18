@@ -1,28 +1,78 @@
-# obsctl-rs
+<div align="center">
 
-A local OBS Studio controller for obs-websocket 5.x, written in Rust with Ratatui.
+<img src="docs/images/banner.png" alt="obsctl — a fast, local command center for OBS Studio" width="840">
 
-## TUI
+<br>
 
-![obsctl-rs TUI](docs/images/tui-screenshot.png)
+[![Latest release](https://img.shields.io/github/v/release/worxbend/obsctl-rs?style=for-the-badge&color=D97757&labelColor=1B1916&logo=github)](https://github.com/worxbend/obsctl-rs/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-87B37B?style=for-the-badge&labelColor=1B1916)](LICENSE)
+[![Built with Rust](https://img.shields.io/badge/Rust-2024-D97757?style=for-the-badge&logo=rust&labelColor=1B1916)](https://www.rust-lang.org)
+[![Platform: Linux](https://img.shields.io/badge/platform-Linux-7BA9C7?style=for-the-badge&logo=linux&logoColor=white&labelColor=1B1916)](#-install)
+[![obs-websocket 5.x](https://img.shields.io/badge/obs--websocket-5.x-E0B44C?style=for-the-badge&labelColor=1B1916)](https://github.com/obsproject/obs-websocket)
 
-The TUI provides a real-time, themeable command center with animated gradient chrome, rounded/heavy focus borders, Unicode symbols, and responsive layouts. The advanced interface is enabled by default; set `ui.advanced_ui: false` for a simplified ASCII-safe TTY mode, or `ui.show_icons: false` to hide icons while retaining the other advanced elements:
-- **Scenes panel** (`s` to focus) — navigate with `j`/`k` or arrow keys, `Enter` to switch; the newly active scene briefly flashes
-- **Audio panel** (`a` to focus) — `m` to mute/unmute, `h`/`l` or `←`/`→` to adjust volume ±5%, segmented multi-color dB meters
-- **Profiles panel** (`p` to focus) — `Enter` to switch OBS profiles
-- **Collections panel** (`c` to focus) — `Enter` to switch OBS scene collections
-- **Telemetry deck** — animated LIVE/REC badges, elapsed durations, CPU and bitrate sparklines, FPS, memory, and stream bitrate
-- **Logs panel** — severity glyphs, colored targets and timestamps, plus semantic highlighting for actions, status/error keywords, commands, numbers, and live OBS scene/profile/collection/input names
-- **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/collection`, `/mute`, `/vol`, `/stream`, `/rec`; delimited message results stream in with a typewriter animation
-- **Header** — animated gradient identity, daemon/OBS connection chips, active scene/profile, and render frame indicator
-- **Settings view** (`F2`, `Ctrl-T`, or `/themes`) — btop-style theme picker with live preview across the whole UI; `Enter` persists the choice, `Esc` reverts
-- A responsive animated splash (~2s, skippable by any keypress) with a large block logo, slither and liquid-wave loaders, a multi-color progress rail, and staged boot messages
+**Drive OBS Studio from a keyboard-first terminal dashboard — or script it from the CLI.**
+A single Rust binary: a daemon that owns the OBS connection, a live TUI, and a stable proxy CLI.
+
+[Install](#-install) · [Quick Start](#-quick-start) · [TUI](#-the-tui) · [Themes](#-themes) · [CLI](#-cli-commands) · [IPC Protocol](#-ipc-protocol)
+
+</div>
+
+---
+
+## ✨ Highlights
+
+|   |   |
+|---|---|
+| 🎛️ **Real-time TUI dashboard** | Scenes, audio matrix with dB meters, profiles, collections, live telemetry, and a streaming log feed — all in one keyboard-driven view. |
+| ⚡ **Snappy, non-blocking input** | Volume, mute, and scene switches apply optimistically with debounced writes, so the UI never stalls on a round-trip. |
+| 🧩 **Daemon-first architecture** | One process owns the OBS WebSocket. The TUI and CLI are thin IPC clients over a local Unix socket. |
+| 🎨 **29 built-in themes** | btop-style live theme picker with whole-UI preview, plus fully custom palettes — down to a TTY-safe `mono` mode. |
+| 🤖 **Scriptable CLI** | Every action has a proxy command with a stable `--json` envelope and documented exit codes — perfect for hotkeys and automation. |
+| 🔒 **Secret-safe by design** | Passwords come from env vars, never plaintext config; logs and error messages are run through a redaction boundary. |
+| 🌍 **Localizable** | Ships English + Ukrainian, with drop-in runtime locale files — no recompile required. |
+| 🦀 **Single static binary** | Pure Rust + Ratatui. `curl \| sh` install, or a `systemd --user` service. No runtime dependencies. |
+
+---
+
+## 🖥️ The TUI
+
+<div align="center">
+<img src="docs/images/tui_screenshot.png" alt="obsctl TUI dashboard: header, live telemetry, scenes, audio matrix with dB meters, profiles, collections, and a live log stream" width="900">
+</div>
+
+A real-time, themeable command center with animated gradient chrome, rounded/heavy focus borders, Unicode symbols, and responsive layouts. The advanced interface is enabled by default; set `ui.advanced_ui: false` for a simplified ASCII-safe TTY mode, or `ui.show_icons: false` to hide icons while keeping the other advanced elements.
+
+- 🎬 **Scenes panel** (`s`) — navigate with `j`/`k` or arrows, `Enter` to switch; the newly active scene briefly flashes
+- 🔊 **Audio panel** (`a`) — `m` to mute/unmute, `h`/`l` or `←`/`→` to nudge volume ±5%, segmented multi-color dB meters
+- 🗂️ **Profiles panel** (`p`) — `Enter` to switch OBS profiles
+- 📚 **Collections panel** (`c`) — `Enter` to switch OBS scene collections
+- 📡 **Telemetry deck** — animated LIVE/REC badges, elapsed durations, CPU and bitrate sparklines, FPS, memory, and stream bitrate
+- 🪵 **Logs panel** — severity glyphs, colored targets/timestamps, and semantic highlighting for actions, status/error keywords, commands, numbers, and live OBS scene/profile/collection/input names
+- ⌨️ **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/collection`, `/mute`, `/vol`, `/stream`, `/rec`; results stream in with a typewriter animation
+- 🧭 **Header** — animated gradient identity, daemon/OBS connection chips, active scene/profile, and a render frame indicator
+- 🌈 **Settings view** (`F2`, `Ctrl-T`, or `/themes`) — btop-style theme picker with live full-UI preview; `Enter` persists, `Esc` reverts
+- 🎇 A responsive animated splash (~2s, skippable by any keypress) with a large block logo, slither and liquid-wave loaders, a multi-color progress rail, and staged boot messages
+
+<table>
+<tr>
+<td width="50%" align="center">
+<img src="docs/images/tui_screenshot_cmd_pallete.png" alt="Command palette open with a slash command typed and its result echoed" width="100%"><br>
+<sub><b>Command palette</b> — run any action inline; results stream back with a typewriter animation.</sub>
+</td>
+<td width="50%" align="center">
+<img src="docs/images/tui_screenshot_theme.png" alt="Appearance Lab theme picker showing 29 palettes with swatches and a live preview pane" width="100%"><br>
+<sub><b>Appearance Lab</b> — 29 palettes with swatches and a live whole-UI preview.</sub>
+</td>
+</tr>
+</table>
 
 Dashboard layout, top to bottom: header, status bar, a scenes/audio row (larger, since those lists tend to be longer), a profiles/collections row (smaller), logs, and the command palette.
 
-See [Themes](#themes) for the full list of built-in themes and how to define a custom palette.
+See [Themes](#-themes) for the full list of built-in themes and how to define a custom palette.
 
-## Architecture
+---
+
+## 🧭 Architecture
 
 ```
 OBS Studio <── obs-websocket 5.x ──> obsctl server <── Unix socket IPC ──> obsctl tui
@@ -31,7 +81,9 @@ OBS Studio <── obs-websocket 5.x ──> obsctl server <── Unix socket I
 
 **Hard rule:** only `obsctl server` connects directly to OBS. The CLI and TUI are thin IPC clients.
 
-## Install
+---
+
+## 📦 Install
 
 Download and install the latest Linux release into `~/.local/bin`:
 
@@ -41,7 +93,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://github.com/worxbend/obsctl-rs/relea
 
 Set `OBSCTL_VERSION` to pin a specific release tag, or `OBSCTL_INSTALL_DIR` to install elsewhere. The script also adds the install directory to `PATH` in `~/.bashrc` and `~/.zshrc` if it's missing.
 
-## Quick Start
+---
+
+## 🚀 Quick Start
 
 ```sh
 cargo build --release
@@ -70,7 +124,9 @@ export OBS_WEBSOCKET_PASSWORD='your_password'
 ./target/release/obsctl tui
 ```
 
-## Service Install (systemd --user)
+---
+
+## 🔧 Service Install (systemd --user)
 
 ```sh
 obsctl service install
@@ -78,7 +134,9 @@ systemctl --user enable --now obsctl.service
 obsctl service status
 ```
 
-## Config
+---
+
+## ⚙️ Config
 
 Default path: `~/.config/obsctl/config.yml`
 
@@ -123,7 +181,7 @@ keymap:
   dump_config: ["D"]
 ```
 
-**Security:** never set `connection.password` in plain text. Use `password_env` to point to an environment variable name.
+> 🔒 **Security:** never set `connection.password` in plain text. Use `password_env` to point to an environment variable name.
 
 ### TTY compatibility
 
@@ -131,7 +189,9 @@ keymap:
 
 `ui.show_icons: false` is a narrower option that hides emoji and decorative symbols while preserving the rest of the advanced interface. For terminals without reliable truecolor support, combine `advanced_ui: false` with `theme: "mono"`.
 
-## Themes
+---
+
+## 🎨 Themes
 
 Set `ui.theme` to any of the built-in ids below, or `"custom"` to use a hand-defined palette. Themes can also be browsed and applied live from the TUI's settings view (`F2`, `Ctrl-T`, or `/themes` in the command palette).
 
@@ -162,7 +222,9 @@ ui:
     highlight_fg: "#282C34"  # selected list row text
 ```
 
-## Localization
+---
+
+## 🌍 Localization
 
 obsctl currently ships two locales: English (`en`) and Ukrainian (`uk`). English is embedded in the binary and always works; Ukrainian is loaded from a locale file at runtime.
 
@@ -186,7 +248,9 @@ You can also drop an `en.yml` into that same `locales/` directory to override or
 
 **Coverage:** the CLI's `init`/`validate-config`/`service`/`server` output and error-message prefixes, plus the TUI's header and connection screens, are localized. Most other TUI widget text (scenes, audio, logs, settings, command palette) is still English-only; contributions adding more `t!()` conversions are welcome — see `locales/en.yml` for the existing key catalog and `src/localization.rs` for how translations are resolved.
 
-## CLI Commands
+---
+
+## 🕹️ CLI Commands
 
 Global options:
 
@@ -224,7 +288,9 @@ Global options:
 | `obsctl reconnect` | Ask daemon to reconnect to OBS |
 | `obsctl shutdown-server` | Shut down daemon (requires `allow_remote_shutdown: true`) |
 
-## TUI Key Bindings
+---
+
+## ⌨️ TUI Key Bindings
 
 | Key | Action |
 |-----|--------|
@@ -268,7 +334,9 @@ Type `/` to open the palette, then use any of:
 /quit
 ```
 
-## Alias Resolution
+---
+
+## 🔤 Alias Resolution
 
 Target names resolve in this order:
 1. Exact shortcut
@@ -279,7 +347,9 @@ Target names resolve in this order:
 
 Ambiguous matches fail without sending any OBS request.
 
-## Exit Codes
+---
+
+## 🔢 Exit Codes
 
 | Code | Meaning |
 |------|---------|
@@ -298,7 +368,9 @@ There are two intentional exit-code mappings:
 
 These mappings are separate because the same underlying condition can have different process context. For example, a local startup/authentication failure exits as a server/connection failure, while a reachable daemon that cannot use OBS reports `OBS_UNAVAILABLE` to proxy clients.
 
-## Observable CLI Contract
+---
+
+## 📜 Observable CLI Contract
 
 `obsctl` is daemon-first in normal use. Proxy commands connect to the local Unix socket, send one IPC command to the already-running daemon, wait for the correlated response, print the result, and exit. They do not connect directly to OBS and they do not auto-start the daemon.
 
@@ -374,7 +446,9 @@ Or install the service:
   systemctl --user enable --now obsctl.service
 ```
 
-## IPC Error Codes
+---
+
+## 🧩 IPC Error Codes
 
 IPC error responses use this shape:
 
@@ -413,7 +487,9 @@ Bad subscription topics are protocol failures. A subscribe request containing an
 
 Error messages are intended to be actionable and secret-safe. They must not include OBS passwords, authentication strings, bearer tokens, or resolved secret environment-variable values.
 
-## IPC Protocol
+---
+
+## 🔌 IPC Protocol
 
 Transport is newline-delimited JSON over a Unix domain socket.
 
@@ -484,7 +560,9 @@ Error and log messages are redacted by a best-effort boundary sanitizer. Prefer 
 
 Compatibility note: `INVALID_TOPIC` is not a public wire code in this release. Clients that previously treated invalid subscription topics specially should handle `IPC_PROTOCOL_ERROR` for that case. No other public wire code is intentionally renamed or removed.
 
-## Logging
+---
+
+## 🪵 Logging
 
 Default log path: `~/.local/state/obsctl/obsctl.log`
 
@@ -492,7 +570,9 @@ Control level with `--log-level debug|info|warn|error` in server mode.
 
 Passwords and authentication strings are never logged.
 
-## Development
+---
+
+## 🛠️ Development
 
 ```sh
 cargo fmt --check
@@ -502,3 +582,13 @@ cargo build --release
 ```
 
 Tests use a fake OBS WebSocket server and fake IPC servers — no real OBS required.
+
+---
+
+## 📄 License
+
+Released under the [MIT License](LICENSE).
+
+<div align="center">
+<sub>Built with 🦀 Rust and <a href="https://ratatui.rs">Ratatui</a> · <code>only obsctl server talks to OBS</code></sub>
+</div>
