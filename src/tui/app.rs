@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::stdout,
     path::{Path, PathBuf},
     time::Duration,
@@ -137,6 +138,15 @@ async fn run_loop(
     // Try to connect to daemon
     let (ipc_tx, mut ipc_rx) = mpsc::channel::<std::result::Result<ServerMessage, String>>(64);
 
+    // Volume changes are applied to the model optimistically on every keypress
+    // and the latest target per input is forwarded to a background debouncer,
+    // so the event loop never blocks on the IPC/OBS round-trip and OBS isn't
+    // flooded with intermediate steps during a rapid up/down burst. The
+    // debouncer reports each command's outcome back through `status_rx`.
+    let (vol_tx, vol_rx) = mpsc::unbounded_channel::<(String, u8)>();
+    let (status_tx, mut status_rx) = mpsc::channel::<String>(16);
+    spawn_volume_debouncer(socket_path.to_path_buf(), vol_rx, status_tx);
+
     match TuiEventSession::connect(socket_path).await {
         Ok(session) => {
             model.connected_to_daemon = true;
@@ -183,6 +193,13 @@ async fn run_loop(
                 }
             }
 
+            maybe_status = status_rx.recv() => {
+                if let Some(status) = maybe_status {
+                    model.set_last_result(status);
+                    terminal.draw(|f| render(f, &model))?;
+                }
+            }
+
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
@@ -193,6 +210,7 @@ async fn run_loop(
                                 socket_path,
                                 config_path.as_deref(),
                                 &ipc_tx,
+                                &vol_tx,
                             )
                             .await;
                             if should_quit {
@@ -236,12 +254,51 @@ fn spawn_session_forwarder(
     });
 }
 
+/// Trailing-edge debounce for volume changes. Receives the latest desired
+/// percentage per input, coalesces a burst of keypresses, and issues a single
+/// `set_volume` command per input once the user pauses for `DEBOUNCE`. Running
+/// on its own task keeps the TUI event loop free of the blocking IPC round-trip,
+/// and coalescing avoids flooding OBS with intermediate volume steps.
+fn spawn_volume_debouncer(
+    socket_path: PathBuf,
+    mut rx: mpsc::UnboundedReceiver<(String, u8)>,
+    status_tx: mpsc::Sender<String>,
+) {
+    const DEBOUNCE: Duration = Duration::from_millis(120);
+    tokio::spawn(async move {
+        let mut pending: HashMap<String, u8> = HashMap::new();
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        // Keep only the latest target per input; earlier steps
+                        // in the burst never need to reach OBS.
+                        Some((name, percent)) => { pending.insert(name, percent); }
+                        None => break, // TUI shut down; stop the debouncer.
+                    }
+                }
+                // Re-created each iteration, so every new keypress restarts the
+                // timer (trailing edge). Disabled while there is nothing pending.
+                _ = tokio::time::sleep(DEBOUNCE), if !pending.is_empty() => {
+                    for (name, percent) in pending.drain() {
+                        let result = send_set_volume(&socket_path, &name, percent).await;
+                        // Cosmetic status only; drop it rather than block if the
+                        // UI is slow to drain.
+                        let _ = status_tx.try_send(result);
+                    }
+                }
+            }
+        }
+    });
+}
+
 async fn handle_action(
     action: TuiAction,
     model: &mut TuiModel,
     socket_path: &Path,
     config_path: Option<&Path>,
     ipc_tx: &mpsc::Sender<std::result::Result<ServerMessage, String>>,
+    vol_tx: &mpsc::UnboundedSender<(String, u8)>,
 ) -> (bool, Option<String>) {
     match action {
         TuiAction::Quit => (true, None),
@@ -366,28 +423,8 @@ async fn handle_action(
                 (false, None)
             }
         }
-        TuiAction::VolumeDown => {
-            if let Some(a) = model.focused_audio() {
-                let name = a.name.clone();
-                let current = a.volume_percent.unwrap_or(50);
-                let new_vol = current.saturating_sub(5);
-                let result = send_set_volume(socket_path, &name, new_vol).await;
-                (false, Some(result))
-            } else {
-                (false, None)
-            }
-        }
-        TuiAction::VolumeUp => {
-            if let Some(a) = model.focused_audio() {
-                let name = a.name.clone();
-                let current = a.volume_percent.unwrap_or(50);
-                let new_vol = (current + 5).min(100);
-                let result = send_set_volume(socket_path, &name, new_vol).await;
-                (false, Some(result))
-            } else {
-                (false, None)
-            }
-        }
+        TuiAction::VolumeDown => (false, adjust_focused_volume(model, vol_tx, -5)),
+        TuiAction::VolumeUp => (false, adjust_focused_volume(model, vol_tx, 5)),
         TuiAction::RetryConnect => match TuiEventSession::connect(socket_path).await {
             Ok(session) => {
                 model.connected_to_daemon = true;
@@ -633,6 +670,24 @@ async fn send_simple_with_target(socket_path: &Path, name: &str, target: &str) -
         args: serde_json::json!({ "target": target }),
     };
     format_ipc_response(send_command(socket_path, payload).await, "ok")
+}
+
+/// Adjust the focused input's volume by `delta` percentage points: update the
+/// model immediately (optimistic feedback) and enqueue the new target on the
+/// debouncer so the actual `set_volume` command fires once the burst settles.
+/// Returns `None` — the command's outcome is surfaced asynchronously via the
+/// status channel, so there is no synchronous result to report here.
+fn adjust_focused_volume(
+    model: &mut TuiModel,
+    vol_tx: &mpsc::UnboundedSender<(String, u8)>,
+    delta: i16,
+) -> Option<String> {
+    let (name, new_percent) = model.adjusted_focused_volume(delta)?;
+    model.set_audio_volume_local(&name, new_percent);
+    // Unbounded: keypresses are human-rate, and we must never drop the newest
+    // target (which would strand the displayed level out of sync with OBS).
+    let _ = vol_tx.send((name, new_percent));
+    None
 }
 
 async fn send_set_volume(socket_path: &Path, target: &str, percent: u8) -> String {

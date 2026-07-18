@@ -397,6 +397,34 @@ impl TuiModel {
         self.audio_inputs().get(self.audio_cursor)
     }
 
+    /// Compute the new volume percentage for the focused audio input after
+    /// applying `delta` (clamped to 0..=100), returning the input's name and
+    /// the new value. Returns `None` when no audio input is focused.
+    pub fn adjusted_focused_volume(&self, delta: i16) -> Option<(String, u8)> {
+        let a = self.focused_audio()?;
+        let current = a.volume_percent.unwrap_or(50) as i16;
+        let new_percent = (current + delta).clamp(0, 100) as u8;
+        Some((a.name.clone(), new_percent))
+    }
+
+    /// Optimistically apply a volume change to the local snapshot so the UI
+    /// reflects the new level immediately, before the daemon/OBS round-trip
+    /// confirms it. The authoritative value arrives shortly after via an
+    /// `InputVolumeChanged` event (which resolves to the same value).
+    pub fn set_audio_volume_local(&mut self, name: &str, percent: u8) {
+        if let Some(snapshot) = self.snapshot.as_mut()
+            && let Some(a) = snapshot
+                .audio_inputs
+                .iter_mut()
+                .find(|a| a.name == name)
+        {
+            let mul = crate::domain::volume::percent_to_mul(percent);
+            a.volume_percent = Some(percent);
+            a.volume_mul = Some(mul);
+            a.volume_db = Some(crate::domain::volume::mul_to_db(mul));
+        }
+    }
+
     pub fn focused_profile(&self) -> Option<&str> {
         self.profiles().get(self.profile_cursor).map(String::as_str)
     }
@@ -455,6 +483,91 @@ mod tests {
         };
         model.clamp_cursors();
         model
+    }
+
+    fn model_with_audio(inputs: Vec<AudioState>) -> TuiModel {
+        let mut model = TuiModel {
+            snapshot: Some(ObsSnapshot {
+                audio_inputs: inputs,
+                ..Default::default()
+            }),
+            focus: FocusPanel::Audio,
+            ..Default::default()
+        };
+        model.clamp_cursors();
+        model
+    }
+
+    fn audio(name: &str, percent: u8) -> AudioState {
+        AudioState {
+            name: name.to_string(),
+            volume_percent: Some(percent),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn adjusted_focused_volume_clamps_to_range() {
+        let mut model = model_with_audio(vec![audio("Mic", 98), audio("Desktop", 3)]);
+
+        assert_eq!(
+            model.adjusted_focused_volume(5),
+            Some(("Mic".to_string(), 100))
+        );
+
+        model.audio_cursor = 1;
+        assert_eq!(
+            model.adjusted_focused_volume(-5),
+            Some(("Desktop".to_string(), 0))
+        );
+    }
+
+    #[test]
+    fn adjusted_focused_volume_defaults_when_percent_unknown() {
+        let model = model_with_audio(vec![AudioState {
+            name: "Mic".to_string(),
+            volume_percent: None,
+            ..Default::default()
+        }]);
+
+        // Falls back to 50 before applying the delta.
+        assert_eq!(
+            model.adjusted_focused_volume(5),
+            Some(("Mic".to_string(), 55))
+        );
+    }
+
+    #[test]
+    fn adjusted_focused_volume_is_none_without_audio() {
+        let model = TuiModel::default();
+        assert_eq!(model.adjusted_focused_volume(5), None);
+    }
+
+    #[test]
+    fn set_audio_volume_local_updates_percent_mul_and_db_together() {
+        let mut model = model_with_audio(vec![audio("Mic", 50), audio("Desktop", 50)]);
+
+        model.set_audio_volume_local("Desktop", 75);
+
+        let mic = &model.audio_inputs()[0];
+        let desktop = &model.audio_inputs()[1];
+        // Untargeted input is left untouched.
+        assert_eq!(mic.volume_percent, Some(50));
+        // Targeted input reflects the new level across all three fields.
+        assert_eq!(desktop.volume_percent, Some(75));
+        assert_eq!(
+            desktop.volume_mul,
+            Some(crate::domain::volume::percent_to_mul(75))
+        );
+        assert!(desktop.volume_db.is_some());
+    }
+
+    #[test]
+    fn set_audio_volume_local_ignores_unknown_input() {
+        let mut model = model_with_audio(vec![audio("Mic", 50)]);
+        // Must not panic or mutate anything for a name that isn't present.
+        model.set_audio_volume_local("Nonexistent", 10);
+        assert_eq!(model.audio_inputs()[0].volume_percent, Some(50));
     }
 
     #[test]
