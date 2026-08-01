@@ -508,7 +508,7 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) {
         return;
     }
 
-    let areas = layout::compute(f);
+    let areas = layout::compute(f, model.streaming());
 
     if !model.connected_to_daemon {
         widgets::connection::render_unavailable(f, f.area(), model);
@@ -522,6 +522,9 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) {
     widgets::profiles::render(f, areas.profiles, model);
     widgets::collections::render(f, areas.collections, model);
     widgets::logs::render(f, areas.logs, model);
+    if let Some(stats_area) = areas.stats {
+        widgets::stats::render(f, stats_area, model);
+    }
     widgets::command_palette::render(f, areas.palette, model);
 }
 

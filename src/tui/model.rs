@@ -4,7 +4,7 @@ use time::OffsetDateTime;
 
 use crate::{
     ipc::protocol::{LogEvent, LogLevel},
-    obs::state::{AudioState, ObsSnapshot, SceneState, ServerStatus},
+    obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState, ServerStatus},
     tui::{anim::AnimClock, theme::Theme},
 };
 
@@ -66,6 +66,44 @@ pub enum View {
     Settings,
 }
 
+/// The four cumulative frame counters `GetStats` reports.
+///
+/// OBS counts these since *it* launched, not since the stream started, so
+/// the stats pane subtracts a per-stream baseline (see
+/// [`TuiModel::stream_frame_baseline`]) to show what the current broadcast
+/// actually dropped — a stream that starts on an hours-old OBS session
+/// would otherwise inherit every frame that machine has ever missed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FrameCounters {
+    pub render_skipped: u64,
+    pub render_total: u64,
+    pub output_skipped: u64,
+    pub output_total: u64,
+}
+
+impl FrameCounters {
+    pub fn from_stats(stats: &ObsStats) -> Self {
+        Self {
+            render_skipped: stats.render_skipped_frames,
+            render_total: stats.render_total_frames,
+            output_skipped: stats.output_skipped_frames,
+            output_total: stats.output_total_frames,
+        }
+    }
+
+    /// Counters accumulated since `baseline`. Saturating, so an OBS restart
+    /// mid-stream (which resets the counters) reads as zero drops rather
+    /// than wrapping to a huge number.
+    pub fn since(self, baseline: Self) -> Self {
+        Self {
+            render_skipped: self.render_skipped.saturating_sub(baseline.render_skipped),
+            render_total: self.render_total.saturating_sub(baseline.render_total),
+            output_skipped: self.output_skipped.saturating_sub(baseline.output_skipped),
+            output_total: self.output_total.saturating_sub(baseline.output_total),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TuiModel {
     pub snapshot: Option<ObsSnapshot>,
@@ -95,6 +133,12 @@ pub struct TuiModel {
     /// Short rolling histories used by the animated status sparklines.
     pub cpu_history: Vec<f64>,
     pub bitrate_history: Vec<f64>,
+    pub fps_history: Vec<f64>,
+    pub frame_time_history: Vec<f64>,
+    /// Lifetime frame counters as of the moment the current stream started,
+    /// used to report per-stream drops in the stats pane. `None` while not
+    /// streaming; set on the first stats sample after streaming begins.
+    pub stream_frame_baseline: Option<FrameCounters>,
     /// Advances once per render tick; drives pulsing/spinner animations.
     pub anim: AnimClock,
     /// (scene name, tick it became active) — drives the brief flash
@@ -133,6 +177,9 @@ impl Default for TuiModel {
             advanced_ui: true,
             cpu_history: Vec::new(),
             bitrate_history: Vec::new(),
+            fps_history: Vec::new(),
+            frame_time_history: Vec::new(),
+            stream_frame_baseline: None,
             anim: AnimClock::default(),
             scene_flash: None,
             view: View::default(),
@@ -228,16 +275,37 @@ impl TuiModel {
 
     pub fn record_metric_sample(&mut self) {
         const HISTORY_LIMIT: usize = 32;
-        if let Some(stats) = self.stats() {
+        let stats = self.stats().copied();
+        if let Some(stats) = stats {
             self.cpu_history.push(stats.cpu_usage_percent);
+            self.fps_history.push(stats.active_fps);
+            self.frame_time_history
+                .push(stats.average_frame_render_time_ms);
         }
         if let Some(bitrate) = self.stream_bitrate_kbps() {
             self.bitrate_history.push(bitrate);
         }
-        for history in [&mut self.cpu_history, &mut self.bitrate_history] {
+        for history in [
+            &mut self.cpu_history,
+            &mut self.bitrate_history,
+            &mut self.fps_history,
+            &mut self.frame_time_history,
+        ] {
             if history.len() > HISTORY_LIMIT {
                 history.drain(0..history.len() - HISTORY_LIMIT);
             }
+        }
+
+        // Latch the per-stream frame baseline on the first sample of a
+        // stream and drop it when the stream ends, so drops are always
+        // reported relative to the broadcast currently on air.
+        match (self.streaming(), stats) {
+            (true, Some(stats)) => {
+                self.stream_frame_baseline
+                    .get_or_insert_with(|| FrameCounters::from_stats(&stats));
+            }
+            (false, _) => self.stream_frame_baseline = None,
+            (true, None) => {}
         }
     }
 
@@ -306,8 +374,30 @@ impl TuiModel {
             .and_then(|s| s.current_scene_collection.as_deref())
     }
 
-    pub fn stats(&self) -> Option<&crate::obs::state::ObsStats> {
+    pub fn stats(&self) -> Option<&ObsStats> {
         self.snapshot.as_ref().and_then(|s| s.stats.as_ref())
+    }
+
+    pub fn streaming(&self) -> bool {
+        self.snapshot.as_ref().is_some_and(|s| s.streaming)
+    }
+
+    pub fn recording(&self) -> bool {
+        self.snapshot.as_ref().is_some_and(|s| s.recording)
+    }
+
+    /// Frames rendered and dropped since the current stream started.
+    ///
+    /// `None` when not streaming, and also on the sample that establishes
+    /// the baseline — at that point no frames have been counted *since* it,
+    /// so the deltas are all zero and a caller would be dividing by a zero
+    /// total. Callers fall back to OBS's lifetime counters until the next
+    /// poll gives this something to measure.
+    pub fn stream_frame_drops(&self) -> Option<FrameCounters> {
+        let stats = self.stats()?;
+        let baseline = self.stream_frame_baseline?;
+        let drops = FrameCounters::from_stats(stats).since(baseline);
+        (drops.render_total > 0 || drops.output_total > 0).then_some(drops)
     }
 
     pub fn stream_bitrate_kbps(&self) -> Option<f64> {
@@ -413,10 +503,7 @@ impl TuiModel {
     /// `InputVolumeChanged` event (which resolves to the same value).
     pub fn set_audio_volume_local(&mut self, name: &str, percent: u8) {
         if let Some(snapshot) = self.snapshot.as_mut()
-            && let Some(a) = snapshot
-                .audio_inputs
-                .iter_mut()
-                .find(|a| a.name == name)
+            && let Some(a) = snapshot.audio_inputs.iter_mut().find(|a| a.name == name)
         {
             let mul = crate::domain::volume::percent_to_mul(percent);
             a.volume_percent = Some(percent);
@@ -615,6 +702,110 @@ mod tests {
         assert_eq!(model.focused_profile(), Some("Streaming"));
         model.move_up();
         assert_eq!(model.focused_profile(), Some("Default"));
+    }
+
+    fn stats(fps: f64, render_skipped: u64, render_total: u64) -> ObsStats {
+        ObsStats {
+            active_fps: fps,
+            average_frame_render_time_ms: 4.0,
+            render_skipped_frames: render_skipped,
+            render_total_frames: render_total,
+            output_skipped_frames: render_skipped,
+            output_total_frames: render_total,
+            ..ObsStats::default()
+        }
+    }
+
+    fn model_with_stats(streaming: bool, stats: ObsStats) -> TuiModel {
+        let mut model = TuiModel {
+            snapshot: Some(ObsSnapshot {
+                streaming,
+                stats: Some(stats),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        model.record_metric_sample();
+        model
+    }
+
+    fn set_stats(model: &mut TuiModel, stats: ObsStats) {
+        model.snapshot.as_mut().unwrap().stats = Some(stats);
+        model.record_metric_sample();
+    }
+
+    #[test]
+    fn stream_frame_baseline_latches_on_the_first_sample_of_a_stream() {
+        let mut model = model_with_stats(true, stats(60.0, 100, 50_000));
+
+        // The sample that sets the baseline has nothing to measure yet.
+        assert_eq!(
+            model.stream_frame_baseline,
+            Some(FrameCounters {
+                render_skipped: 100,
+                render_total: 50_000,
+                output_skipped: 100,
+                output_total: 50_000,
+            })
+        );
+        assert_eq!(model.stream_frame_drops(), None);
+
+        // Later samples report only what this stream lost, not OBS's
+        // since-launch totals.
+        set_stats(&mut model, stats(60.0, 103, 50_600));
+        let drops = model.stream_frame_drops().expect("per-stream drops");
+        assert_eq!(drops.render_skipped, 3);
+        assert_eq!(drops.render_total, 600);
+    }
+
+    #[test]
+    fn stream_frame_baseline_clears_when_the_stream_stops() {
+        let mut model = model_with_stats(true, stats(60.0, 0, 1_000));
+        assert!(model.stream_frame_baseline.is_some());
+
+        model.snapshot.as_mut().unwrap().streaming = false;
+        model.record_metric_sample();
+        assert_eq!(model.stream_frame_baseline, None);
+        assert_eq!(model.stream_frame_drops(), None);
+
+        // Starting a second stream re-baselines against the counters as of
+        // that moment rather than reusing the first stream's.
+        model.snapshot.as_mut().unwrap().streaming = true;
+        set_stats(&mut model, stats(60.0, 7, 9_000));
+        assert_eq!(
+            model.stream_frame_baseline.map(|b| b.render_total),
+            Some(9_000)
+        );
+    }
+
+    #[test]
+    fn stream_frame_drops_survive_counters_resetting_mid_stream() {
+        let mut model = model_with_stats(true, stats(60.0, 40, 90_000));
+        // OBS restarted: counters go backwards. Saturating subtraction must
+        // not wrap into a nonsense drop count.
+        set_stats(&mut model, stats(60.0, 1, 500));
+        let drops = model.stream_frame_drops();
+        assert!(
+            drops.is_none_or(|d| d.render_skipped == 0 && d.render_total == 0),
+            "counter reset should read as no measurable drops, got {drops:?}"
+        );
+    }
+
+    #[test]
+    fn not_streaming_never_reports_per_stream_drops() {
+        let model = model_with_stats(false, stats(60.0, 5, 1_000));
+        assert_eq!(model.stream_frame_baseline, None);
+        assert_eq!(model.stream_frame_drops(), None);
+        assert!(!model.streaming());
+    }
+
+    #[test]
+    fn frame_and_fps_history_track_each_stats_sample() {
+        let mut model = model_with_stats(true, stats(60.0, 0, 100));
+        set_stats(&mut model, stats(48.5, 0, 200));
+
+        assert_eq!(model.fps_history, vec![60.0, 48.5]);
+        assert_eq!(model.frame_time_history, vec![4.0, 4.0]);
     }
 
     #[test]

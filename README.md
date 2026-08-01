@@ -48,6 +48,7 @@ A real-time, themeable command center with animated gradient chrome, rounded/hea
 - 📚 **Collections panel** (`c`) — `Enter` to switch OBS scene collections
 - 📡 **Telemetry deck** — animated LIVE/REC badges, elapsed durations, CPU and bitrate sparklines, FPS, memory, and stream bitrate
 - 🪵 **Logs panel** — severity glyphs, colored targets/timestamps, and semantic highlighting for actions, status/error keywords, commands, numbers, and live OBS scene/profile/collection/input names
+- ⚡ **Stats panel** — appears beside the logs the moment you go live: active FPS against the rate you've been holding, average frame render time as a share of the frame budget, and render/output frames skipped. Every row is colored by health and topped with a plain-language verdict (`HEALTHY` / `STRAINED` / `DROPPING`). Drop counts are measured from the start of the current stream, not OBS's since-launch totals
 - ⌨️ **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/collection`, `/mute`, `/vol`, `/stream`, `/rec`; results stream in with a typewriter animation
 - 🧭 **Header** — animated gradient identity, daemon/OBS connection chips, active scene/profile, and a render frame indicator
 - 🌈 **Settings view** (`F2`, `Ctrl-T`, or `/themes`) — btop-style theme picker with live full-UI preview; `Enter` persists, `Esc` reverts
@@ -66,7 +67,7 @@ A real-time, themeable command center with animated gradient chrome, rounded/hea
 </tr>
 </table>
 
-Dashboard layout, top to bottom: header, status bar, a scenes/audio row (larger, since those lists tend to be longer), a profiles/collections row (smaller), logs, and the command palette.
+Dashboard layout, top to bottom: header, status bar, a scenes/audio row (larger, since those lists tend to be longer), a profiles/collections row (smaller), logs, and the command palette. While streaming, the stats panel takes the right-hand 46 columns of the logs strip — on terminals too narrow to fit both, logs keep the full width.
 
 See [Themes](#-themes) for the full list of built-in themes and how to define a custom palette.
 

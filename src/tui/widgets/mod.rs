@@ -11,6 +11,7 @@ pub mod scene_map;
 pub mod scenes;
 pub mod settings;
 pub mod splash;
+pub mod stats;
 
 use ratatui::{Frame, style::Style, widgets::Block};
 

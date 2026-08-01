@@ -4,7 +4,7 @@
 
 use obsctl_rs::{
     ipc::protocol::LogLevel,
-    obs::state::{AudioState, ObsSnapshot, SceneState},
+    obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState},
     tui::{
         model::{TuiLogEntry, TuiModel},
         widgets,
@@ -496,7 +496,7 @@ fn full_dashboard_renders_all_panels_with_new_layout() {
     let model = model_connected();
     let mut t = term(100, 40);
     t.draw(|f| {
-        let areas = layout::compute(f);
+        let areas = layout::compute(f, model.streaming());
         widgets::header::render(f, areas.header, &model);
         widgets::live_bar::render(f, areas.live_bar, &model);
         widgets::scenes::render(f, areas.scenes, &model);
@@ -860,4 +860,200 @@ fn all_widgets_survive_minimum_terminal_size() {
         widgets::audio::render(f, area, &model);
     })
     .unwrap();
+}
+
+// ── stats pane (stream health) ───────────────────────────────────────────────
+
+fn snap_streaming(stats: ObsStats) -> ObsSnapshot {
+    ObsSnapshot {
+        streaming: true,
+        stats: Some(stats),
+        stream_bitrate_kbps: Some(6000.0),
+        stream_duration_ms: Some(65_000),
+        ..snap_connected()
+    }
+}
+
+fn healthy_stats() -> ObsStats {
+    ObsStats {
+        cpu_usage_percent: 12.5,
+        memory_usage_mb: 512.0,
+        available_disk_space_mb: 100_000.0,
+        active_fps: 60.0,
+        average_frame_render_time_ms: 3.2,
+        render_skipped_frames: 0,
+        render_total_frames: 10_000,
+        output_skipped_frames: 0,
+        output_total_frames: 9_999,
+    }
+}
+
+fn model_streaming(stats: ObsStats) -> TuiModel {
+    let mut model = model_connected();
+    model.snapshot = Some(snap_streaming(stats));
+    model.clamp_cursors();
+    model.record_metric_sample();
+    model
+}
+
+fn draw_stats(model: &TuiModel) -> String {
+    let mut t = term(46, 7);
+    t.draw(|f| {
+        widgets::stats::render(f, Rect::new(0, 0, 46, 7), model);
+    })
+    .unwrap();
+    buf_string(&t)
+}
+
+#[test]
+fn stats_pane_reports_every_frame_metric_while_streaming() {
+    let out = draw_stats(&model_streaming(healthy_stats()));
+
+    assert!(
+        out.contains("Stats"),
+        "should render the pane title; got:\n{out}"
+    );
+    assert!(out.contains("FPS"), "should label active FPS");
+    assert!(out.contains("60.0"), "should show active FPS value");
+    assert!(out.contains("target 60"), "should show the FPS reference");
+    assert!(out.contains("FRAME"), "should label frame render time");
+    assert!(
+        out.contains("3.20ms"),
+        "should show average frame render time"
+    );
+    assert!(out.contains("budget"), "should show frame budget usage");
+    assert!(out.contains("RENDER"), "should label render-skipped frames");
+    assert!(out.contains("OUTPUT"), "should label output-skipped frames");
+    assert!(out.contains("10.0k"), "should show render frame totals");
+    assert!(
+        out.contains("HEALTHY"),
+        "a clean stream should read healthy"
+    );
+}
+
+#[test]
+fn stats_pane_falls_back_to_lifetime_counters_on_the_baseline_sample() {
+    // The first sample of a stream *is* the baseline, so there are no
+    // per-stream frames to divide by yet.
+    let out = draw_stats(&model_streaming(healthy_stats()));
+    assert!(
+        out.contains("since launch"),
+        "first sample should label counters as lifetime; got:\n{out}"
+    );
+    assert!(
+        !out.contains("0/0"),
+        "should never show an empty per-stream ratio; got:\n{out}"
+    );
+}
+
+#[test]
+fn stats_pane_reports_per_stream_drops_and_flags_a_degraded_stream() {
+    let mut model = model_streaming(healthy_stats());
+    // Second poll: FPS has sagged, frames are being skipped.
+    if let Some(stats) = model.snapshot.as_mut().and_then(|s| s.stats.as_mut()) {
+        stats.active_fps = 51.3;
+        stats.average_frame_render_time_ms = 14.9;
+        stats.render_total_frames = 10_600;
+        stats.render_skipped_frames = 9;
+        stats.output_total_frames = 10_580;
+        stats.output_skipped_frames = 42;
+    }
+    model.record_metric_sample();
+
+    let out = draw_stats(&model);
+    assert!(
+        out.contains("this stream"),
+        "should switch to per-stream counters once measurable; got:\n{out}"
+    );
+    // 9 skipped of the 600 frames rendered since the stream started — not
+    // 9 of OBS's 10 600 lifetime frames.
+    assert!(
+        out.contains("9/600"),
+        "should subtract the per-stream baseline; got:\n{out}"
+    );
+    assert!(
+        out.contains("1.50%"),
+        "should show the per-stream render drop rate"
+    );
+    assert!(out.contains("51.3"), "should show the sagging FPS");
+    assert!(
+        out.contains("DROPPING"),
+        "7% output drops should read as dropping; got:\n{out}"
+    );
+}
+
+#[test]
+fn stats_pane_waits_for_metrics_before_reporting() {
+    let mut model = model_streaming(healthy_stats());
+    model.snapshot.as_mut().unwrap().stats = None;
+
+    let out = draw_stats(&model);
+    assert!(
+        out.contains("waiting"),
+        "should show a placeholder before the first poll; got:\n{out}"
+    );
+    assert!(!out.contains("FPS"), "should not show empty metric rows");
+}
+
+#[test]
+fn stats_pane_uses_ascii_fallbacks_in_simple_mode() {
+    let mut model = model_streaming(healthy_stats());
+    model.advanced_ui = false;
+    model.show_icons = false;
+
+    let out = draw_stats(&model);
+    assert!(
+        out.contains("FPS"),
+        "should still show metrics; got:\n{out}"
+    );
+    assert!(out.contains("##"), "budget bar should use ASCII blocks");
+    assert!(
+        !out.contains('█') && !out.contains('░') && !out.contains('╭'),
+        "should not emit Unicode blocks or rounded borders; got:\n{out}"
+    );
+}
+
+#[test]
+fn stats_pane_survives_minimum_terminal_size() {
+    let model = model_streaming(healthy_stats());
+    let mut t = term(12, 3);
+    t.draw(|f| {
+        widgets::stats::render(f, Rect::new(0, 0, 12, 3), &model);
+    })
+    .unwrap();
+}
+
+#[test]
+fn dashboard_shows_the_stats_pane_only_while_streaming() {
+    use obsctl_rs::tui::layout;
+
+    fn dashboard(model: &TuiModel) -> String {
+        let mut t = term(120, 40);
+        t.draw(|f| {
+            let areas = layout::compute(f, model.streaming());
+            widgets::logs::render(f, areas.logs, model);
+            if let Some(stats) = areas.stats {
+                widgets::stats::render(f, stats, model);
+            }
+        })
+        .unwrap();
+        buf_string(&t)
+    }
+
+    let idle = dashboard(&model_connected());
+    assert!(idle.contains("Logs"), "logs should always render");
+    assert!(
+        !idle.contains("Stream Health"),
+        "stats pane should stay hidden while idle; got:\n{idle}"
+    );
+
+    let live = dashboard(&model_streaming(healthy_stats()));
+    assert!(
+        live.contains("Logs"),
+        "logs should keep its pane while streaming"
+    );
+    assert!(
+        live.contains("Stream Health"),
+        "stats pane should appear beside logs while streaming; got:\n{live}"
+    );
 }
