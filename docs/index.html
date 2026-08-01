@@ -1,0 +1,1115 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>obsctl — a local OBS Studio command center for your terminal</title>
+<meta name="description" content="Drive OBS Studio from a keyboard-first terminal dashboard, or script it from the CLI. One Rust binary: a daemon that owns the OBS WebSocket, a live TUI, and a stable proxy CLI.">
+<link rel="icon" href="images/logo.svg">
+<meta property="og:title" content="obsctl — a local OBS Studio command center for your terminal">
+<meta property="og:description" content="A keyboard-first TUI and a scriptable CLI for OBS Studio. One Rust binary, 29 themes, stable JSON output.">
+<meta property="og:image" content="images/banner.png">
+
+<style>
+/* ═══════════════════════════════════════════════════════════════════════════
+   obsctl microsite
+   Palette is the app's own default theme (src/tui/theme.rs :: CLAUDE), so the
+   site and the binary share one identity. Section chrome mirrors the TUI's
+   chrome::panel — border, title chip, two-digit count badge, dim hint.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Ground + ink: warm neutrals biased toward the terracotta accent, taken
+     from the app's default theme rather than a generic grey ramp. */
+  --ground:     #1B1916;
+  --ground-lift:#221F1B;
+  --panel:      #201D19;
+  --ink:        #ECE8E1;
+  --ink-dim:    #B5AFA4;
+  --muted:      #8A867D;
+  --rule:       #3A3630;
+  --rule-soft:  #2A2723;
+
+  --accent:     #D97757;
+  --accent-soft:#E8C59E;
+  --accent-deep:#C25B3C;
+
+  /* Semantic colors are separate from the accent and never used decoratively. */
+  --ok:      #87B37B;
+  --warn:    #E0B44C;
+  --crit:    #E06C5F;
+  --info:    #7BA9C7;
+
+  --shadow: 0 1px 0 rgba(255,255,255,.03), 0 18px 40px -24px rgba(0,0,0,.8);
+
+  /* Type roles: mono is the display voice, serif carries prose. */
+  --mono: ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", SFMono-Regular,
+          Menlo, Consolas, "Liberation Mono", monospace;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua",
+           Georgia, "Times New Roman", serif;
+
+  --measure: 68ch;
+  --gutter: clamp(1.1rem, 4vw, 2.5rem);
+
+  color-scheme: dark;
+}
+
+/* Light mode is derived from the app's own light themes (github-light /
+   rose-pine-dawn), not inverted: warm paper, deepened accent for contrast. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --ground:     #FBF8F3;
+    --ground-lift:#FFFFFF;
+    --panel:      #FFFFFF;
+    --ink:        #241F1A;
+    --ink-dim:    #4B443C;
+    --muted:      #7C736A;
+    --rule:       #DFD5C7;
+    --rule-soft:  #EDE6DA;
+    --accent:     #B4502F;
+    --accent-soft:#8A5A33;
+    --accent-deep:#8F3D20;
+    --ok:   #4C7A42;
+    --warn: #8A6612;
+    --crit: #A93B31;
+    --info: #3D6F8E;
+    --shadow: 0 1px 0 rgba(0,0,0,.02), 0 16px 36px -26px rgba(80,50,30,.45);
+    color-scheme: light;
+  }
+}
+
+/* The viewer's explicit toggle must win over the OS preference, both ways. */
+:root[data-theme="light"] {
+  --ground:#FBF8F3; --ground-lift:#FFFFFF; --panel:#FFFFFF;
+  --ink:#241F1A; --ink-dim:#4B443C; --muted:#7C736A;
+  --rule:#DFD5C7; --rule-soft:#EDE6DA;
+  --accent:#B4502F; --accent-soft:#8A5A33; --accent-deep:#8F3D20;
+  --ok:#4C7A42; --warn:#8A6612; --crit:#A93B31; --info:#3D6F8E;
+  --shadow: 0 1px 0 rgba(0,0,0,.02), 0 16px 36px -26px rgba(80,50,30,.45);
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --ground:#1B1916; --ground-lift:#221F1B; --panel:#201D19;
+  --ink:#ECE8E1; --ink-dim:#B5AFA4; --muted:#8A867D;
+  --rule:#3A3630; --rule-soft:#2A2723;
+  --accent:#D97757; --accent-soft:#E8C59E; --accent-deep:#C25B3C;
+  --ok:#87B37B; --warn:#E0B44C; --crit:#E06C5F; --info:#7BA9C7;
+  --shadow: 0 1px 0 rgba(255,255,255,.03), 0 18px 40px -24px rgba(0,0,0,.8);
+  color-scheme: dark;
+}
+
+/* ── base ──────────────────────────────────────────────────────────────── */
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: clamp(1rem, .96rem + .2vw, 1.09rem);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* A faint terracotta bloom behind the fold, echoing the logo's radial glow. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -30vh -10vw auto;
+  height: 90vh;
+  background: radial-gradient(60% 55% at 22% 30%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.wrap {
+  position: relative;
+  z-index: 1;
+  max-width: 1140px;
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+p { max-width: var(--measure); }
+
+a { color: var(--accent); text-underline-offset: .18em; text-decoration-thickness: 1px; }
+a:hover { color: var(--accent-soft); }
+
+:where(a, button, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+code, kbd, samp, pre { font-family: var(--mono); }
+
+.mono { font-family: var(--mono); }
+.nums { font-variant-numeric: tabular-nums; }
+
+/* Small uppercase utility label — the site's only tracked type. */
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0;
+}
+
+/* ── panel chrome (mirrors tui::widgets::chrome::panel) ────────────────── */
+
+.panel {
+  position: relative;
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: clamp(1.5rem, 3vw, 2.4rem) clamp(1.1rem, 3vw, 2.2rem) clamp(1.4rem, 3vw, 2.2rem);
+  box-shadow: var(--shadow);
+}
+
+.panel > .panel-title {
+  position: absolute;
+  top: -.72em;
+  left: clamp(1rem, 3vw, 1.9rem);
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding-inline: .6rem;
+  background: var(--ground);
+  font-family: var(--mono);
+  font-size: .82rem;
+  line-height: 1.4;
+  white-space: nowrap;
+  max-width: calc(100% - 3rem);
+  overflow: hidden;
+}
+.panel > .panel-title .t-icon { color: var(--accent); }
+.panel > .panel-title .t-label {
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+/* Two-digit badge, exactly as the TUI renders `{count:02}`. */
+.panel > .panel-title .t-count {
+  background: var(--accent);
+  color: var(--ground);
+  font-weight: 700;
+  padding: 0 .38rem;
+  border-radius: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.panel > .panel-title .t-hint { color: var(--muted); }
+@media (max-width: 620px) {
+  .panel > .panel-title .t-hint { display: none; }
+}
+
+/* ── section rhythm ────────────────────────────────────────────────────── */
+
+.stack { display: flex; flex-direction: column; gap: clamp(3.2rem, 8vw, 5.5rem); }
+.stack > * { margin: 0; }
+
+.section-lede { display: flex; flex-direction: column; gap: .7rem; margin-bottom: 2rem; }
+.section-lede h2 {
+  font-family: var(--mono);
+  font-size: clamp(1.4rem, 1.1rem + 1.4vw, 2rem);
+  font-weight: 600;
+  letter-spacing: -.035em;
+  line-height: 1.15;
+  text-wrap: balance;
+  margin: 0;
+  color: var(--ink);
+}
+.section-lede p { color: var(--ink-dim); margin: 0; }
+
+/* ── masthead ──────────────────────────────────────────────────────────── */
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-block: 1.4rem;
+  font-family: var(--mono);
+  font-size: .85rem;
+}
+.masthead .brand { display: flex; align-items: center; gap: .6rem; font-weight: 700; letter-spacing: -.03em; color: var(--ink); text-decoration: none; }
+.masthead .brand svg { width: 26px; height: 26px; display: block; }
+.masthead nav { display: flex; align-items: center; gap: 1.35rem; }
+.masthead nav a { color: var(--muted); text-decoration: none; }
+.masthead nav a:hover { color: var(--accent); }
+@media (max-width: 760px) { .masthead nav .opt { display: none; } }
+
+.theme-toggle {
+  background: none;
+  border: 1px solid var(--rule);
+  color: var(--muted);
+  font: inherit;
+  border-radius: 6px;
+  padding: .2rem .55rem;
+  cursor: pointer;
+}
+.theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ── hero ──────────────────────────────────────────────────────────────── */
+
+.hero { padding-block: clamp(1.5rem, 5vw, 3.5rem) clamp(3.5rem, 9vw, 6rem); }
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: clamp(2rem, 5vw, 3.4rem);
+  align-items: start;
+}
+@media (min-width: 1000px) {
+  .hero-grid { grid-template-columns: minmax(0, 27rem) minmax(0, 1fr); gap: 3.4rem; }
+}
+
+.hero h1 {
+  font-family: var(--mono);
+  font-size: clamp(3.1rem, 2rem + 5vw, 5.4rem);
+  font-weight: 700;
+  letter-spacing: -.06em;
+  line-height: .92;
+  margin: 0;
+  background: linear-gradient(112deg, var(--accent-soft), var(--accent) 52%, var(--accent-deep));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero .thesis {
+  font-size: clamp(1.16rem, 1rem + .5vw, 1.42rem);
+  line-height: 1.45;
+  color: var(--ink);
+  margin: 1.1rem 0 0;
+  text-wrap: balance;
+}
+.hero .sub { color: var(--ink-dim); margin-top: .9rem; }
+.hero .rule {
+  height: 3px; width: 9rem; margin-top: 1.4rem; border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), transparent);
+}
+
+.install {
+  margin-top: 1.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: .55rem;
+}
+.install-row {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  background: var(--ground-lift);
+  overflow: hidden;
+}
+.install-row code {
+  flex: 1;
+  padding: .72rem .85rem;
+  font-size: .8rem;
+  overflow-x: auto;
+  white-space: nowrap;
+  color: var(--ink);
+  scrollbar-width: thin;
+}
+.install-row code .dollar { color: var(--accent); user-select: none; }
+.copy-btn {
+  flex: none;
+  border: 0;
+  border-left: 1px solid var(--rule);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding-inline: .9rem;
+  cursor: pointer;
+}
+.copy-btn:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.copy-btn[data-copied="1"] { color: var(--ok); }
+.install .note { font-family: var(--mono); font-size: .74rem; color: var(--muted); margin: 0; }
+
+.badges { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: 1.5rem; }
+.badges span {
+  font-family: var(--mono);
+  font-size: .7rem;
+  letter-spacing: .04em;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: .18rem .6rem;
+  color: var(--muted);
+}
+.badges span b { color: var(--ink-dim); font-weight: 600; }
+
+/* ── the live TUI replica ──────────────────────────────────────────────── */
+
+/* The replica sizes itself against its own column, not the viewport: between
+   1000px and ~1300px the hero is already two columns, so the replica is far
+   narrower than the window and viewport media queries would let its panels
+   clip. */
+.replica-col { container-type: inline-size; }
+
+/* The replica carries its own palette (--t-*), repainted by the theme rail.
+   It is deliberately independent of the page's light/dark tokens: a terminal
+   stays a terminal regardless of how the page around it is lit. */
+.tui {
+  --t-bg:#1B1916; --t-accent:#D97757; --t-accent-alt:#E8C59E; --t-fg:#ECE8E1;
+  --t-muted:#8A867D; --t-border:#4A4640; --t-focus:#D97757; --t-ok:#87B37B;
+  --t-warn:#E0B44C; --t-crit:#E06C5F; --t-info:#7BA9C7; --t-hl-bg:#D97757;
+  --t-hl-fg:#1B1916;
+  background: var(--t-bg);
+  border: 1px solid var(--t-border);
+  border-radius: 12px;
+  padding: .7rem;
+  font-family: var(--mono);
+  font-size: clamp(.5rem, 1.72cqw, .76rem);
+  line-height: 1.55;
+  color: var(--t-fg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  transition: background-color .35s ease, border-color .35s ease;
+}
+.tui * { transition: color .35s ease, background-color .35s ease, border-color .35s ease; }
+.tui-row { display: grid; gap: .45rem; }
+.tui-row.two { grid-template-columns: 1fr 1fr; }
+/* Each pane needs ~46 characters — the width the real TUI panel is given.
+   Under that, stack rather than truncate the readings. */
+@container (max-width: 620px) {
+  .tui-row.two { grid-template-columns: minmax(0, 1fr); }
+}
+
+.tp {                      /* a panel inside the replica */
+  position: relative;
+  border: 1px solid var(--t-border);
+  border-radius: 7px;
+  padding: .75rem .6rem .55rem;
+  min-width: 0;
+}
+.tp.focused { border-color: var(--t-focus); border-width: 2px; padding: calc(.75rem - 1px) calc(.6rem - 1px) calc(.55rem - 1px); }
+.tp-title {
+  position: absolute; top: -.68em; left: .7rem;
+  display: flex; align-items: center; gap: .35rem;
+  background: var(--t-bg); padding-inline: .3rem; white-space: nowrap;
+  max-width: calc(100% - 1.4rem); overflow: hidden;
+}
+.tp-title .n { color: var(--t-accent); font-weight: 700; }
+.tp-title .c { background: var(--t-hl-bg); color: var(--t-hl-fg); font-weight: 700; padding: 0 .25rem; border-radius: 2px; }
+.tp-title .h { color: var(--t-muted); }
+.tui .dim { color: var(--t-muted); }
+.tui .ok { color: var(--t-ok); }
+.tui .warn { color: var(--t-warn); }
+.tui .crit { color: var(--t-crit); }
+.tui .info { color: var(--t-info); }
+.tui .acc { color: var(--t-accent); }
+.tui .acc2 { color: var(--t-accent-alt); }
+.tui .b { font-weight: 700; }
+.tui .sel { background: var(--t-hl-bg); color: var(--t-hl-fg); display: block; }
+.tui .line { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+
+.badge-live {
+  background: var(--t-crit); color: var(--t-bg); font-weight: 700; padding: 0 .3rem; border-radius: 2px;
+  animation: livepulse 2.6s ease-in-out infinite;
+}
+@keyframes livepulse { 0%,100% { opacity: 1 } 50% { opacity: .62 } }
+
+.spark { color: var(--t-info); letter-spacing: -.04em; }
+
+/* Theme rail beneath the replica. */
+.theme-rail {
+  margin-top: .8rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+}
+.swatch {
+  width: 1.85rem; height: 1.15rem;
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  overflow: hidden;
+  position: relative;
+}
+.swatch i { flex: 1; display: block; }
+.swatch[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }
+.swatch:hover { transform: translateY(-1px); }
+.replica-foot {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+  margin-top: .7rem; font-family: var(--mono); font-size: .74rem; color: var(--muted);
+  flex-wrap: wrap;
+}
+.replica-foot b { color: var(--ink-dim); font-weight: 600; }
+.ghost-btn {
+  border: 1px solid var(--rule); background: none; color: var(--muted);
+  font-family: var(--mono); font-size: .72rem; border-radius: 6px;
+  padding: .16rem .55rem; cursor: pointer;
+}
+.ghost-btn:hover { color: var(--accent); border-color: var(--accent); }
+.ghost-btn[aria-pressed="true"] { color: var(--crit); border-color: var(--crit); }
+
+/* ── generic content components ────────────────────────────────────────── */
+
+.cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: clamp(1.4rem, 3vw, 2.4rem);
+}
+
+.feat h3 {
+  font-family: var(--mono);
+  font-size: .95rem;
+  font-weight: 600;
+  letter-spacing: -.02em;
+  margin: 0 0 .35rem;
+  color: var(--ink);
+  display: flex; align-items: baseline; gap: .5rem;
+}
+.feat h3::before {
+  content: "";
+  width: .45rem; height: .45rem; border-radius: 50%;
+  background: var(--accent); flex: none;
+}
+.feat p { color: var(--ink-dim); margin: 0; font-size: .95rem; }
+
+table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+.scroller { overflow-x: auto; }
+th, td { text-align: left; padding: .5rem .8rem .5rem 0; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+th {
+  font-family: var(--mono); font-size: .7rem; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--muted); font-weight: 500;
+  border-bottom-color: var(--rule);
+}
+td code { font-size: .82rem; color: var(--accent-soft); white-space: nowrap; }
+td.desc { color: var(--ink-dim); font-family: var(--serif); }
+tbody tr:last-child td { border-bottom: 0; }
+.exit td:first-child { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); width: 3rem; }
+
+pre.block {
+  margin: 0;
+  background: var(--ground-lift);
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  font-size: .78rem;
+  line-height: 1.7;
+  color: var(--ink-dim);
+}
+pre.block .c { color: var(--muted); }
+pre.block .k { color: var(--accent); }
+pre.block .s { color: var(--ok); }
+pre.block .n { color: var(--info); }
+
+figure { margin: 0; }
+
+/* Screenshot grid: the full dashboard leads at full width — shrunk into a
+   third of the page it reads as noise rather than as a dashboard — with the
+   two detail views paired beneath it. */
+.shots {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(1.2rem, 3vw, 2rem);
+}
+.shots > .lead { grid-column: 1 / -1; }
+@media (max-width: 720px) {
+  .shots { grid-template-columns: minmax(0, 1fr); }
+}
+
+.shot {
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--ground-lift);
+}
+.shot .bar {
+  display: flex; align-items: center; gap: .4rem;
+  padding: .45rem .7rem;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--mono); font-size: .7rem; color: var(--muted);
+}
+.shot .bar i { width: .5rem; height: .5rem; border-radius: 50%; display: block; }
+.shot img { display: block; width: 100%; height: auto; }
+figcaption { font-size: .88rem; color: var(--ink-dim); margin-top: .7rem; }
+figcaption b { color: var(--ink); font-family: var(--mono); font-size: .82rem; font-weight: 600; }
+
+.arch {
+  font-family: var(--mono);
+  font-size: clamp(.62rem, .5rem + .35vw, .82rem);
+  line-height: 1.75;
+  color: var(--ink-dim);
+  overflow-x: auto;
+  margin: 0;
+}
+.arch .box { color: var(--accent); }
+.arch .lbl { color: var(--ink); }
+.arch .note { color: var(--muted); }
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: .6rem;
+}
+.tcard {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: .5rem .55rem .45rem;
+  background: var(--ground-lift);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  display: flex; flex-direction: column; gap: .4rem;
+}
+.tcard:hover { border-color: var(--accent); }
+.tcard .name { font-family: var(--mono); font-size: .74rem; color: var(--ink); letter-spacing: -.01em; }
+.tcard .id { font-family: var(--mono); font-size: .66rem; color: var(--muted); }
+.tcard .chips { display: flex; gap: .18rem; }
+.tcard .chips i { height: .78rem; flex: 1; border-radius: 2px; display: block; }
+.tcard[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+
+.cta {
+  display: flex; flex-wrap: wrap; gap: .7rem; align-items: center; margin-top: 1.6rem;
+}
+.btn {
+  font-family: var(--mono); font-size: .82rem; letter-spacing: -.01em;
+  border-radius: 8px; padding: .55rem 1.1rem; text-decoration: none;
+  border: 1px solid var(--accent); color: var(--ground); background: var(--accent);
+  font-weight: 600;
+}
+.btn:hover { background: var(--accent-deep); border-color: var(--accent-deep); color: var(--ground); }
+.btn.secondary { background: none; color: var(--accent); }
+.btn.secondary:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+
+footer {
+  border-top: 1px solid var(--rule-soft);
+  margin-top: clamp(3.5rem, 8vw, 6rem);
+  padding-block: 2rem 3rem;
+  font-family: var(--mono);
+  font-size: .78rem;
+  color: var(--muted);
+  display: flex; flex-wrap: wrap; gap: 1rem; justify-content: space-between;
+}
+footer a { color: var(--muted); text-decoration: none; }
+footer a:hover { color: var(--accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <a class="brand" href="#top">
+      <svg viewBox="0 0 400 400" aria-hidden="true">
+        <defs>
+          <linearGradient id="mkg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#E8C59E"/><stop offset=".55" stop-color="#D97757"/><stop offset="1" stop-color="#C25B3C"/>
+          </linearGradient>
+        </defs>
+        <rect x="24" y="24" width="352" height="352" rx="72" fill="#1B1916"/>
+        <rect x="25.5" y="25.5" width="349" height="349" rx="70.5" fill="none" stroke="url(#mkg)" stroke-width="12"/>
+        <g fill="none" stroke="url(#mkg)" stroke-linecap="round">
+          <path d="M236 150 A70 70 0 0 1 236 250" stroke-width="16"/>
+          <path d="M280 122 A116 116 0 0 1 280 278" stroke-width="14" opacity=".5"/>
+        </g>
+        <circle cx="168" cy="200" r="30" fill="#E06C5F"/>
+        <path d="M84 156 L120 200 L84 244" fill="none" stroke="url(#mkg)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      obsctl
+    </a>
+    <nav>
+      <a href="#dashboard">Dashboard</a>
+      <a href="#cli" class="opt">CLI</a>
+      <a href="#themes" class="opt">Themes</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/worxbend/obsctl-rs">GitHub</a>
+      <button class="theme-toggle" id="pageTheme" type="button" aria-label="Switch between the light and dark page theme">◐</button>
+    </nav>
+  </header>
+
+  <main id="top">
+
+    <!-- ═══ hero ═══════════════════════════════════════════════════════ -->
+    <section class="hero">
+      <div class="hero-grid">
+        <div>
+          <p class="eyebrow">obs-websocket 5.x · linux · single binary</p>
+          <h1>obsctl</h1>
+          <p class="thesis">Run your stream from the terminal — a live OBS dashboard you drive by keyboard, and a CLI you can bind to anything.</p>
+          <div class="rule"></div>
+          <p class="sub">One Rust binary holds all three pieces: a daemon that owns the OBS WebSocket connection, a themeable TUI, and a proxy CLI with stable JSON output and documented exit codes.</p>
+
+          <div class="install">
+            <div class="install-row">
+              <code id="installCmd"><span class="dollar">$ </span>curl -sSf https://github.com/worxbend/obsctl-rs/releases/latest/download/install.sh | sh</code>
+              <button class="copy-btn" type="button" data-copy="curl --proto '=https' --tlsv1.2 -sSf https://github.com/worxbend/obsctl-rs/releases/latest/download/install.sh | sh">Copy</button>
+            </div>
+            <p class="note">Installs to ~/.local/bin · MIT licensed · no runtime dependencies</p>
+          </div>
+
+          <div class="badges">
+            <span><b>29</b> themes</span>
+            <span><b>20</b> CLI commands</span>
+            <span><b>7</b> exit codes</span>
+            <span>Rust <b>2024</b></span>
+            <span>systemd <b>--user</b></span>
+          </div>
+        </div>
+
+        <!-- The hero is the product itself, live and repaintable. -->
+        <div class="replica-col">
+          <div class="tui" id="replica" role="img" aria-label="A live recreation of the obsctl terminal dashboard: header, live telemetry bar, scenes and audio panels, and a logs and stream-health row.">
+
+            <div class="tp" style="margin-bottom:.75rem">
+              <span class="tp-title"><span class="n">⚡ obsctl</span> <span class="h">studio automation console</span></span>
+              <div class="line"><span class="ok">●</span> daemon: connected  <span class="ok">●</span> OBS: connected (v32.1.2)   <span class="dim">scene:</span> <span class="acc2">Main</span>   <span class="dim">profile:</span> <span class="acc2">Streaming</span></div>
+            </div>
+
+            <div class="tp" style="margin-bottom:.75rem">
+              <span class="tp-title"><span class="n">◉ LIVE TELEMETRY</span></span>
+              <div class="line"><span class="badge-live"> ◉ LIVE 01:24:07 </span> <span class="dim">○ REC off</span>  <span class="dim">│</span>  🎬 Main</div>
+              <div class="line"><span class="warn b">CPU <span id="mCpu">12.4</span>% <span class="spark" id="sCpu">▂▃▂▄▃▂▃▄</span></span> <span class="dim">│</span> <span class="ok b">FPS <span id="mFps">60.0</span></span> <span class="dim">│</span> <span class="info b">MEM 512MB</span> <span class="dim">│</span> <span class="acc2 b">NET <span id="mNet">6002</span>kbps <span class="spark" id="sNet">▅▆▅▆▇▆▅▆</span></span></div>
+            </div>
+
+            <div class="tui-row two" style="margin-bottom:.75rem">
+              <div class="tp focused">
+                <span class="tp-title"><span class="n">🎬 Scenes</span> <span class="c">04</span> <span class="h">[s] ↵ switch</span></span>
+                <div class="line sel"> 01 ▶ Main</div>
+                <div class="line"> <span class="dim">02 ◇</span> Just Chatting</div>
+                <div class="line"> <span class="dim">03 ◇</span> Gameplay</div>
+                <div class="line"> <span class="dim">04 ◇</span> BRB</div>
+              </div>
+              <div class="tp">
+                <span class="tp-title"><span class="n">🔊 Audio Matrix</span> <span class="c">02</span> <span class="h">[a] m mute</span></span>
+                <div class="line"> 🔊 Mic/Aux <span class="ok">82%</span></div>
+                <div class="line dim">   <span class="ok" id="meterA">▰▰▰▰▰▰▰▱▱▱</span> -8.4 dB</div>
+                <div class="line"> 🔇 Desktop <span class="crit">muted</span></div>
+                <div class="line dim">   <span id="meterB">▱▱▱▱▱▱▱▱▱▱</span> -60.0 dB</div>
+              </div>
+            </div>
+
+            <div class="tui-row two">
+              <div class="tp">
+                <span class="tp-title"><span class="n">📡 Logs</span> <span class="c">04</span> <span class="h">live feed</span></span>
+                <div class="line"><span class="dim">21:53:01</span> <span class="b">INFO</span>  OBS: <span class="acc2">scene</span> → <span class="acc">Main</span></div>
+                <div class="line"><span class="dim">21:53:04</span> <span class="b">INFO</span>  OBS: <span class="ok">streaming</span> started</div>
+                <div class="line"><span class="dim">21:53:22</span> <span class="b">INFO</span>  volume <span class="acc2">Mic/Aux</span> → <span class="info">-8.4 dB</span></div>
+                <div class="line"><span class="dim">21:54:07</span> <span class="warn b">WARN</span>  <span class="warn">reconnect</span> scheduled</div>
+              </div>
+              <div class="tp" id="statsPane">
+                <span class="tp-title"><span class="n">⚡ Stats // Stream Health</span> <span class="c" id="stFpsBadge">60</span> <span class="h">frames</span></span>
+                <div class="line"> <span class="acc2 b">FPS    </span><span class="b" id="stFps">   60.0</span>  <span class="spark" id="stSpark">▆▇▇█▇█▇█</span>  <span class="dim">target 60</span></div>
+                <div class="line"> <span class="acc2 b">FRAME  </span><span class="b" id="stFrame"> 3.20ms</span>  <span id="stBar">██░░░░░░░░</span>  <span class="dim"><span id="stBudget">19</span>% budget</span></div>
+                <div class="line"> <span class="acc2 b">RENDER </span><span class="b" id="stRender">  0.02%</span>  <span class="dim">2/9.8k    this stream</span></div>
+                <div class="line"> <span class="acc2 b">OUTPUT </span><span class="b" id="stOutput">  0.01%</span>  <span class="dim">1/9.8k    this stream</span></div>
+                <div class="line b" id="stVerdict"> <span class="ok">✔ HEALTHY</span> <span class="dim">encoder keeping up with OBS</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="theme-rail" id="themeRail" role="group" aria-label="Preview a built-in theme"></div>
+          <div class="replica-foot">
+            <span>Previewing <b id="themeName">Claude</b> · <span id="themeCount">29</span> built-in themes</span>
+            <button class="ghost-btn" id="stressBtn" type="button" aria-pressed="false">simulate encoder load</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="stack">
+
+      <!-- ═══ what it is ══════════════════════════════════════════════ -->
+      <section class="panel" id="architecture">
+        <span class="panel-title"><span class="t-icon">🧭</span><span class="t-label">Architecture</span><span class="t-count">01</span><span class="t-hint">one rule</span></span>
+        <div class="section-lede">
+          <h2>Exactly one process talks to OBS</h2>
+          <p>The daemon owns the WebSocket and the authoritative state snapshot. The TUI and the CLI are thin clients over a local Unix socket — they never connect to OBS, and they never auto-start the daemon. That's what makes a hotkey-fired <code>obsctl scene</code> cost one socket round-trip instead of a fresh handshake.</p>
+        </div>
+        <pre class="arch">  <span class="lbl">OBS Studio</span> <span class="box">◀──</span> obs-websocket 5.x <span class="box">──▶</span> <span class="lbl">obsctl server</span> <span class="box">◀──</span> Unix socket <span class="box">──▶</span> <span class="lbl">obsctl tui</span>
+                                          <span class="box">│</span>                     <span class="note">(subscribes: state, events, logs)</span>
+                                          <span class="box">└──</span> Unix socket <span class="box">──▶</span> <span class="lbl">obsctl scene 'Main'</span>
+                                                                <span class="note">(one command, correlated response, exit)</span></pre>
+        <div class="cols" style="margin-top:2rem">
+          <div class="feat">
+            <h3>State is pushed, not polled</h3>
+            <p>Clients subscribe to topics and receive a full snapshot on connect, then deltas. The TUI redraws on events rather than on a timer.</p>
+          </div>
+          <div class="feat">
+            <h3>Secrets stay out of config</h3>
+            <p>The OBS password comes from an environment variable. Logs and IPC payloads pass through a shared redaction boundary, so a password can't leak through a log line or an error message.</p>
+          </div>
+          <div class="feat">
+            <h3>Boundaries enforced by tests</h3>
+            <p>The test suite parses <code>src/</code> and fails the build if the CLI or TUI imports the OBS client, or if the wire protocol imports implementation types.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ the dashboard ═══════════════════════════════════════════ -->
+      <section id="dashboard">
+        <div class="section-lede">
+          <p class="eyebrow">The TUI</p>
+          <h2>A dashboard you operate, not one you read</h2>
+          <p>Every panel is reachable with one key. Scene switches, mutes and volume nudges apply optimistically and are debounced on the way out, so the interface never stalls waiting on OBS to answer.</p>
+        </div>
+
+        <div class="shots">
+          <figure class="lead">
+            <div class="shot">
+              <div class="bar"><i style="background:#E06C5F"></i><i style="background:#E0B44C"></i><i style="background:#87B37B"></i><span style="margin-left:.4rem">obsctl tui</span></div>
+              <img src="images/tui_screenshot.png" alt="The obsctl dashboard: header with daemon and OBS connection status, a live telemetry bar, scenes and audio matrix panels side by side, profiles and collections beneath, and a log stream." loading="lazy" width="1712" height="982">
+            </div>
+            <figcaption><b>The dashboard</b> — scenes, an audio matrix with dB meters, profiles and collections, over a live daemon log feed.</figcaption>
+          </figure>
+          <figure>
+            <div class="shot">
+              <div class="bar"><i style="background:#E06C5F"></i><i style="background:#E0B44C"></i><i style="background:#87B37B"></i><span style="margin-left:.4rem">command palette</span></div>
+              <img src="images/tui_screenshot_cmd_pallete.png" alt="The command palette open at the bottom of the dashboard with a slash command typed and its result echoed back." loading="lazy" width="1712" height="982">
+            </div>
+            <figcaption><b>Command palette</b> — press <code>/</code> and run any action inline; results stream back with a typewriter reveal.</figcaption>
+          </figure>
+          <figure>
+            <div class="shot">
+              <div class="bar"><i style="background:#E06C5F"></i><i style="background:#E0B44C"></i><i style="background:#87B37B"></i><span style="margin-left:.4rem">appearance lab</span></div>
+              <img src="images/tui_screenshot_theme.png" alt="The theme picker listing built-in palettes with color swatches beside a live preview pane." loading="lazy" width="1712" height="982">
+            </div>
+            <figcaption><b>Appearance Lab</b> — arrow through 29 palettes with a live whole-UI preview; <code>Enter</code> persists, <code>Esc</code> reverts.</figcaption>
+          </figure>
+        </div>
+
+        <div class="panel" style="margin-top:2.6rem">
+          <span class="panel-title"><span class="t-icon">⌨</span><span class="t-label">Key Bindings</span><span class="t-count">12</span><span class="t-hint">everything is one keypress away</span></span>
+          <div class="scroller">
+            <table>
+              <thead><tr><th>Key</th><th>Action</th></tr></thead>
+              <tbody>
+                <tr><td><code>s</code> <code>a</code> <code>p</code> <code>c</code></td><td class="desc">Focus the scenes, audio, profiles or collections panel</td></tr>
+                <tr><td><code>Ctrl</code>+arrows / <code>hjkl</code></td><td class="desc">Move focus across the 2×2 panel grid</td></tr>
+                <tr><td><code>↵</code></td><td class="desc">Switch to the focused scene, profile or collection</td></tr>
+                <tr><td><code>m</code></td><td class="desc">Mute or unmute the focused audio input</td></tr>
+                <tr><td><code>←</code> <code>→</code></td><td class="desc">Nudge the focused input's volume by ±5%</td></tr>
+                <tr><td><code>/</code> or <code>:</code></td><td class="desc">Open the command palette</td></tr>
+                <tr><td><code>F2</code> / <code>Ctrl-T</code></td><td class="desc">Open the theme picker with live preview</td></tr>
+                <tr><td><code>r</code> · <code>D</code> · <code>q</code></td><td class="desc">Reload config · dump config from OBS · quit</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ stream health ═══════════════════════════════════════════ -->
+      <section class="panel">
+        <span class="panel-title"><span class="t-icon">⚡</span><span class="t-label">Stream Health</span><span class="t-count">04</span><span class="t-hint">appears when you go live</span></span>
+        <div class="section-lede">
+          <h2>The four numbers that tell you the stream is fine</h2>
+          <p>Go live and a stats pane opens beside the logs: the FPS you're holding, how much of each frame's time budget rendering eats, and the frames the render and output pipelines are losing. Rows are colored by health and topped with a verdict, so trouble reads from across the room.</p>
+        </div>
+        <div class="cols">
+          <div class="feat">
+            <h3>Measured from this stream</h3>
+            <p>OBS counts skipped frames since <em>it</em> launched. Start streaming on an hours-old session and you'd inherit every frame that machine ever missed — so the pane latches a baseline when the stream starts and subtracts it.</p>
+          </div>
+          <div class="feat">
+            <h3>Frame time against its budget</h3>
+            <p>At 60fps a frame has 16.7ms. The pane shows the average render as a share of that, because 3ms and 14ms mean very different things at the same framerate.</p>
+          </div>
+          <div class="feat">
+            <h3>A verdict, not just digits</h3>
+            <p><span class="mono" style="color:var(--ok)">HEALTHY</span>, <span class="mono" style="color:var(--warn)">STRAINED</span> or <span class="mono" style="color:var(--crit)">DROPPING</span> — taken from the worst of the four metrics, with what to do about it.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ CLI ═════════════════════════════════════════════════════ -->
+      <section id="cli">
+        <div class="section-lede">
+          <p class="eyebrow">The CLI</p>
+          <h2>Every action is one command, and every command is scriptable</h2>
+          <p>Proxy commands connect to the socket, send one request, print the result and exit — ideal for window-manager hotkeys, Stream Deck bindings and shell scripts. Add <code>--json</code> for a stable envelope, and branch on the exit code.</p>
+        </div>
+
+        <div class="cols" style="gap:1.8rem; align-items:start">
+          <div class="panel">
+            <span class="panel-title"><span class="t-icon">🕹</span><span class="t-label">Commands</span><span class="t-count">20</span></span>
+            <div class="scroller">
+              <table>
+                <thead><tr><th>Command</th><th>Does</th></tr></thead>
+                <tbody>
+                  <tr><td><code>obsctl scene 'Main'</code></td><td class="desc">Switch the program scene</td></tr>
+                  <tr><td><code>obsctl mute 'Mic'</code></td><td class="desc">Mute an input (also <code>unmute</code>, <code>toggle-mute</code>)</td></tr>
+                  <tr><td><code>obsctl vol 'Mic' 70</code></td><td class="desc">Set input volume by percent</td></tr>
+                  <tr><td><code>obsctl profile 'Live'</code></td><td class="desc">Switch OBS profile</td></tr>
+                  <tr><td><code>obsctl collection 'Pod'</code></td><td class="desc">Switch scene collection</td></tr>
+                  <tr><td><code>obsctl status</code></td><td class="desc">Combined daemon + OBS status</td></tr>
+                  <tr><td><code>obsctl dump-config</code></td><td class="desc">Pull live OBS state into your config</td></tr>
+                  <tr><td><code>obsctl reconnect</code></td><td class="desc">Ask the daemon to reconnect to OBS</td></tr>
+                  <tr><td><code>obsctl tui</code></td><td class="desc">Launch the dashboard</td></tr>
+                  <tr><td><code>obsctl service install</code></td><td class="desc">Install the systemd --user unit</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style="display:flex; flex-direction:column; gap:1.6rem">
+            <div class="panel">
+              <span class="panel-title"><span class="t-icon">📜</span><span class="t-label">JSON envelope</span><span class="t-count">02</span></span>
+              <pre class="block"><span class="c"># success</span>
+<span class="k">$</span> obsctl --json scene 'Main'
+{<span class="s">"ok"</span>:<span class="k">true</span>,<span class="s">"command"</span>:<span class="s">"scene"</span>,<span class="s">"result"</span>:{<span class="s">"scene"</span>:<span class="s">"Main"</span>}}
+
+<span class="c"># failure — code, message, exit status</span>
+<span class="k">$</span> obsctl --json scene 'Nope'; <span class="k">echo</span> $?
+{<span class="s">"ok"</span>:<span class="k">false</span>,<span class="s">"error"</span>:{<span class="s">"code"</span>:<span class="s">"TARGET_NOT_FOUND"</span>,
+ <span class="s">"message"</span>:<span class="s">"no scene matches 'Nope'"</span>}}
+<span class="n">4</span></pre>
+            </div>
+
+            <div class="panel exit">
+              <span class="panel-title"><span class="t-icon">🔢</span><span class="t-label">Exit codes</span><span class="t-count">07</span></span>
+              <div class="scroller">
+                <table>
+                  <tbody>
+                    <tr><td>0</td><td class="desc">Success</td></tr>
+                    <tr><td>1</td><td class="desc">Generic failure</td></tr>
+                    <tr><td>2</td><td class="desc">Config error</td></tr>
+                    <tr><td>3</td><td class="desc">Server, connection or auth error</td></tr>
+                    <tr><td>4</td><td class="desc">OBS request error</td></tr>
+                    <tr><td>5</td><td class="desc">Command parse error</td></tr>
+                    <tr><td>6</td><td class="desc">IPC error</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ themes ══════════════════════════════════════════════════ -->
+      <section class="panel" id="themes">
+        <span class="panel-title"><span class="t-icon">🎨</span><span class="t-label">Themes</span><span class="t-count">29</span><span class="t-hint">click any to repaint the dashboard above</span></span>
+        <div class="section-lede">
+          <h2>Twenty-nine palettes, or bring your own</h2>
+          <p>Every theme paints its own background across the whole interface rather than letting the terminal's show through — except <code>mono</code>, which deliberately doesn't, because it exists for consoles where truecolor isn't reliable. Set <code>ui.theme: "custom"</code> and define any subset of the thirteen colors to make your own.</p>
+        </div>
+        <div class="theme-grid" id="themeGrid"></div>
+      </section>
+
+      <!-- ═══ install ═════════════════════════════════════════════════ -->
+      <section class="panel" id="install">
+        <span class="panel-title"><span class="t-icon">📦</span><span class="t-label">Install</span><span class="t-count">03</span><span class="t-hint">about a minute</span></span>
+        <div class="section-lede">
+          <h2>Running in three commands</h2>
+          <p>Linux, x86-64. The install script drops a single binary into <code>~/.local/bin</code> and adds it to your shell path if it isn't there already. You'll need OBS Studio 28 or newer with obs-websocket enabled.</p>
+        </div>
+        <pre class="block"><span class="c"># 1 — install</span>
+<span class="k">$</span> curl --proto <span class="s">'=https'</span> --tlsv1.2 -sSf \
+    https://github.com/worxbend/obsctl-rs/releases/latest/download/install.sh | sh
+
+<span class="c"># 2 — create a config and point it at OBS</span>
+<span class="k">$</span> obsctl init
+<span class="k">$</span> <span class="k">export</span> OBS_WEBSOCKET_PASSWORD=<span class="s">'your_password'</span>
+<span class="k">$</span> obsctl validate-config
+
+<span class="c"># 3 — run the daemon, then open the dashboard</span>
+<span class="k">$</span> obsctl service install &amp;&amp; systemctl --user enable --now obsctl.service
+<span class="k">$</span> obsctl tui</pre>
+        <div class="cta">
+          <a class="btn" href="https://github.com/worxbend/obsctl-rs/releases/latest">Download the latest release</a>
+          <a class="btn secondary" href="https://github.com/worxbend/obsctl-rs#-config">Read the config reference</a>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <footer>
+    <span>obsctl · MIT licensed · built with Rust and <a href="https://ratatui.rs">Ratatui</a></span>
+    <span><a href="https://github.com/worxbend/obsctl-rs">github.com/worxbend/obsctl-rs</a></span>
+  </footer>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  /* Palettes are generated from src/tui/theme.rs, so the site can never drift
+     from what the binary actually ships. Field order matches the Theme struct.
+     The `mono` theme uses ANSI named colors; those are mapped to the standard
+     16-color values here purely so it can be previewed on a web page. */
+  const FIELDS = ["id","label","bg","accent","accent_alt","fg","muted","border",
+                  "border_focus","success","warning","danger","info",
+                  "highlight_bg","highlight_fg"];
+  const RAW = [["claude","Claude","#1B1916","#D97757","#E8C59E","#ECE8E1","#8A867D","#4A4640","#D97757","#87B37B","#E0B44C","#E06C5F","#7BA9C7","#D97757","#1B1916"],["codex","Codex","#0A1412","#37E0B0","#8AB4FF","#E3E8E6","#6B7674","#2A3331","#37E0B0","#37E0B0","#F2C94C","#F25F5F","#8AB4FF","#37E0B0","#0A1412"],["btop","Btop","#0A140A","#6AE05A","#F0E050","#D4E6D4","#5A6A5A","#304030","#6AE05A","#6AE05A","#F0E050","#E05050","#50C0E0","#6AE05A","#0A140A"],["nord","Nord","#2E3440","#88C0D0","#81A1C1","#E5E9F0","#616E88","#3B4252","#88C0D0","#A3BE8C","#EBCB8B","#BF616A","#81A1C1","#88C0D0","#2E3440"],["dracula","Dracula","#282A36","#BD93F9","#FF79C6","#F8F8F2","#6272A4","#3A3D52","#BD93F9","#50FA7B","#F1FA8C","#FF5555","#8BE9FD","#BD93F9","#1E1F29"],["mono","Mono (TTY-safe)","#0C0C0C","#E5E5E5","#A0A0A0","#E5E5E5","#585858","#585858","#E5E5E5","#3FA34A","#C7A233","#C6453F","#3E9AA8","#E5E5E5","#0C0C0C"],["gruvbox","Gruvbox","#282828","#FE8019","#D3869B","#EBDBB2","#928374","#3C3836","#FE8019","#B8BB26","#FABD2F","#FB4934","#83A598","#FE8019","#282828"],["solarized-dark","Solarized Dark","#002B36","#268BD2","#2AA198","#93A1A1","#586E75","#073642","#268BD2","#859900","#B58900","#DC322F","#2AA198","#268BD2","#002B36"],["monokai","Monokai","#272822","#A6E22E","#AE81FF","#F8F8F2","#75715E","#3E3D32","#A6E22E","#A6E22E","#E6DB74","#F92672","#66D9EF","#A6E22E","#272822"],["one-dark","One Dark","#282C34","#61AFEF","#C678DD","#ABB2BF","#5C6370","#3E4451","#61AFEF","#98C379","#E5C07B","#E06C75","#56B6C2","#61AFEF","#282C34"],["tokyo-night","Tokyo Night","#1A1B26","#7AA2F7","#BB9AF7","#C0CAF5","#565F89","#24283B","#7AA2F7","#9ECE6A","#E0AF68","#F7768E","#7DCFFF","#7AA2F7","#1A1B26"],["catppuccin-mocha","Catppuccin Mocha","#1E1E2E","#CBA6F7","#89B4FA","#CDD6F4","#A6ADC8","#313244","#CBA6F7","#A6E3A1","#F9E2AF","#F38BA8","#89DCEB","#CBA6F7","#1E1E2E"],["rose-pine","Rose Pine","#191724","#C4A7E7","#EBBCBA","#E0DEF4","#6E6A86","#26233A","#C4A7E7","#9CCFD8","#F6C177","#EB6F92","#9CCFD8","#C4A7E7","#191724"],["kanagawa-wave","Kanagawa Wave","#1F1F28","#7E9CD8","#957FB8","#DCD7BA","#727169","#2A2A37","#7E9CD8","#98BB6C","#E6C384","#E82424","#7FB4CA","#7E9CD8","#1F1F28"],["everforest-dark","Everforest Dark","#2D353B","#A7C080","#D699B6","#D3C6AA","#859289","#475258","#A7C080","#A7C080","#DBBC7F","#E67E80","#7FBBB3","#A7C080","#2D353B"],["ayu-mirage","Ayu Mirage","#1F2430","#FFB454","#D2A6FF","#CBCCC6","#707A8C","#343D46","#FFB454","#BAE67E","#FFD580","#F28779","#5CCFE6","#FFB454","#1F2430"],["github-dark","GitHub Dark","#0D1117","#58A6FF","#BC8CFF","#C9D1D9","#8B949E","#30363D","#58A6FF","#3FB950","#D29922","#F85149","#58A6FF","#58A6FF","#0D1117"],["solarized-light","Solarized Light","#FDF6E3","#268BD2","#2AA198","#657B83","#93A1A1","#EEE8D5","#268BD2","#859900","#B58900","#DC322F","#2AA198","#268BD2","#FDF6E3"],["catppuccin-latte","Catppuccin Latte","#EFF1F5","#8839EF","#1E66F5","#4C4F69","#9CA0B0","#CCD0DA","#8839EF","#40A02B","#DF8E1D","#D20F39","#04A5E5","#8839EF","#EFF1F5"],["github-light","GitHub Light","#FFFFFF","#0969DA","#8250DF","#1F2328","#656D76","#D0D7DE","#0969DA","#1A7F37","#9A6700","#CF222E","#0969DA","#0969DA","#FFFFFF"],["rose-pine-dawn","Rose Pine Dawn","#FAF4ED","#D7827E","#907AA9","#575279","#9893A5","#F2E9E1","#D7827E","#56949F","#EA9D34","#B4637A","#286983","#D7827E","#FAF4ED"],["night-owl","Night Owl","#011627","#82AAFF","#C792EA","#D6DEEB","#637777","#1D3B53","#82AAFF","#22DA6E","#ECC48D","#EF5350","#21C7A8","#82AAFF","#011627"],["material-ocean","Material Ocean","#0F111A","#84FFFF","#C792EA","#8F93A2","#464B5D","#1A1C25","#84FFFF","#C3E88D","#FFCB6B","#F07178","#89DDFF","#84FFFF","#0F111A"],["horizon","Horizon","#1C1E26","#E95678","#B877DB","#D5D8DA","#6C6F93","#2E303E","#E95678","#29D398","#FAB795","#EC6A88","#26BBD9","#E95678","#1C1E26"],["iceberg","Iceberg","#161821","#84A0C6","#A093C7","#C6C8D1","#6B7089","#2E313F","#84A0C6","#B4BE82","#E2A478","#E27878","#89B8C2","#84A0C6","#161821"],["moonfly","Moonfly","#080808","#80A0FF","#CF87E8","#BDBDBD","#808080","#323437","#80A0FF","#8CC85F","#E3C78A","#FF5189","#79DAC8","#80A0FF","#080808"],["synthwave-84","Synthwave '84","#262335","#FF7EDB","#36F9F6","#FFFFFF","#848BBD","#495495","#FF7EDB","#72F1B8","#FEDE5D","#FE4450","#03EDF9","#FF7EDB","#262335"],["matrix","Matrix","#050B05","#00FF41","#00CC33","#D8FFD8","#397D39","#0F3D0F","#00FF41","#00FF41","#CFFF04","#FF3B30","#39FF14","#00FF41","#050B05"],["zenburn","Zenburn","#3F3F3F","#DCA3A3","#8CD0D3","#DCDCCC","#7F9F7F","#5F5F5F","#DCA3A3","#7F9F7F","#F0DFAF","#CC9393","#8CD0D3","#DCA3A3","#3F3F3F"]];
+  const THEMES = RAW.map(row => Object.fromEntries(row.map((v, i) => [FIELDS[i], v])));
+
+  const $ = sel => document.querySelector(sel);
+  const replica = $("#replica");
+
+  /* ── theme preview ─────────────────────────────────────────────────── */
+
+  const VAR_MAP = {
+    "--t-bg":"bg", "--t-accent":"accent", "--t-accent-alt":"accent_alt",
+    "--t-fg":"fg", "--t-muted":"muted", "--t-border":"border",
+    "--t-focus":"border_focus", "--t-ok":"success", "--t-warn":"warning",
+    "--t-crit":"danger", "--t-info":"info", "--t-hl-bg":"highlight_bg",
+    "--t-hl-fg":"highlight_fg"
+  };
+
+  let active = 0;
+  function applyTheme(index) {
+    const theme = THEMES[index];
+    if (!theme) return;
+    active = index;
+    for (const [cssVar, field] of Object.entries(VAR_MAP)) {
+      replica.style.setProperty(cssVar, theme[field]);
+    }
+    $("#themeName").textContent = theme.label;
+    document.querySelectorAll("[data-theme-index]").forEach(el => {
+      el.setAttribute("aria-pressed", String(Number(el.dataset.themeIndex) === index));
+    });
+  }
+
+  const rail = $("#themeRail");
+  const grid = $("#themeGrid");
+  THEMES.forEach((theme, index) => {
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = "swatch";
+    swatch.dataset.themeIndex = index;
+    swatch.title = theme.label;
+    swatch.setAttribute("aria-label", "Preview the " + theme.label + " theme");
+    swatch.setAttribute("aria-pressed", "false");
+    swatch.style.background = theme.bg;
+    swatch.innerHTML =
+      `<i style="background:${theme.accent}"></i><i style="background:${theme.success}"></i><i style="background:${theme.info}"></i>`;
+    swatch.addEventListener("click", () => applyTheme(index));
+    rail.appendChild(swatch);
+
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "tcard";
+    card.dataset.themeIndex = index;
+    card.setAttribute("aria-pressed", "false");
+    card.setAttribute("aria-label", "Preview the " + theme.label + " theme in the dashboard above");
+    card.innerHTML =
+      `<span class="name">${theme.label}</span>` +
+      `<span class="chips">` +
+        `<i style="background:${theme.bg};box-shadow:inset 0 0 0 1px rgba(128,128,128,.35)"></i>` +
+        `<i style="background:${theme.accent}"></i><i style="background:${theme.accent_alt}"></i>` +
+        `<i style="background:${theme.success}"></i><i style="background:${theme.warning}"></i>` +
+        `<i style="background:${theme.danger}"></i><i style="background:${theme.info}"></i>` +
+      `</span>` +
+      `<span class="id">ui.theme: "${theme.id}"</span>`;
+    card.addEventListener("click", () => {
+      applyTheme(index);
+      replica.scrollIntoView({ behavior: motionOK ? "smooth" : "auto", block: "center" });
+    });
+    grid.appendChild(card);
+  });
+  $("#themeCount").textContent = THEMES.length;
+  applyTheme(0);
+
+  /* ── page light/dark toggle ────────────────────────────────────────── */
+
+  const root = document.documentElement;
+  $("#pageTheme").addEventListener("click", () => {
+    const prefersDark = matchMedia("(prefers-color-scheme: dark)").matches;
+    const current = root.dataset.theme || (prefersDark ? "dark" : "light");
+    root.dataset.theme = current === "dark" ? "light" : "dark";
+  });
+
+  /* ── copy buttons ──────────────────────────────────────────────────── */
+
+  document.querySelectorAll("[data-copy]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.copy);
+        btn.textContent = "Copied";
+        btn.dataset.copied = "1";
+      } catch {
+        btn.textContent = "Select it";
+      }
+      setTimeout(() => { btn.textContent = "Copy"; btn.dataset.copied = "0"; }, 1800);
+    });
+  });
+
+  /* ── ambient telemetry ─────────────────────────────────────────────── */
+
+  const motionOK = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const BARS = "▁▂▃▄▅▆▇█";
+  const rand = (lo, hi) => lo + Math.random() * (hi - lo);
+  const drift = (values, lo, hi) => {
+    values.push(Math.min(hi, Math.max(lo, values[values.length - 1] + rand(-1, 1) * (hi - lo) * .12)));
+    values.shift();
+    return values;
+  };
+  const spark = (values, lo, hi) => values
+    .map(v => BARS[Math.min(7, Math.max(0, Math.round((v - lo) / (hi - lo) * 7)))])
+    .join("");
+
+  let stressed = false;
+  const cpu = Array.from({ length: 8 }, () => rand(9, 16));
+  const net = Array.from({ length: 8 }, () => rand(5800, 6200));
+  const fps = Array.from({ length: 8 }, () => rand(59.4, 60));
+
+  function tick() {
+    drift(cpu, stressed ? 46 : 8, stressed ? 92 : 20);
+    drift(net, stressed ? 2200 : 5700, stressed ? 6100 : 6300);
+    drift(fps, stressed ? 38 : 59, stressed ? 52 : 60);
+
+    $("#mCpu").textContent = cpu[7].toFixed(1);
+    $("#sCpu").textContent = spark(cpu, 0, 100);
+    $("#mNet").textContent = net[7].toFixed(0);
+    $("#sNet").textContent = spark(net, 0, 6500);
+    $("#mFps").textContent = fps[7].toFixed(1);
+
+    /* The stats pane mirrors the real widget's arithmetic: frame budget is
+       1000/fps, and the verdict is the worst of the metrics. */
+    const currentFps = fps[7];
+    const frameMs = stressed ? rand(13.5, 17.5) : rand(2.9, 4.1);
+    const budget = Math.min(1, frameMs / (1000 / currentFps));
+    const filled = Math.round(budget * 10);
+    const renderRate = stressed ? rand(1.4, 3.2) : rand(0, .04);
+    const outputRate = stressed ? rand(3.5, 8.5) : rand(0, .03);
+
+    $("#stFps").textContent = currentFps.toFixed(1).padStart(7);
+    $("#stFpsBadge").textContent = Math.round(currentFps);
+    $("#stSpark").textContent = spark(fps, 30, 61);
+    $("#stFrame").textContent = (frameMs.toFixed(2) + "ms").padStart(7);
+    $("#stBar").textContent = "█".repeat(filled) + "░".repeat(10 - filled);
+    $("#stBudget").textContent = Math.round(budget * 100);
+    $("#stRender").textContent = (renderRate.toFixed(2) + "%").padStart(7);
+    $("#stOutput").textContent = (outputRate.toFixed(2) + "%").padStart(7);
+
+    const worst = Math.max(
+      currentFps / 60 >= .95 ? 0 : currentFps / 60 >= .85 ? 1 : 2,
+      budget < .5 ? 0 : budget < .8 ? 1 : 2,
+      renderRate <= .1 ? 0 : renderRate <= 1 ? 1 : 2,
+      outputRate <= .1 ? 0 : outputRate <= 1 ? 1 : 2
+    );
+    const verdicts = [
+      ['ok', '✔ HEALTHY', 'encoder keeping up with OBS'],
+      ['warn', '▲ STRAINED', 'frames are starting to slip'],
+      ['crit', '◆ DROPPING', 'reduce bitrate or scene load']
+    ][worst];
+    $("#stVerdict").innerHTML =
+      ` <span class="${verdicts[0]}">${verdicts[1]}</span> <span class="dim">${verdicts[2]}</span>`;
+    $("#stBar").className = verdicts[0];
+
+    const level = Math.round(rand(stressed ? 4 : 6, stressed ? 10 : 8));
+    $("#meterA").textContent = "▰".repeat(level) + "▱".repeat(10 - level);
+  }
+
+  tick();
+  if (motionOK) setInterval(tick, 1400);
+
+  $("#stressBtn").addEventListener("click", e => {
+    stressed = !stressed;
+    e.currentTarget.setAttribute("aria-pressed", String(stressed));
+    e.currentTarget.textContent = stressed ? "restore headroom" : "simulate encoder load";
+    tick();
+  });
+})();
+</script>

@@ -13,7 +13,7 @@
 **Drive OBS Studio from a keyboard-first terminal dashboard — or script it from the CLI.**
 A single Rust binary: a daemon that owns the OBS connection, a live TUI, and a stable proxy CLI.
 
-[Install](#-install) · [Quick Start](#-quick-start) · [TUI](#-the-tui) · [Themes](#-themes) · [CLI](#-cli-commands) · [IPC Protocol](#-ipc-protocol)
+[**Website**](https://worxbend.github.io/obsctl-rs/) · [Install](#-install) · [Quick Start](#-quick-start) · [TUI](#-the-tui) · [Themes](#-themes) · [CLI](#-cli-commands) · [IPC Protocol](#-ipc-protocol)
 
 </div>
 
