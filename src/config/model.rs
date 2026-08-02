@@ -117,7 +117,15 @@ impl Default for ReconnectConfig {
 #[serde(default)]
 pub struct UiConfig {
     pub refresh_interval_ms: u64,
+    /// Character the TUI command line opens with. `":"` (vim's command
+    /// prompt) or `"/"`; both keys always work regardless of this setting,
+    /// which only decides what `<leader>` mappings and mouse clicks insert.
     pub command_palette_prefix: String,
+    /// Whether the TUI puts the terminal into mouse-reporting mode. Turning
+    /// this off gives back the terminal's own click-to-select and
+    /// copy-on-drag, at the cost of click/scroll navigation.
+    #[serde(default = "default_true")]
+    pub mouse: bool,
     /// Enables gradients, Unicode meters, rich borders, and animated terminal
     /// art. Disable for legacy terminals that only render basic ASCII safely.
     #[serde(default = "default_true")]
@@ -140,7 +148,8 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             refresh_interval_ms: 250,
-            command_palette_prefix: "/".to_string(),
+            command_palette_prefix: ":".to_string(),
+            mouse: true,
             advanced_ui: true,
             show_icons: true,
             theme: "default".to_string(),

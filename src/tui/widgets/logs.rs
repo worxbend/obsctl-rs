@@ -17,20 +17,28 @@ use crate::{
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let height = area.height.saturating_sub(2) as usize;
-    let skip = model.logs.len().saturating_sub(height);
+    let skip = model.log_view_start(height);
     let resources = known_resources(model);
 
     let items: Vec<ListItem> = model
         .logs
         .iter()
         .skip(skip)
+        .take(height)
         .map(|entry| ListItem::new(log_line(entry, model, &resources)))
         .collect();
 
+    // Scrolling back pauses the tail, so say so rather than leaving the pane
+    // looking like a live feed that stopped updating.
+    let hint = if model.log_scroll > 0 {
+        model.symbol("↑ scrolled back  wheel/Esc to follow", "scrolled back")
+    } else {
+        "live daemon feed"
+    };
     let block = chrome::panel(
         model.symbol("📡", "L"),
         "Logs // Event Stream",
-        "live daemon feed",
+        hint,
         model.logs.len(),
         false,
         model,

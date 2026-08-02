@@ -12,6 +12,7 @@ pub mod scenes;
 pub mod settings;
 pub mod splash;
 pub mod stats;
+pub mod which_key;
 
 use ratatui::{Frame, style::Style, widgets::Block};
 

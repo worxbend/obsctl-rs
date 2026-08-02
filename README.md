@@ -13,7 +13,7 @@
 **Drive OBS Studio from a keyboard-first terminal dashboard — or script it from the CLI.**
 A single Rust binary: a daemon that owns the OBS connection, a live TUI, and a stable proxy CLI.
 
-[**Website**](https://worxbend.github.io/obsctl-rs/) · [Install](#-install) · [Quick Start](#-quick-start) · [TUI](#-the-tui) · [Themes](#-themes) · [CLI](#-cli-commands) · [IPC Protocol](#-ipc-protocol)
+[**Website**](https://worxbend.github.io/obsctl-rs/) · [**obs.worxbend.com**](https://obs.worxbend.com/) · [Install](#-install) · [Quick Start](#-quick-start) · [TUI](#-the-tui) · [Themes](#-themes) · [CLI](#-cli-commands) · [IPC Protocol](#-ipc-protocol)
 
 </div>
 
@@ -46,12 +46,14 @@ A real-time, themeable command center with animated gradient chrome, rounded/hea
 - 🔊 **Audio panel** (`a`) — `m` to mute/unmute, `h`/`l` or `←`/`→` to nudge volume ±5%, segmented multi-color dB meters
 - 🗂️ **Profiles panel** (`p`) — `Enter` to switch OBS profiles
 - 📚 **Collections panel** (`c`) — `Enter` to switch OBS scene collections
+- ⌨️ **Vim / AstroNvim keymap** — `j`/`k`, `gg`/`G`, `Ctrl-D`/`Ctrl-U`, count prefixes (`12j`), `Ctrl-hjkl` window moves, `Tab` to cycle panes, and a `<Space>` leader with a which-key popup
+- 🖱️ **Mouse navigation** — click a row to focus and select it, click again to activate, wheel to scroll a panel or the log history, right-click to cancel
 - 📡 **Telemetry deck** — animated LIVE/REC badges, elapsed durations, CPU and bitrate sparklines, FPS, memory, and stream bitrate
 - 🪵 **Logs panel** — severity glyphs, colored targets/timestamps, and semantic highlighting for actions, status/error keywords, commands, numbers, and live OBS scene/profile/collection/input names
 - ⚡ **Stats panel** — appears beside the logs the moment you go live: active FPS against the rate you've been holding, average frame render time as a share of the frame budget, and render/output frames skipped. Every row is colored by health and topped with a plain-language verdict (`HEALTHY` / `STRAINED` / `DROPPING`). Drop counts are measured from the start of the current stream, not OBS's since-launch totals
-- ⌨️ **Command palette** (`/` or `:`) — `/scene`, `/profile`, `/collection`, `/mute`, `/vol`, `/stream`, `/rec`; results stream in with a typewriter animation
+- 🎛️ **Command palette** (`:`) — `:scene`, `:profile`, `:collection`, `:mute`, `:vol`, `:stream`, `:rec`; `Tab` completes, `Ctrl-W`/`Ctrl-U` edit the line, and results stream in with a typewriter animation
 - 🧭 **Header** — animated gradient identity, daemon/OBS connection chips, active scene/profile, and a render frame indicator
-- 🌈 **Settings view** (`F2`, `Ctrl-T`, or `/themes`) — btop-style theme picker with live full-UI preview; `Enter` persists, `Esc` reverts
+- 🌈 **Settings view** (`F2`, `Ctrl-T`, `<Space>ut`, or `:themes`) — btop-style theme picker with live full-UI preview; `Enter` persists, `Esc` reverts
 - 🎇 A responsive animated splash (~2s, skippable by any keypress) with a large block logo, slither and liquid-wave loaders, a multi-color progress rail, and staged boot messages
 
 <table>
@@ -165,7 +167,8 @@ reconnect:
   jitter_ms: 250
 ui:
   refresh_interval_ms: 250
-  command_palette_prefix: "/"
+  command_palette_prefix: ":"   # ":" (vim-style) or "/" — both keys always work
+  mouse: true                   # false restores the terminal's own text selection
   advanced_ui: true
   show_icons: true
   theme: "claude"       # built-in id, or "custom" — see Themes below
@@ -293,47 +296,119 @@ Global options:
 
 ## ⌨️ TUI Key Bindings
 
+The keymap is vim-flavoured and modelled on AstroNvim: `hjkl` motions, `g`-prefixed
+jumps, count prefixes, `Ctrl-hjkl` window moves, and a `<Space>` leader whose
+which-key popup lists what the next keystroke can be.
+
+### Motions
+
 | Key | Action |
 |-----|--------|
-| `/` or `:` | Open command palette |
-| `Enter` | Submit palette command |
-| `Esc` | Cancel palette editing |
-| `F2` or `Ctrl-T` | Open/close the settings (theme) view |
+| `j` / `k` (or `↓` / `↑`) | Move down / up in the focused panel |
+| `<count>j` / `<count>k` | Repeat the motion — `12j` moves twelve rows |
+| `gg` / `G` (or `Home` / `End`) | Jump to the first / last row |
+| `Ctrl-D` / `Ctrl-U` (or `PgDn` / `PgUp`) | Move half the focused pane |
+| `Enter` | Act on the focused row — switch scene/profile/collection, or toggle mute in the audio panel |
+
+### Panes
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-h/j/k/l` or `Ctrl-←/→/↑/↓` | Move focus between panels spatially (2x2 grid) |
+| `Tab` / `Shift-Tab` | Cycle focus through the panels in reading order |
 | `s` / `a` / `p` / `c` | Focus the scenes / audio / profiles / collections panel |
-| `Ctrl-←/→/↑/↓` or `Ctrl-h/j/k/l` | Move focus between panels spatially (2x2 grid) |
+| `m` | Mute/unmute the focused audio input |
+| `h` / `l` (or `←` / `→`) | Nudge the focused input's volume by ∓5% — `3l` nudges +15% |
+
+### Command line
+
+| Key | Action |
+|-----|--------|
+| `:` | Open the command palette (`/` also works and inserts itself) |
+| `Enter` | Submit |
+| `Tab` / `Shift-Tab` (or `↓` / `↑`, `Ctrl-N` / `Ctrl-P`) | Cycle completions |
+| `Ctrl-W` / `Ctrl-U` | Delete the last word / clear the line |
+| `Esc`, `Ctrl-C`, or `Backspace` on an empty line | Close the palette |
+
+### Leader (`<Space>`)
+
+Press `<Space>` and the which-key popup lists the next key. Groups are marked `+`.
+
+| Sequence | Action |
+|----------|--------|
+| `<Space>f` `s`/`p`/`c`/`a` | Open the palette pre-filled with `scene` / `profile` / `collection` / `toggle-mute` |
+| `<Space>p` `s`/`a`/`p`/`c` | Focus the scenes / audio / profiles / collections panel |
+| `<Space>s` `s`/`r` | Toggle streaming / recording |
+| `<Space>c` `r`/`d`/`v` | Reload / dump / validate config |
+| `<Space>o` `r`/`s`/`d`/`c` | Reconnect to OBS / OBS status / daemon status / reconnect to the daemon |
+| `<Space>u` `t`/`i`/`a` | Theme picker / toggle icons / toggle the advanced UI |
+| `<Space>:` | Open the command palette |
+| `<Space>q` | Quit |
+
+### Everything else
+
+| Key | Action |
+|-----|--------|
+| `F2` or `Ctrl-T` | Open/close the settings (theme) view |
+| `Esc` | Cancel a half-typed sequence and snap the log pane back to the live tail |
 | `q` | Quit |
 | `r` | Reload config |
 | `D` | Dump config |
-| `Ctrl-C` | Quit or cancel palette |
+| `R` | Reconnect this TUI to the daemon |
+| `Ctrl-C` | Quit, or close the palette |
 
-In the settings view: `↑`/`↓` (or `j`/`k`) live-preview a theme across the whole UI, `Enter` applies and persists it to `ui.theme`, `Esc`/`F2`/`q` reverts to the previous theme.
+In the settings view: `↑`/`↓` (or `j`/`k`, `gg`/`G`, and count prefixes) live-preview a
+theme across the whole UI, `Enter` applies and persists it to `ui.theme`, `Esc`/`F2`/`q`
+reverts to the previous theme.
+
+### Mouse
+
+Mouse reporting is on by default; set `ui.mouse: false` to turn it off and get the
+terminal's own click-to-select and copy-on-drag back (with reporting on, most
+terminals fall back to that behavior while `Shift` is held).
+
+| Input | Action |
+|-------|--------|
+| Left-click a row | Focus that panel and select the row |
+| Left-click the selected row again | Activate it — switch scene/profile/collection, or toggle mute |
+| Wheel over a panel | Move that panel's cursor |
+| Wheel over the logs | Scroll the log history; scroll back down (or press `Esc`) to resume following |
+| Left-click the command bar | Open the command palette |
+| Wheel over an open palette | Cycle completions |
+| Right-click | Cancel — closes the palette, the which-key popup, or the settings view |
+| Click on the "daemon unavailable" screen | Retry the connection |
+| Click a theme in the settings view | Preview it; click it again to apply |
 
 ### TUI Command Palette
 
-Type `/` to open the palette, then use any of:
+Type `:` to open the palette, then use any of:
 
 ```
-/help
-/themes
-/scene <target>
-/set-scene <target>
-/profile <target>
-/set-profile <target>
-/collection <target>
-/scene-collection <target>
-/mute <target>
-/unmute <target>
-/toggle-mute <target>
-/vol <target> <0-100>
-/status
-/server-status
-/obs-status
-/validate-config
-/reconnect
-/dump-config
-/reload-config
-/quit
+:help
+:themes
+:scene <target>
+:set-scene <target>
+:profile <target>
+:set-profile <target>
+:collection <target>
+:scene-collection <target>
+:mute <target>
+:unmute <target>
+:toggle-mute <target>
+:vol <target> <0-100>
+:status
+:server-status
+:obs-status
+:validate-config
+:reconnect
+:dump-config
+:reload-config
+:quit
 ```
+
+`/` is accepted as a prefix everywhere `:` is, so `/scene Main` and `:scene Main` are
+the same command. `ui.command_palette_prefix` picks which one `<leader>` mappings and
+mouse clicks insert.
 
 ---
 

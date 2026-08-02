@@ -768,7 +768,7 @@ footer a:hover { color: var(--accent); }
               <div class="bar"><i style="background:#E06C5F"></i><i style="background:#E0B44C"></i><i style="background:#87B37B"></i><span style="margin-left:.4rem">command palette</span></div>
               <img src="images/tui_screenshot_cmd_pallete.png" alt="The command palette open at the bottom of the dashboard with a slash command typed and its result echoed back." loading="lazy" width="1712" height="982">
             </div>
-            <figcaption><b>Command palette</b> — press <code>/</code> and run any action inline; results stream back with a typewriter reveal.</figcaption>
+            <figcaption><b>Command palette</b> — press <code>:</code> and run any action inline; results stream back with a typewriter reveal.</figcaption>
           </figure>
           <figure>
             <div class="shot">
@@ -780,19 +780,19 @@ footer a:hover { color: var(--accent); }
         </div>
 
         <div class="panel" style="margin-top:2.6rem">
-          <span class="panel-title"><span class="t-icon">⌨</span><span class="t-label">Key Bindings</span><span class="t-count">12</span><span class="t-hint">everything is one keypress away</span></span>
+          <span class="panel-title"><span class="t-icon">⌨</span><span class="t-label">Key Bindings</span><span class="t-count">12</span><span class="t-hint">vim motions, AstroNvim leader, and a mouse</span></span>
           <div class="scroller">
             <table>
               <thead><tr><th>Key</th><th>Action</th></tr></thead>
               <tbody>
-                <tr><td><code>s</code> <code>a</code> <code>p</code> <code>c</code></td><td class="desc">Focus the scenes, audio, profiles or collections panel</td></tr>
-                <tr><td><code>Ctrl</code>+arrows / <code>hjkl</code></td><td class="desc">Move focus across the 2×2 panel grid</td></tr>
+                <tr><td><code>j</code> <code>k</code> · <code>12j</code></td><td class="desc">Move in the focused panel — with vim count prefixes</td></tr>
+                <tr><td><code>gg</code> <code>G</code> · <code>Ctrl-D</code> <code>Ctrl-U</code></td><td class="desc">Jump to the ends of a list, or move half a pane</td></tr>
+                <tr><td><code>Ctrl</code>+<code>hjkl</code> · <code>⇥</code></td><td class="desc">Move focus across the 2×2 panel grid, or cycle through it</td></tr>
                 <tr><td><code>↵</code></td><td class="desc">Switch to the focused scene, profile or collection</td></tr>
-                <tr><td><code>m</code></td><td class="desc">Mute or unmute the focused audio input</td></tr>
-                <tr><td><code>←</code> <code>→</code></td><td class="desc">Nudge the focused input's volume by ±5%</td></tr>
-                <tr><td><code>/</code> or <code>:</code></td><td class="desc">Open the command palette</td></tr>
-                <tr><td><code>F2</code> / <code>Ctrl-T</code></td><td class="desc">Open the theme picker with live preview</td></tr>
-                <tr><td><code>r</code> · <code>D</code> · <code>q</code></td><td class="desc">Reload config · dump config from OBS · quit</td></tr>
+                <tr><td><code>m</code> · <code>h</code> <code>l</code></td><td class="desc">Mute the focused input, or nudge its volume by ±5%</td></tr>
+                <tr><td><code>:</code></td><td class="desc">Open the command palette</td></tr>
+                <tr><td><code>&lt;Space&gt;</code></td><td class="desc">Leader — a which-key popup lists what comes next</td></tr>
+                <tr><td>click · wheel · right-click</td><td class="desc">Select and activate rows, scroll a panel or the logs, cancel</td></tr>
               </tbody>
             </table>
           </div>

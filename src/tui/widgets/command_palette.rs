@@ -20,11 +20,11 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         "Command Palette",
         if model.command_palette.active {
             model.symbol(
-                "type command  ↵ run  esc close",
-                "type command  Enter run  Esc close",
+                "type command  ↵ run  ⇥ complete  esc close",
+                "type command  Enter run  Tab complete  Esc close",
             )
         } else {
-            "/ open  F2 themes  q quit"
+            ": open  <space> which-key  q quit"
         },
         model.command_palette.completions.len(),
         model.command_palette.active,
@@ -79,9 +79,9 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     } else {
         Line::from(vec![Span::styled(
             if model.advanced_ui {
-                "  ◈  / or : command  │  F2 themes  │  r reload  │  D dump  │  q quit"
+                "  ◈  : command  │  <space> which-key  │  gg/G jump  │  ⇥ pane  │  q quit"
             } else {
-                "  >  / or : command  |  F2 themes  |  r reload  |  D dump  |  q quit"
+                "  >  : command  |  <space> which-key  |  gg/G jump  |  Tab pane  |  q quit"
             },
             Style::default().fg(theme.muted),
         )])

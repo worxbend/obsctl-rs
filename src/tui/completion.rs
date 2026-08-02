@@ -1,26 +1,38 @@
 use super::model::TuiModel;
+use crate::domain::parser::PALETTE_PREFIXES;
 
+/// Bare command names. The prefix the user actually typed (`:` or `/`) is
+/// split off before matching and put back on every candidate, so completions
+/// always round-trip into the command line unchanged.
 const ALL_COMMANDS: &[&str] = &[
-    "/help",
-    "/themes",
-    "/scene",
-    "/profile",
-    "/collection",
-    "/mute",
-    "/unmute",
-    "/toggle-mute",
-    "/vol",
-    "/stream",
-    "/rec",
-    "/status",
-    "/obs-status",
-    "/server-status",
-    "/reload-config",
-    "/dump-config",
-    "/validate-config",
-    "/reconnect",
-    "/quit",
+    "help",
+    "themes",
+    "scene",
+    "profile",
+    "collection",
+    "mute",
+    "unmute",
+    "toggle-mute",
+    "vol",
+    "stream",
+    "rec",
+    "status",
+    "obs-status",
+    "server-status",
+    "reload-config",
+    "dump-config",
+    "validate-config",
+    "reconnect",
+    "quit",
 ];
+
+/// Split a leading palette prefix off `input`, if it has one.
+fn split_prefix(input: &str) -> (&str, &str) {
+    match input.chars().next() {
+        Some(c) if PALETTE_PREFIXES.contains(&c) => input.split_at(c.len_utf8()),
+        _ => ("", input),
+    }
+}
 
 fn sort_candidates(candidates: &mut Vec<String>, prefix: &str) {
     let prefix_lower = prefix.to_ascii_lowercase();
@@ -36,28 +48,33 @@ fn sort_candidates(candidates: &mut Vec<String>, prefix: &str) {
 }
 
 pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
-    if !input.contains(' ') {
-        let lower = input.to_ascii_lowercase();
+    let (prefix, body) = split_prefix(input);
+
+    if !body.contains(' ') {
+        let lower = body.to_ascii_lowercase();
         let mut matches: Vec<String> = ALL_COMMANDS
             .iter()
             .filter(|cmd| cmd.starts_with(lower.as_str()))
-            .map(|s| s.to_string())
+            .map(|cmd| format!("{prefix}{cmd}"))
             .collect();
         sort_candidates(&mut matches, input);
         return matches;
     }
 
-    let (cmd, raw_arg_prefix) = match input.split_once(' ') {
+    let (typed_cmd, raw_arg_prefix) = match body.split_once(' ') {
         Some(parts) => parts,
         None => return vec![],
     };
-    let cmd = cmd.trim_end();
+    let typed_cmd = typed_cmd.trim_end();
+    // Candidates echo back exactly what the user typed, prefix and casing
+    // included; only the lookup key is normalized.
+    let cmd = format!("{prefix}{typed_cmd}");
+    let cmd_key = typed_cmd.to_ascii_lowercase();
     let arg_prefix = raw_arg_prefix.trim_start();
-    let cmd_lower = cmd.to_ascii_lowercase();
     let arg_lower = arg_prefix.to_ascii_lowercase();
 
-    match cmd_lower.as_str() {
-        "/scene" | "/set-scene" => {
+    match cmd_key.as_str() {
+        "scene" | "set-scene" => {
             let mut candidates: Vec<String> = model
                 .scenes()
                 .iter()
@@ -76,7 +93,7 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
                 .map(|c| format!("{cmd} {c}"))
                 .collect()
         }
-        "/profile" | "/set-profile" => {
+        "profile" | "set-profile" => {
             let mut candidates: Vec<String> = model
                 .profiles()
                 .iter()
@@ -89,7 +106,7 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
                 .map(|c| format!("{cmd} {c}"))
                 .collect()
         }
-        "/collection" | "/set-collection" | "/scene-collection" => {
+        "collection" | "set-collection" | "scene-collection" => {
             let mut candidates: Vec<String> = model
                 .scene_collections()
                 .iter()
@@ -102,7 +119,7 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
                 .map(|c| format!("{cmd} {c}"))
                 .collect()
         }
-        "/mute" | "/unmute" | "/toggle-mute" | "/vol" | "/volume" => {
+        "mute" | "unmute" | "toggle-mute" | "vol" | "volume" => {
             let mut candidates: Vec<String> = model
                 .audio_inputs()
                 .iter()
@@ -165,6 +182,15 @@ mod tests {
         let model = make_model(vec![], vec![]);
         let result = compute("/sc", &model);
         assert_eq!(result, vec!["/scene".to_string()]);
+    }
+
+    #[test]
+    fn candidates_keep_whichever_palette_prefix_was_typed() {
+        let model = make_model(vec![scene("main", None)], vec![]);
+        assert_eq!(compute(":sc", &model), vec![":scene".to_string()]);
+        assert_eq!(compute(":scene m", &model), vec![":scene main".to_string()]);
+        // No prefix at all is still completed, unprefixed.
+        assert_eq!(compute("sc", &model), vec!["scene".to_string()]);
     }
 
     #[test]

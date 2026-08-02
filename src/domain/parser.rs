@@ -3,8 +3,17 @@ use crate::support::validation::{
     MAX_TARGET_TOKEN_LENGTH, parse_u8_in_range, trim_and_validate_token_with_max_len,
 };
 
+/// Command-line prefixes the TUI palette may open with. Both are stripped
+/// before parsing so `:scene Main`, `/scene Main`, and `scene Main` are the
+/// same command (see `ui.command_palette_prefix`).
+pub const PALETTE_PREFIXES: [char; 2] = ['/', ':'];
+
+/// Prefix the TUI command line opens with unless `ui.command_palette_prefix`
+/// says otherwise. `:` mirrors vim's command prompt.
+pub const DEFAULT_PALETTE_PREFIX: char = ':';
+
 pub fn parse(input: &str) -> Result<Command> {
-    let input = input.trim().trim_start_matches('/');
+    let input = input.trim().trim_start_matches(PALETTE_PREFIXES);
     if input.is_empty() {
         return Err(ObsctlError::CommandParseError("empty command".to_string()));
     }
@@ -193,6 +202,19 @@ fn tokenize(input: &str) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use crate::domain::command::Command;
+
+    #[test]
+    fn parse_accepts_either_palette_prefix() {
+        assert_eq!(parse(":help").unwrap(), Command::Help);
+        assert_eq!(parse("/help").unwrap(), Command::Help);
+        assert_eq!(
+            parse(":scene Main").unwrap(),
+            Command::SetScene {
+                target: "Main".to_string()
+            }
+        );
+        assert!(parse(":").is_err());
+    }
 
     #[test]
     fn parse_simple_commands() {

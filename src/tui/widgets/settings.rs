@@ -12,12 +12,14 @@ use crate::tui::{anim, model::TuiModel, theme, widgets::chrome};
 /// after btop's theme switcher: arrow keys live-preview a theme across the
 /// whole UI, Enter confirms and persists it, Esc reverts to whatever was
 /// active before opening this view.
-pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
+/// Returns the theme list's area so the caller can hit-test mouse clicks
+/// against the rows it just drew.
+pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> Rect {
     let theme = model.theme;
 
     let title = if model.advanced_ui {
         anim::gradient_line(
-            " ⚙ Settings // Appearance Lab // ↑↓ preview · Enter apply · Esc cancel ",
+            " ⚙ Settings // Appearance Lab // ↑↓/jk preview · Enter apply · Esc cancel ",
             theme.accent,
             theme.accent_alt,
             model.anim.frame,
@@ -51,6 +53,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 
     render_theme_list(f, sections[0], model);
     render_preview(f, sections[1], model);
+    sections[0]
 }
 
 fn render_theme_list(f: &mut Frame, area: Rect, model: &TuiModel) {

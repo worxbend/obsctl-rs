@@ -8,12 +8,14 @@ use std::{
 use time::OffsetDateTime;
 
 use crossterm::{
-    event::{Event, EventStream, KeyEventKind},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::StreamExt;
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -26,7 +28,8 @@ use crate::{
         event_applier::apply_server_message,
         input::{TuiAction, handle_key},
         layout,
-        model::{FocusPanel, TuiLogEntry, TuiModel, View},
+        model::{DEFAULT_PALETTE_PREFIX, FocusPanel, TuiLogEntry, TuiModel, View},
+        mouse::{self, HitView, Hitboxes},
         session::{TuiEventSession, send_command},
         theme::{self, Theme},
         widgets,
@@ -37,16 +40,45 @@ use crate::{
 const SPLASH_DURATION: Duration = Duration::from_millis(2000);
 const SPLASH_FRAME_INTERVAL: Duration = Duration::from_millis(50);
 
-pub async fn run(
-    socket_path: &Path,
-    refresh_ms: u64,
-    theme: Theme,
-    show_icons: bool,
-    advanced_ui: bool,
-    config_path: Option<PathBuf>,
-) -> Result<i32> {
+/// Percentage points one `h`/`l` (or `←`/`→`) nudge moves the focused input.
+const VOLUME_STEP: i16 = 5;
+
+/// Everything the TUI needs from the config to start up. Bundled rather than
+/// passed positionally because the list only grows.
+#[derive(Debug, Clone)]
+pub struct TuiOptions {
+    pub refresh_ms: u64,
+    pub theme: Theme,
+    pub show_icons: bool,
+    pub advanced_ui: bool,
+    /// Whether to put the terminal into mouse-reporting mode. Off leaves the
+    /// terminal's own click-to-select working (see `ui.mouse`).
+    pub mouse: bool,
+    /// Character the command line opens with (`ui.command_palette_prefix`).
+    pub palette_prefix: char,
+    pub config_path: Option<PathBuf>,
+}
+
+impl Default for TuiOptions {
+    fn default() -> Self {
+        Self {
+            refresh_ms: 250,
+            theme: Theme::default_theme(),
+            show_icons: true,
+            advanced_ui: true,
+            mouse: true,
+            palette_prefix: DEFAULT_PALETTE_PREFIX,
+            config_path: None,
+        }
+    }
+}
+
+pub async fn run(socket_path: &Path, options: TuiOptions) -> Result<i32> {
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
+    if options.mouse {
+        execute!(stdout(), EnableMouseCapture)?;
+    }
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -55,24 +87,20 @@ pub async fn run(
         run_splash(
             &mut terminal,
             &mut splash_events,
-            theme,
-            show_icons,
-            advanced_ui,
+            options.theme,
+            options.show_icons,
+            options.advanced_ui,
         )
         .await?;
     }
 
-    let result = run_loop(
-        &mut terminal,
-        socket_path,
-        refresh_ms,
-        theme,
-        show_icons,
-        advanced_ui,
-        config_path,
-    )
-    .await;
+    let result = run_loop(&mut terminal, socket_path, &options).await;
 
+    if options.mouse {
+        // Best-effort: leaving mouse reporting on would break the terminal
+        // for whatever runs next, so try to undo it even if the loop failed.
+        let _ = execute!(stdout(), DisableMouseCapture);
+    }
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)?;
 
@@ -113,10 +141,12 @@ async fn run_splash(
                 frame += 1;
             }
             maybe_event = events.next() => {
-                if let Some(Ok(Event::Key(key))) = maybe_event
-                    && key.kind == KeyEventKind::Press
-                {
-                    return Ok(());
+                match maybe_event {
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => return Ok(()),
+                    Some(Ok(Event::Mouse(m))) if matches!(m.kind, MouseEventKind::Down(_)) => {
+                        return Ok(());
+                    }
+                    _ => {}
                 }
             }
         }
@@ -126,14 +156,15 @@ async fn run_splash(
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     socket_path: &Path,
-    refresh_ms: u64,
-    theme: Theme,
-    show_icons: bool,
-    advanced_ui: bool,
-    config_path: Option<PathBuf>,
+    options: &TuiOptions,
 ) -> Result<i32> {
-    let mut model = TuiModel::with_appearance(theme, show_icons, advanced_ui);
-    let refresh = Duration::from_millis(refresh_ms.max(50));
+    let mut model =
+        TuiModel::with_appearance(options.theme, options.show_icons, options.advanced_ui);
+    model.palette_prefix = options.palette_prefix;
+    let config_path = options.config_path.clone();
+    let refresh = Duration::from_millis(options.refresh_ms.max(50));
+    // Where the last frame put each panel; mouse events resolve against it.
+    let mut hits = Hitboxes::default();
 
     // Try to connect to daemon
     let (ipc_tx, mut ipc_rx) = mpsc::channel::<std::result::Result<ServerMessage, String>>(64);
@@ -172,7 +203,7 @@ async fn run_loop(
         tokio::select! {
             _ = ticker.tick() => {
                 model.anim.tick();
-                terminal.draw(|f| render(f, &model))?;
+                draw(terminal, &model, &mut hits)?;
             }
 
             maybe_ipc = ipc_rx.recv() => {
@@ -189,48 +220,62 @@ async fn run_loop(
                     }
                 };
                 if needs_redraw {
-                    terminal.draw(|f| render(f, &model))?;
+                    draw(terminal, &model, &mut hits)?;
                 }
             }
 
             maybe_status = status_rx.recv() => {
                 if let Some(status) = maybe_status {
                     model.set_last_result(status);
-                    terminal.draw(|f| render(f, &model))?;
+                    draw(terminal, &model, &mut hits)?;
                 }
             }
 
             maybe_event = events.next() => {
-                match maybe_event {
+                let action = match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        if let Some(action) = handle_key(&model, key) {
-                            let (should_quit, result) = handle_action(
-                                action,
-                                &mut model,
-                                socket_path,
-                                config_path.as_deref(),
-                                &ipc_tx,
-                                &vol_tx,
-                            )
-                            .await;
-                            if should_quit {
-                                return Ok(0);
-                            }
-                            if let Some(r) = result {
-                                model.set_last_result(r);
-                            }
-                            terminal.draw(|f| render(f, &model))?;
-                        }
+                        handle_key(&model, key)
                     }
+                    Some(Ok(Event::Mouse(m))) => mouse::handle_mouse(&model, &hits, m),
                     Some(Ok(Event::Resize(_, _))) => {
-                        terminal.draw(|f| render(f, &model))?;
+                        draw(terminal, &model, &mut hits)?;
+                        None
                     }
                     None | Some(Err(_)) => return Ok(1),
-                    _ => {}
+                    _ => None,
+                };
+
+                if let Some(action) = action {
+                    let ctx = ActionCtx {
+                        socket_path,
+                        config_path: config_path.as_deref(),
+                        ipc_tx: &ipc_tx,
+                        vol_tx: &vol_tx,
+                        hits: &hits,
+                    };
+                    let (should_quit, result) = handle_action(action, &mut model, &ctx).await;
+                    if should_quit {
+                        return Ok(0);
+                    }
+                    if let Some(r) = result {
+                        model.set_last_result(r);
+                    }
+                    draw(terminal, &model, &mut hits)?;
                 }
             }
         }
     }
+}
+
+/// Render a frame and remember where it put things, so the next mouse event
+/// has something to hit-test against.
+fn draw(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    model: &TuiModel,
+    hits: &mut Hitboxes,
+) -> Result<()> {
+    terminal.draw(|f| *hits = render(f, model))?;
+    Ok(())
 }
 
 fn spawn_session_forwarder(
@@ -292,20 +337,61 @@ fn spawn_volume_debouncer(
     });
 }
 
+/// Everything an action might need that isn't the model itself.
+struct ActionCtx<'a> {
+    socket_path: &'a Path,
+    config_path: Option<&'a Path>,
+    ipc_tx: &'a mpsc::Sender<std::result::Result<ServerMessage, String>>,
+    vol_tx: &'a mpsc::UnboundedSender<(String, u8)>,
+    hits: &'a Hitboxes,
+}
+
 async fn handle_action(
     action: TuiAction,
     model: &mut TuiModel,
-    socket_path: &Path,
-    config_path: Option<&Path>,
-    ipc_tx: &mpsc::Sender<std::result::Result<ServerMessage, String>>,
-    vol_tx: &mpsc::UnboundedSender<(String, u8)>,
+    ctx: &ActionCtx<'_>,
 ) -> (bool, Option<String>) {
+    // Only the two bookkeeping actions extend a half-typed sequence;
+    // everything else completes (or abandons) it, which is what takes the
+    // which-key overlay back down.
+    let keeps_pending = matches!(action, TuiAction::PushCount(_) | TuiAction::SetPending(_));
+    let outcome = run_action(action, model, ctx).await;
+    if !keeps_pending {
+        model.clear_pending();
+    }
+    outcome
+}
+
+async fn run_action(
+    action: TuiAction,
+    model: &mut TuiModel,
+    ctx: &ActionCtx<'_>,
+) -> (bool, Option<String>) {
+    let socket_path = ctx.socket_path;
     match action {
         TuiAction::Quit => (true, None),
-        TuiAction::OpenPalette => {
+        TuiAction::SetPending(pending) => {
+            model.pending = pending;
+            (false, None)
+        }
+        TuiAction::ClearPending => {
+            model.clear_pending();
+            // Esc / right-click also snaps the log pane back to the live tail.
+            model.log_scroll = 0;
+            (false, None)
+        }
+        TuiAction::PushCount(digit) => {
+            model.push_count(digit);
+            (false, None)
+        }
+        TuiAction::OpenPalette { prefix, seed } => {
             model.command_palette.active = true;
             model.command_palette.input.clear();
-            model.command_palette.input.push('/');
+            model
+                .command_palette
+                .input
+                .push(prefix.unwrap_or(model.palette_prefix));
+            model.command_palette.input.push_str(seed);
             refresh_completions(model);
             (false, None)
         }
@@ -326,6 +412,16 @@ async fn handle_action(
             refresh_completions(model);
             (false, None)
         }
+        TuiAction::PaletteClear => {
+            model.command_palette.clear_to_prefix();
+            refresh_completions(model);
+            (false, None)
+        }
+        TuiAction::PaletteDeleteWord => {
+            model.command_palette.delete_word();
+            refresh_completions(model);
+            (false, None)
+        }
         TuiAction::PaletteSubmit => {
             let input = model.command_palette.input.clone();
             model.command_palette.active = false;
@@ -342,14 +438,23 @@ async fn handle_action(
             }
             (false, Some(result))
         }
-        TuiAction::ReloadConfig => {
-            let result = send_simple(socket_path, "reload_config").await;
-            (false, Some(result))
-        }
-        TuiAction::DumpConfig => {
-            let result = send_simple(socket_path, "dump_config").await;
-            (false, Some(result))
-        }
+        TuiAction::ReloadConfig => (false, Some(send_simple(socket_path, "reload_config").await)),
+        TuiAction::DumpConfig => (false, Some(send_simple(socket_path, "dump_config").await)),
+        TuiAction::ValidateConfig => (
+            false,
+            Some(send_status(socket_path, "validate_config").await),
+        ),
+        TuiAction::ObsStatus => (
+            false,
+            Some(send_status(socket_path, "get_obs_status").await),
+        ),
+        TuiAction::ServerStatus => (
+            false,
+            Some(send_status(socket_path, "get_server_status").await),
+        ),
+        TuiAction::ToggleStream => (false, Some(send_simple(socket_path, "toggle_stream").await)),
+        TuiAction::ToggleRecord => (false, Some(send_simple(socket_path, "toggle_record").await)),
+        TuiAction::ReconnectObs => (false, Some(send_simple(socket_path, "reconnect_obs").await)),
         TuiAction::FocusScenes => {
             model.focus = FocusPanel::Scenes;
             (false, None)
@@ -382,39 +487,49 @@ async fn handle_action(
             model.focus = model.focus.down();
             (false, None)
         }
-        TuiAction::NavUp => {
-            model.move_up();
+        TuiAction::FocusPaneNext => {
+            model.focus = model.focus.next();
             (false, None)
         }
-        TuiAction::NavDown => {
-            model.move_down();
+        TuiAction::FocusPanePrev => {
+            model.focus = model.focus.prev();
             (false, None)
         }
-        TuiAction::ActivateScene => {
-            if let Some(name) = model.focused_scene().map(|s| s.name.clone()) {
-                let result = send_simple_with_target(socket_path, "set_scene", &name).await;
-                (false, Some(result))
-            } else {
-                (false, None)
-            }
+        TuiAction::NavUp(rows) => {
+            model.move_up_by(rows);
+            (false, None)
         }
-        TuiAction::ActivateProfile => {
-            if let Some(name) = model.focused_profile().map(str::to_string) {
-                let result = send_simple_with_target(socket_path, "set_profile", &name).await;
-                (false, Some(result))
-            } else {
-                (false, None)
-            }
+        TuiAction::NavDown(rows) => {
+            model.move_down_by(rows);
+            (false, None)
         }
-        TuiAction::ActivateCollection => {
-            if let Some(name) = model.focused_scene_collection().map(str::to_string) {
-                let result =
-                    send_simple_with_target(socket_path, "set_scene_collection", &name).await;
-                (false, Some(result))
-            } else {
-                (false, None)
-            }
+        TuiAction::NavTop => {
+            model.move_to_top();
+            (false, None)
         }
+        TuiAction::NavBottom => {
+            model.move_to_bottom();
+            (false, None)
+        }
+        TuiAction::NavHalfPageUp => {
+            model.move_up_by(half_page(ctx.hits, model.focus));
+            (false, None)
+        }
+        TuiAction::NavHalfPageDown => {
+            model.move_down_by(half_page(ctx.hits, model.focus));
+            (false, None)
+        }
+        TuiAction::SelectIndex(panel, index) => {
+            model.focus = panel;
+            model.set_panel_cursor(panel, index);
+            (false, None)
+        }
+        TuiAction::ActivateIndex(panel, index) => {
+            model.focus = panel;
+            model.set_panel_cursor(panel, index);
+            (false, activate_focused(model, socket_path).await)
+        }
+        TuiAction::Activate => (false, activate_focused(model, socket_path).await),
         TuiAction::ToggleMute => {
             if let Some(name) = model.focused_audio().map(|a| a.name.clone()) {
                 let result = send_simple_with_target(socket_path, "toggle_mute", &name).await;
@@ -423,12 +538,27 @@ async fn handle_action(
                 (false, None)
             }
         }
-        TuiAction::VolumeDown => (false, adjust_focused_volume(model, vol_tx, -5)),
-        TuiAction::VolumeUp => (false, adjust_focused_volume(model, vol_tx, 5)),
+        TuiAction::VolumeDown(steps) => (
+            false,
+            adjust_focused_volume(model, ctx.vol_tx, -volume_delta(steps)),
+        ),
+        TuiAction::VolumeUp(steps) => (
+            false,
+            adjust_focused_volume(model, ctx.vol_tx, volume_delta(steps)),
+        ),
+        TuiAction::LogScrollUp(lines) => {
+            let visible = usize::from(ctx.hits.logs.height.saturating_sub(2));
+            model.scroll_logs_up(lines, visible);
+            (false, None)
+        }
+        TuiAction::LogScrollDown(lines) => {
+            model.scroll_logs_down(lines);
+            (false, None)
+        }
         TuiAction::RetryConnect => match TuiEventSession::connect(socket_path).await {
             Ok(session) => {
                 model.connected_to_daemon = true;
-                spawn_session_forwarder(session, ipc_tx.clone());
+                spawn_session_forwarder(session, ctx.ipc_tx.clone());
                 (false, Some("Reconnected to daemon.".to_string()))
             }
             Err(e) => (false, Some(format!("Retry failed: {e}"))),
@@ -441,6 +571,16 @@ async fn handle_action(
             model.command_palette.cycle_prev();
             (false, None)
         }
+        TuiAction::ToggleIcons => {
+            model.show_icons = !model.show_icons;
+            let state = if model.show_icons { "on" } else { "off" };
+            (false, Some(format!("icons {state}")))
+        }
+        TuiAction::ToggleAdvancedUi => {
+            model.advanced_ui = !model.advanced_ui;
+            let state = if model.advanced_ui { "on" } else { "off" };
+            (false, Some(format!("advanced UI {state}")))
+        }
         TuiAction::OpenSettings => {
             open_settings(model);
             (false, None)
@@ -452,15 +592,24 @@ async fn handle_action(
             model.view = View::Main;
             (false, None)
         }
-        TuiAction::SettingsNavUp => {
-            model.settings_cursor = model.settings_cursor.saturating_sub(1);
-            model.theme = theme::ALL[model.settings_cursor];
+        TuiAction::SettingsNavUp(rows) => {
+            preview_theme(model, model.settings_cursor.saturating_sub(rows));
             (false, None)
         }
-        TuiAction::SettingsNavDown => {
-            let max = theme::ALL.len().saturating_sub(1);
-            model.settings_cursor = (model.settings_cursor + 1).min(max);
-            model.theme = theme::ALL[model.settings_cursor];
+        TuiAction::SettingsNavDown(rows) => {
+            preview_theme(model, model.settings_cursor.saturating_add(rows));
+            (false, None)
+        }
+        TuiAction::SettingsNavTop => {
+            preview_theme(model, 0);
+            (false, None)
+        }
+        TuiAction::SettingsNavBottom => {
+            preview_theme(model, usize::MAX);
+            (false, None)
+        }
+        TuiAction::SettingsSelect(index) => {
+            preview_theme(model, index);
             (false, None)
         }
         TuiAction::ApplySettingsTheme => {
@@ -468,10 +617,46 @@ async fn handle_action(
             model.theme = chosen;
             model.theme_preview_origin = None;
             model.view = View::Main;
-            let result = persist_theme_choice(config_path, chosen.id).await;
+            let result = persist_theme_choice(ctx.config_path, chosen.id).await;
             (false, Some(result))
         }
     }
+}
+
+/// Rows one `Ctrl-D`/`Ctrl-U` covers: half the focused pane's visible height,
+/// falling back to a sensible step before the first frame has been drawn.
+fn half_page(hits: &Hitboxes, panel: FocusPanel) -> usize {
+    let rows = hits.panel(panel).height.saturating_sub(2) / 2;
+    usize::from(rows).max(1)
+}
+
+fn volume_delta(steps: usize) -> i16 {
+    let steps = i16::try_from(steps).unwrap_or(i16::MAX);
+    steps.saturating_mul(VOLUME_STEP).clamp(0, 100)
+}
+
+/// Move the settings cursor to `index` (clamped) and live-preview its theme.
+fn preview_theme(model: &mut TuiModel, index: usize) {
+    let max = theme::ALL.len().saturating_sub(1);
+    model.settings_cursor = index.min(max);
+    model.theme = theme::ALL[model.settings_cursor];
+}
+
+/// Enter/click on the focused row: switch to it, or for audio toggle mute.
+async fn activate_focused(model: &TuiModel, socket_path: &Path) -> Option<String> {
+    let (command, target) = match model.focus {
+        FocusPanel::Scenes => ("set_scene", model.focused_scene().map(|s| s.name.clone())?),
+        FocusPanel::Profiles => ("set_profile", model.focused_profile()?.to_string()),
+        FocusPanel::Collections => (
+            "set_scene_collection",
+            model.focused_scene_collection()?.to_string(),
+        ),
+        FocusPanel::Audio => (
+            "toggle_mute",
+            model.focused_audio().map(|a| a.name.clone())?,
+        ),
+    };
+    Some(send_simple_with_target(socket_path, command, &target).await)
 }
 
 /// Enter the settings view, remembering the current theme so Esc/close
@@ -500,19 +685,28 @@ async fn persist_theme_choice(config_path: Option<&Path>, theme_id: &str) -> Str
     }
 }
 
-fn render(f: &mut ratatui::Frame, model: &TuiModel) {
+/// Draw a frame, returning where the interactive regions ended up so mouse
+/// events can be resolved against the pixels the user is actually looking at.
+fn render(f: &mut ratatui::Frame, model: &TuiModel) -> Hitboxes {
     widgets::fill_background(f, model.theme);
 
     if model.view == View::Settings {
-        widgets::settings::render(f, f.area(), model);
-        return;
+        let settings_list = widgets::settings::render(f, f.area(), model);
+        return Hitboxes {
+            view: HitView::Settings,
+            settings_list,
+            ..Hitboxes::default()
+        };
     }
 
     let areas = layout::compute(f, model.streaming());
 
     if !model.connected_to_daemon {
         widgets::connection::render_unavailable(f, f.area(), model);
-        return;
+        return Hitboxes {
+            view: HitView::Disconnected,
+            ..Hitboxes::default()
+        };
     }
 
     widgets::header::render(f, areas.header, model);
@@ -526,6 +720,19 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) {
         widgets::stats::render(f, stats_area, model);
     }
     widgets::command_palette::render(f, areas.palette, model);
+    // Last, so the which-key popup floats above the dashboard.
+    widgets::which_key::render(f, f.area(), model);
+
+    Hitboxes {
+        view: HitView::Main,
+        scenes: areas.scenes,
+        audio: areas.audio,
+        profiles: areas.profiles,
+        collections: areas.collections,
+        logs: areas.logs,
+        palette: areas.palette,
+        settings_list: Rect::default(),
+    }
 }
 
 fn refresh_completions(model: &mut TuiModel) {
@@ -540,9 +747,9 @@ async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
         Ok(Command::Quit) => "quit".to_string(),
         Ok(Command::Themes) => "themes".to_string(),
         Ok(Command::Help) => {
-            "Commands: /scene /profile /collection /mute /unmute /toggle-mute /vol /stream /rec \
-             /status /obs-status /server-status /reload-config /dump-config /validate-config \
-             /themes /reconnect /quit"
+            "Commands: :scene :profile :collection :mute :unmute :toggle-mute :vol :stream :rec \
+             :status :obs-status :server-status :reload-config :dump-config :validate-config \
+             :themes :reconnect :quit  —  <space> opens the which-key menu"
                 .to_string()
         }
         Ok(cmd) => {
@@ -718,6 +925,47 @@ async fn send_simple(socket_path: &Path, name: &str) -> String {
         args: serde_json::Value::Null,
     };
     format_ipc_response(send_command(socket_path, payload).await, "ok")
+}
+
+/// Like [`send_simple`], but for the query commands whose usefulness is in
+/// the payload — a bare "ok" would throw away everything the user asked for.
+async fn send_status(socket_path: &Path, name: &str) -> String {
+    let payload = CommandPayload {
+        name: name.to_string(),
+        args: serde_json::Value::Null,
+    };
+    match send_command(socket_path, payload).await {
+        Ok(ServerMessage::Response {
+            ok, result, error, ..
+        }) => {
+            if ok {
+                result
+                    .as_ref()
+                    .and_then(|v| v.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+                    .or_else(|| result.as_ref().map(summarize_json))
+                    .unwrap_or_else(|| "ok".to_string())
+            } else {
+                error
+                    .map(|e| format!("error [{}]: {}", e.code, e.message))
+                    .unwrap_or_else(|| "error".to_string())
+            }
+        }
+        Ok(_) => "unexpected response".to_string(),
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+/// One-line rendering of a status payload, truncated on a char boundary so
+/// it fits the single result line the palette gives us.
+fn summarize_json(value: &serde_json::Value) -> String {
+    const MAX_CHARS: usize = 220;
+    let text = value.to_string();
+    match text.char_indices().nth(MAX_CHARS) {
+        Some((byte_idx, _)) => format!("{}…", &text[..byte_idx]),
+        None => text,
+    }
 }
 
 #[cfg(test)]

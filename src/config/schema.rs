@@ -32,6 +32,26 @@ pub fn validate(config: &Config) -> Result<Vec<ValidationWarning>> {
         ));
     }
 
+    // The prefix is stripped before parsing (see `domain::parser`), so only
+    // the characters that round-trip through it work. Warn rather than fail:
+    // this field went unread for several releases, so an unusable value in an
+    // existing config must not start blocking the daemon.
+    if !crate::domain::parser::PALETTE_PREFIXES
+        .iter()
+        .any(|c| config.ui.command_palette_prefix == c.to_string())
+    {
+        let supported: Vec<String> = crate::domain::parser::PALETTE_PREFIXES
+            .iter()
+            .map(char::to_string)
+            .collect();
+        warnings.push(ValidationWarning(format!(
+            "ui.command_palette_prefix '{}' is not supported (supported: {}); falling back to '{}'",
+            config.ui.command_palette_prefix,
+            supported.join(", "),
+            crate::domain::parser::DEFAULT_PALETTE_PREFIX,
+        )));
+    }
+
     if let Some(locale) = &config.ui.locale
         && !crate::localization::SUPPORTED_LOCALES.contains(&locale.to_ascii_lowercase().as_str())
     {
@@ -241,6 +261,34 @@ mod tests {
     fn valid_default_config() {
         let c = valid_config();
         assert!(validate(&c).is_ok());
+    }
+
+    #[test]
+    fn both_palette_prefixes_validate_without_warning() {
+        for prefix in ["/", ":"] {
+            let mut c = valid_config();
+            c.ui.command_palette_prefix = prefix.to_string();
+            let warnings = validate(&c).expect("prefix should be accepted");
+            assert!(
+                !warnings
+                    .iter()
+                    .any(|w| w.0.contains("command_palette_prefix")),
+                "'{prefix}' should not warn, got {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unusable_palette_prefix_warns_instead_of_failing() {
+        let mut c = valid_config();
+        c.ui.command_palette_prefix = ">>".to_string();
+        let warnings = validate(&c).expect("an unusable prefix must not block startup");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.0.contains("command_palette_prefix")),
+            "expected a fallback warning, got {warnings:?}"
+        );
     }
 
     #[test]

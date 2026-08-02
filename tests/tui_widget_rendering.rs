@@ -6,6 +6,7 @@ use obsctl_rs::{
     ipc::protocol::LogLevel,
     obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState},
     tui::{
+        keymap::Pending,
         model::{TuiLogEntry, TuiModel},
         widgets,
     },
@@ -549,6 +550,44 @@ fn logs_renders_empty_without_panic() {
 }
 
 #[test]
+fn logs_scrolled_back_shows_older_entries_and_says_it_is_not_following() {
+    let mut model = model_connected();
+    model.logs.clear();
+    for i in 0..20 {
+        model.push_log(TuiLogEntry {
+            level: LogLevel::Info,
+            message: format!("entry-{i:02}"),
+            target: None,
+            timestamp: OffsetDateTime::UNIX_EPOCH,
+        });
+    }
+
+    // Following the tail: newest visible, oldest scrolled off.
+    let mut tail = term(60, 8);
+    tail.draw(|f| {
+        widgets::logs::render(f, Rect::new(0, 0, 60, 8), &model);
+    })
+    .unwrap();
+    let tail_out = buf_string(&tail);
+    assert!(tail_out.contains("entry-19"), "tail shows the newest entry");
+    assert!(!tail_out.contains("entry-00"));
+
+    // Scrolled back by six lines: the oldest entries come into view and the
+    // pane stops advertising itself as a live feed.
+    model.scroll_logs_up(6, 6);
+    let mut scrolled = term(60, 8);
+    scrolled
+        .draw(|f| {
+            widgets::logs::render(f, Rect::new(0, 0, 60, 8), &model);
+        })
+        .unwrap();
+    let out = buf_string(&scrolled);
+    assert!(out.contains("entry-08"), "scrolled window shows history");
+    assert!(!out.contains("entry-19"), "newest entry is scrolled past");
+    assert!(!out.contains("live daemon feed"));
+}
+
+#[test]
 fn logs_handles_small_terminal_height() {
     let model = model_connected();
     let mut t = term(60, 3);
@@ -761,7 +800,9 @@ fn simplified_ui_renders_the_dashboard_and_splash_as_ascii_only() {
 
     let mut settings = term(100, 20);
     settings
-        .draw(|f| widgets::settings::render(f, f.area(), &model))
+        .draw(|f| {
+            widgets::settings::render(f, f.area(), &model);
+        })
         .unwrap();
     assert!(buf_string(&settings).is_ascii());
 
@@ -836,6 +877,98 @@ fn settings_survives_minimum_terminal_size() {
 }
 
 // ── small terminal edge case ─────────────────────────────────────────────────
+
+// ── which-key overlay ───────────────────────────────────────────────────────
+
+#[test]
+fn which_key_draws_nothing_until_a_sequence_is_pending() {
+    let model = model_connected();
+    let mut t = term(80, 24);
+    t.draw(|f| {
+        widgets::which_key::render(f, f.area(), &model);
+    })
+    .unwrap();
+    assert!(
+        buf_string(&t).trim().is_empty(),
+        "no pending sequence should draw no popup"
+    );
+}
+
+#[test]
+fn which_key_lists_the_leader_menu_and_marks_groups() {
+    let mut model = model_connected();
+    model.pending = Pending::Leader;
+    let mut t = term(90, 26);
+    t.draw(|f| {
+        widgets::which_key::render(f, f.area(), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("<leader>"), "popup names the pending sequence");
+    assert!(out.contains("+find"), "groups are marked with a leading +");
+    assert!(out.contains("+stream"));
+    assert!(out.contains("quit"), "plain actions are listed too");
+}
+
+#[test]
+fn which_key_shows_the_subgroup_after_a_second_key() {
+    let mut model = model_connected();
+    model.pending = Pending::LeaderGroup('c');
+    let mut t = term(90, 26);
+    t.draw(|f| {
+        widgets::which_key::render(f, f.area(), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("<leader>c"));
+    assert!(out.contains("reload config"));
+    assert!(out.contains("validate config"));
+}
+
+#[test]
+fn which_key_shows_a_typed_count_prefix() {
+    let mut model = model_connected();
+    model.pending = Pending::G;
+    model.pending_count = Some(12);
+    let mut t = term(90, 26);
+    t.draw(|f| {
+        widgets::which_key::render(f, f.area(), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains("12"), "the pending count is visible: {out}");
+    assert!(out.contains("top of list"));
+}
+
+#[test]
+fn which_key_uses_ascii_only_symbols_in_simplified_mode() {
+    let mut model = model_connected();
+    model.advanced_ui = false;
+    model.show_icons = false;
+    model.pending = Pending::Leader;
+    let mut t = term(90, 26);
+    t.draw(|f| {
+        widgets::which_key::render(f, f.area(), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.is_ascii(),
+        "simplified which-key emitted non-ASCII characters: {out}"
+    );
+}
+
+#[test]
+fn which_key_stays_silent_on_a_terminal_too_small_to_hold_it() {
+    let mut model = model_connected();
+    model.pending = Pending::Leader;
+    let mut t = term(20, 5);
+    t.draw(|f| {
+        widgets::which_key::render(f, f.area(), &model);
+    })
+    .unwrap();
+    assert!(buf_string(&t).trim().is_empty());
+}
 
 #[test]
 fn all_widgets_survive_minimum_terminal_size() {

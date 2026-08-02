@@ -298,21 +298,16 @@ fn run_tui(config_path: Option<PathBuf>) -> i32 {
     let effective_config_path = config_path
         .or_else(paths::config_path)
         .or_else(paths::default_config_path);
-    let (theme, show_icons, advanced_ui) = resolve_tui_appearance(effective_config_path.as_ref());
+    let mut options = resolve_tui_appearance(effective_config_path.as_ref());
+    options.refresh_ms = refresh_ms;
+    options.config_path = effective_config_path;
 
     let rt = match tokio_runtime("TUI") {
         Some(rt) => rt,
         None => return 1,
     };
 
-    match rt.block_on(crate::tui::app::run(
-        &socket_path,
-        refresh_ms,
-        theme,
-        show_icons,
-        advanced_ui,
-        effective_config_path,
-    )) {
+    match rt.block_on(crate::tui::app::run(&socket_path, options)) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{}", t!("cli.tui.error", error = e));
@@ -321,11 +316,13 @@ fn run_tui(config_path: Option<PathBuf>) -> i32 {
     }
 }
 
-/// Best-effort resolution of the configured TUI theme (built-in id or a
-/// `custom` palette); falls back to the default theme on any load error so
-/// a bad/missing config never blocks launching the TUI (the error path is
-/// already reported by `resolve_socket_config`).
-fn resolve_tui_appearance(config_path: Option<&PathBuf>) -> (crate::tui::theme::Theme, bool, bool) {
+/// Best-effort resolution of the configured TUI appearance and input options
+/// (built-in theme id or a `custom` palette, icons, mouse, palette prefix);
+/// falls back to defaults on any load error so a bad/missing config never
+/// blocks launching the TUI (the error path is already reported by
+/// `resolve_socket_config`). `refresh_ms` and `config_path` are filled in by
+/// the caller, which resolves them separately.
+fn resolve_tui_appearance(config_path: Option<&PathBuf>) -> crate::tui::app::TuiOptions {
     let config = config_path
         .and_then(|cp| loader::load_or_default(cp).ok())
         .unwrap_or_default();
@@ -347,11 +344,20 @@ fn resolve_tui_appearance(config_path: Option<&PathBuf>) -> (crate::tui::theme::
             highlight_bg: c.highlight_bg,
             highlight_fg: c.highlight_fg,
         });
-    (
-        crate::tui::theme::Theme::resolve(&config.ui.theme, custom.as_ref()),
-        config.ui.show_icons,
-        config.ui.advanced_ui,
-    )
+    crate::tui::app::TuiOptions {
+        theme: crate::tui::theme::Theme::resolve(&config.ui.theme, custom.as_ref()),
+        show_icons: config.ui.show_icons,
+        advanced_ui: config.ui.advanced_ui,
+        mouse: config.ui.mouse,
+        palette_prefix: config
+            .ui
+            .command_palette_prefix
+            .chars()
+            .next()
+            .filter(|c| crate::domain::parser::PALETTE_PREFIXES.contains(c))
+            .unwrap_or(crate::domain::parser::DEFAULT_PALETTE_PREFIX),
+        ..crate::tui::app::TuiOptions::default()
+    }
 }
 
 fn tokio_runtime(context: &str) -> Option<tokio::runtime::Runtime> {

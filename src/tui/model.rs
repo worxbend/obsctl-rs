@@ -5,8 +5,10 @@ use time::OffsetDateTime;
 use crate::{
     ipc::protocol::{LogEvent, LogLevel},
     obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState, ServerStatus},
-    tui::{anim::AnimClock, theme::Theme},
+    tui::{anim::AnimClock, input::MAX_COUNT, keymap::Pending, theme::Theme},
 };
+
+pub use crate::domain::parser::DEFAULT_PALETTE_PREFIX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusPanel {
@@ -55,6 +57,23 @@ impl FocusPanel {
             Self::Audio => Self::Collections,
             other => other,
         }
+    }
+
+    /// Reading order of the 2x2 grid, used by Tab / Shift-Tab. Unlike the
+    /// spatial moves above this one wraps, so repeated Tab visits every
+    /// panel and comes back around.
+    pub const CYCLE: [Self; 4] = [Self::Scenes, Self::Audio, Self::Profiles, Self::Collections];
+
+    fn cycle_index(self) -> usize {
+        Self::CYCLE.iter().position(|p| *p == self).unwrap_or(0)
+    }
+
+    pub fn next(self) -> Self {
+        Self::CYCLE[(self.cycle_index() + 1) % Self::CYCLE.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        Self::CYCLE[(self.cycle_index() + Self::CYCLE.len() - 1) % Self::CYCLE.len()]
     }
 }
 
@@ -152,6 +171,16 @@ pub struct TuiModel {
     /// Theme active before opening the settings view, restored on Esc
     /// without confirming a new choice (live-preview-then-cancel, btop-style).
     pub theme_preview_origin: Option<Theme>,
+    /// Half-typed vim key sequence (`g…`, `<leader>…`). Anything other than
+    /// [`Pending::None`] puts the which-key overlay on screen and routes the
+    /// next keypress through [`crate::tui::keymap::resolve`].
+    pub pending: Pending,
+    /// Numeric count prefix accumulated so far (`12j`), if any.
+    pub pending_count: Option<u32>,
+    /// Character the command line opens with — `ui.command_palette_prefix`.
+    pub palette_prefix: char,
+    /// Lines the log pane is scrolled back from the live tail. `0` follows.
+    pub log_scroll: usize,
     /// Cached visible (non-hidden) scenes; rebuilt in `clamp_cursors` after each snapshot update.
     cached_visible_scenes: Vec<SceneState>,
 }
@@ -185,6 +214,10 @@ impl Default for TuiModel {
             view: View::default(),
             settings_cursor: 0,
             theme_preview_origin: None,
+            pending: Pending::default(),
+            pending_count: None,
+            palette_prefix: DEFAULT_PALETTE_PREFIX,
+            log_scroll: 0,
             cached_visible_scenes: Vec::new(),
         }
     }
@@ -207,6 +240,27 @@ pub struct CommandPaletteState {
 }
 
 impl CommandPaletteState {
+    /// Ctrl-U — wipe the line back to its prompt prefix.
+    pub fn clear_to_prefix(&mut self) {
+        self.input = self.input.chars().take(1).collect();
+    }
+
+    /// Ctrl-W — delete the word before the cursor, never eating the prefix.
+    pub fn delete_word(&mut self) {
+        let floor = self.input.chars().next().map(char::len_utf8).unwrap_or(0);
+        let mut end = self.input.len();
+        while end > floor && self.input[..end].ends_with(' ') {
+            end -= 1;
+        }
+        while end > floor && !self.input[..end].ends_with(' ') {
+            end -= 1;
+            while end > floor && !self.input.is_char_boundary(end) {
+                end -= 1;
+            }
+        }
+        self.input.truncate(end);
+    }
+
     pub fn cycle_next(&mut self) {
         if self.completions.is_empty() {
             return;
@@ -263,6 +317,29 @@ impl TuiModel {
             advanced_ui,
             ..Self::default()
         }
+    }
+
+    /// The typed count prefix, or 1 when none was typed — the multiplier
+    /// every motion applies (`12j` moves twelve rows).
+    pub fn count(&self) -> usize {
+        self.pending_count.unwrap_or(1).max(1) as usize
+    }
+
+    /// Append a digit to the count prefix, saturating at [`MAX_COUNT`].
+    pub fn push_count(&mut self, digit: u32) {
+        let next = self
+            .pending_count
+            .unwrap_or(0)
+            .saturating_mul(10)
+            .saturating_add(digit);
+        self.pending_count = Some(next.min(MAX_COUNT));
+    }
+
+    /// Abandon any half-typed sequence: closes the which-key overlay and
+    /// drops the count prefix.
+    pub fn clear_pending(&mut self) {
+        self.pending = Pending::None;
+        self.pending_count = None;
     }
 
     pub fn symbol(&self, rich: &'static str, ascii: &'static str) -> &'static str {
@@ -334,6 +411,30 @@ impl TuiModel {
             let overflow = self.logs.len() - Self::MAX_LOG_ENTRIES;
             self.logs.drain(0..overflow);
         }
+        // While the user is reading scrolled-back history, hold the viewport
+        // on the same lines rather than letting new arrivals push them away.
+        if self.log_scroll > 0 {
+            self.log_scroll = (self.log_scroll + 1).min(Self::MAX_LOG_ENTRIES);
+        }
+    }
+
+    /// Scroll the log pane back from the live tail by `lines`. `visible` is
+    /// the pane's current row count, which bounds how far back there is to go.
+    pub fn scroll_logs_up(&mut self, lines: usize, visible: usize) {
+        let max = self.logs.len().saturating_sub(visible);
+        self.log_scroll = self.log_scroll.saturating_add(lines).min(max);
+    }
+
+    /// Scroll back toward the live tail; reaching `0` resumes following.
+    pub fn scroll_logs_down(&mut self, lines: usize) {
+        self.log_scroll = self.log_scroll.saturating_sub(lines);
+    }
+
+    /// Index of the first log entry to render given a pane showing `visible`
+    /// rows, honouring how far the user has scrolled back.
+    pub fn log_view_start(&self, visible: usize) -> usize {
+        let max = self.logs.len().saturating_sub(visible);
+        max - self.log_scroll.min(max)
     }
 
     /// Visible (non-hidden) scenes, in snapshot order. Returns the cached slice; no allocation per call.
@@ -422,44 +523,62 @@ impl TuiModel {
         self.snapshot.as_ref().map(|s| s.connected).unwrap_or(false)
     }
 
-    pub fn move_up(&mut self) {
-        match self.focus {
-            FocusPanel::Scenes => self.scene_cursor = self.scene_cursor.saturating_sub(1),
-            FocusPanel::Audio => self.audio_cursor = self.audio_cursor.saturating_sub(1),
-            FocusPanel::Profiles => self.profile_cursor = self.profile_cursor.saturating_sub(1),
-            FocusPanel::Collections => {
-                self.collection_cursor = self.collection_cursor.saturating_sub(1)
-            }
+    /// Number of rows in `panel`'s list.
+    pub fn panel_len(&self, panel: FocusPanel) -> usize {
+        match panel {
+            FocusPanel::Scenes => self.scenes().len(),
+            FocusPanel::Audio => self.audio_inputs().len(),
+            FocusPanel::Profiles => self.profiles().len(),
+            FocusPanel::Collections => self.scene_collections().len(),
         }
     }
 
-    pub fn move_down(&mut self) {
-        match self.focus {
-            FocusPanel::Scenes => {
-                let max = self.scenes().len().saturating_sub(1);
-                if self.scene_cursor < max {
-                    self.scene_cursor += 1;
-                }
-            }
-            FocusPanel::Audio => {
-                let max = self.audio_inputs().len().saturating_sub(1);
-                if self.audio_cursor < max {
-                    self.audio_cursor += 1;
-                }
-            }
-            FocusPanel::Profiles => {
-                let max = self.profiles().len().saturating_sub(1);
-                if self.profile_cursor < max {
-                    self.profile_cursor += 1;
-                }
-            }
-            FocusPanel::Collections => {
-                let max = self.scene_collections().len().saturating_sub(1);
-                if self.collection_cursor < max {
-                    self.collection_cursor += 1;
-                }
-            }
+    /// Cursor position within `panel`'s list.
+    pub fn panel_cursor(&self, panel: FocusPanel) -> usize {
+        match panel {
+            FocusPanel::Scenes => self.scene_cursor,
+            FocusPanel::Audio => self.audio_cursor,
+            FocusPanel::Profiles => self.profile_cursor,
+            FocusPanel::Collections => self.collection_cursor,
         }
+    }
+
+    /// Move `panel`'s cursor to `index`, clamped to the list.
+    pub fn set_panel_cursor(&mut self, panel: FocusPanel, index: usize) {
+        let max = self.panel_len(panel).saturating_sub(1);
+        let index = index.min(max);
+        match panel {
+            FocusPanel::Scenes => self.scene_cursor = index,
+            FocusPanel::Audio => self.audio_cursor = index,
+            FocusPanel::Profiles => self.profile_cursor = index,
+            FocusPanel::Collections => self.collection_cursor = index,
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        self.move_up_by(1);
+    }
+
+    pub fn move_down(&mut self) {
+        self.move_down_by(1);
+    }
+
+    pub fn move_up_by(&mut self, rows: usize) {
+        let cursor = self.panel_cursor(self.focus).saturating_sub(rows);
+        self.set_panel_cursor(self.focus, cursor);
+    }
+
+    pub fn move_down_by(&mut self, rows: usize) {
+        let cursor = self.panel_cursor(self.focus).saturating_add(rows);
+        self.set_panel_cursor(self.focus, cursor);
+    }
+
+    pub fn move_to_top(&mut self) {
+        self.set_panel_cursor(self.focus, 0);
+    }
+
+    pub fn move_to_bottom(&mut self) {
+        self.set_panel_cursor(self.focus, usize::MAX);
     }
 
     /// Keep cursors within valid list bounds; call after snapshot updates.
@@ -538,6 +657,133 @@ mod tests {
         assert_eq!(FocusPanel::Profiles.up(), FocusPanel::Scenes);
         assert_eq!(FocusPanel::Audio.down(), FocusPanel::Collections);
         assert_eq!(FocusPanel::Collections.up(), FocusPanel::Audio);
+    }
+
+    #[test]
+    fn focus_panel_cycling_wraps_in_both_directions() {
+        assert_eq!(FocusPanel::Scenes.next(), FocusPanel::Audio);
+        assert_eq!(FocusPanel::Collections.next(), FocusPanel::Scenes);
+        assert_eq!(FocusPanel::Scenes.prev(), FocusPanel::Collections);
+        assert_eq!(FocusPanel::Audio.prev(), FocusPanel::Scenes);
+        // Four Tabs from anywhere return to where they started.
+        let mut panel = FocusPanel::Profiles;
+        for _ in 0..FocusPanel::CYCLE.len() {
+            panel = panel.next();
+        }
+        assert_eq!(panel, FocusPanel::Profiles);
+    }
+
+    #[test]
+    fn count_prefix_accumulates_digits_and_saturates() {
+        let mut model = TuiModel::default();
+        assert_eq!(model.count(), 1, "no typed count means one repetition");
+
+        model.push_count(1);
+        model.push_count(2);
+        assert_eq!(model.count(), 12);
+
+        for _ in 0..6 {
+            model.push_count(9);
+        }
+        assert_eq!(model.count(), MAX_COUNT as usize);
+
+        model.clear_pending();
+        assert_eq!(model.pending_count, None);
+        assert_eq!(model.count(), 1);
+    }
+
+    #[test]
+    fn motions_scale_by_the_count_and_stop_at_the_list_ends() {
+        let mut model =
+            model_with_scenes((0..10).map(|i| make_scene(&i.to_string(), false)).collect());
+
+        model.move_down_by(4);
+        assert_eq!(model.scene_cursor, 4);
+        model.move_down_by(100);
+        assert_eq!(model.scene_cursor, 9, "clamped to the last row");
+        model.move_up_by(3);
+        assert_eq!(model.scene_cursor, 6);
+        model.move_to_top();
+        assert_eq!(model.scene_cursor, 0);
+        model.move_to_bottom();
+        assert_eq!(model.scene_cursor, 9);
+        model.move_up_by(100);
+        assert_eq!(model.scene_cursor, 0, "saturates rather than wrapping");
+    }
+
+    #[test]
+    fn moving_in_an_empty_panel_is_a_no_op() {
+        let mut model = TuiModel::default();
+        model.move_to_bottom();
+        model.move_down_by(5);
+        assert_eq!(model.scene_cursor, 0);
+    }
+
+    #[test]
+    fn log_scrollback_is_bounded_and_returns_to_following() {
+        let mut model = TuiModel::default();
+        for i in 0..20 {
+            model.push_log(TuiLogEntry {
+                level: LogLevel::Info,
+                message: format!("line {i}"),
+                target: None,
+                timestamp: OffsetDateTime::UNIX_EPOCH,
+            });
+        }
+
+        assert_eq!(model.log_view_start(6), 14, "follows the tail by default");
+
+        model.scroll_logs_up(6, 6);
+        assert_eq!(model.log_view_start(6), 8);
+
+        // Cannot scroll past the oldest entry we still hold.
+        model.scroll_logs_up(1000, 6);
+        assert_eq!(model.log_view_start(6), 0);
+
+        // A new entry while scrolled back holds the viewport steady.
+        let before = model.logs[model.log_view_start(6)].message.clone();
+        model.push_log(TuiLogEntry {
+            level: LogLevel::Info,
+            message: "line 20".to_string(),
+            target: None,
+            timestamp: OffsetDateTime::UNIX_EPOCH,
+        });
+        assert_eq!(model.logs[model.log_view_start(6)].message, before);
+
+        model.scroll_logs_down(1000);
+        assert_eq!(model.log_scroll, 0);
+        assert_eq!(model.log_view_start(6), 15);
+    }
+
+    #[test]
+    fn palette_line_editing_never_eats_the_prompt_prefix() {
+        let mut palette = CommandPaletteState {
+            input: ":scene Main Camera".to_string(),
+            ..Default::default()
+        };
+
+        palette.delete_word();
+        assert_eq!(palette.input, ":scene Main ");
+        palette.delete_word();
+        assert_eq!(palette.input, ":scene ");
+        palette.delete_word();
+        assert_eq!(palette.input, ":");
+        palette.delete_word();
+        assert_eq!(palette.input, ":", "the prefix survives an empty line");
+
+        palette.input = ":vol Mic 70".to_string();
+        palette.clear_to_prefix();
+        assert_eq!(palette.input, ":");
+    }
+
+    #[test]
+    fn palette_line_editing_handles_multibyte_input() {
+        let mut palette = CommandPaletteState {
+            input: ":scene Каме́ра".to_string(),
+            ..Default::default()
+        };
+        palette.delete_word();
+        assert_eq!(palette.input, ":scene ");
     }
 
     #[test]
