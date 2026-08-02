@@ -73,7 +73,7 @@ A real-time, themeable command center with animated gradient chrome, rounded/hea
 
 <div align="center">
 
-**[▶ Play the 52-second terminal recording](https://obs.worxbend.com/#demo)**
+**[▶ Play the 52-second terminal recording](https://worxbend.github.io/obsctl-rs/#demo)**
 
 </div>
 
@@ -81,7 +81,7 @@ An unedited `obsctl tui` session: scenes and the audio matrix, the `:` command p
 the `<Space>` which-key menu, and the theme picker. It's an
 [asciinema](https://asciinema.org) cast rather than a video, so it stays sharp at any
 size and you can pause and copy straight out of it. Plays in the browser on the
-[website](https://obs.worxbend.com/#demo), or locally from a clone:
+[website](https://worxbend.github.io/obsctl-rs/#demo), or locally from a clone:
 
 ```sh
 asciinema play docs/demo/obsctl-rs.cast
