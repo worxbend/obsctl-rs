@@ -13,7 +13,7 @@
 **Drive OBS Studio from a keyboard-first terminal dashboard — or script it from the CLI.**
 A single Rust binary: a daemon that owns the OBS connection, a live TUI, and a stable proxy CLI.
 
-[**Website**](https://worxbend.github.io/obsctl-rs/) · [**obs.worxbend.com**](https://obs.worxbend.com/) · [Install](#-install) · [Quick Start](#-quick-start) · [TUI](#-the-tui) · [Themes](#-themes) · [CLI](#-cli-commands) · [IPC Protocol](#-ipc-protocol)
+[**Website**](https://worxbend.github.io/obsctl-rs/) · [**obs.worxbend.com**](https://obs.worxbend.com/) · [Demo](#-watch-a-session) · [Install](#-install) · [Quick Start](#-quick-start) · [TUI](#-the-tui) · [Themes](#-themes) · [CLI](#-cli-commands) · [IPC Protocol](#-ipc-protocol)
 
 </div>
 
@@ -68,6 +68,24 @@ A real-time, themeable command center with animated gradient chrome, rounded/hea
 </td>
 </tr>
 </table>
+
+### 📽️ Watch a session
+
+<div align="center">
+
+**[▶ Play the 52-second terminal recording](https://obs.worxbend.com/#demo)**
+
+</div>
+
+An unedited `obsctl tui` session: scenes and the audio matrix, the `:` command palette,
+the `<Space>` which-key menu, and the theme picker. It's an
+[asciinema](https://asciinema.org) cast rather than a video, so it stays sharp at any
+size and you can pause and copy straight out of it. Plays in the browser on the
+[website](https://obs.worxbend.com/#demo), or locally from a clone:
+
+```sh
+asciinema play docs/demo/obsctl-rs.cast
+```
 
 Dashboard layout, top to bottom: header, status bar, a scenes/audio row (larger, since those lists tend to be longer), a profiles/collections row (smaller), logs, and the command palette. While streaming, the stats panel takes the right-hand 46 columns of the logs strip — on terminals too narrow to fit both, logs keep the full width.
 

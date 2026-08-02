@@ -3,6 +3,7 @@
 <title>obsctl — a local OBS Studio command center for your terminal</title>
 <meta name="description" content="Drive OBS Studio from a keyboard-first terminal dashboard, or script it from the CLI. One Rust binary: a daemon that owns the OBS WebSocket, a live TUI, and a stable proxy CLI.">
 <link rel="icon" href="images/logo.svg">
+<link rel="stylesheet" href="vendor/asciinema-player.css">
 <meta property="og:title" content="obsctl — a local OBS Studio command center for your terminal">
 <meta property="og:description" content="A keyboard-first TUI and a scriptable CLI for OBS Studio. One Rust binary, 29 themes, stable JSON output.">
 <meta property="og:image" content="images/banner.png">
@@ -527,6 +528,12 @@ figure { margin: 0; }
 }
 .shot .bar i { width: .5rem; height: .5rem; border-radius: 50%; display: block; }
 .shot img { display: block; width: 100%; height: auto; }
+/* The asciinema player reuses the .shot window chrome so the recording sits
+   in the same frame as the screenshots. The cast is 110x58, so its natural
+   aspect is close to square — cap the width to keep the section from running
+   past a screenful on a wide display. */
+.cast { max-width: 860px; margin: 0 auto; }
+
 figcaption { font-size: .88rem; color: var(--ink-dim); margin-top: .7rem; }
 figcaption b { color: var(--ink); font-family: var(--mono); font-size: .82rem; font-weight: 600; }
 
@@ -620,6 +627,7 @@ footer a:hover { color: var(--accent); }
       obsctl
     </a>
     <nav>
+      <a href="#demo">Demo</a>
       <a href="#dashboard">Dashboard</a>
       <a href="#cli" class="opt">CLI</a>
       <a href="#themes" class="opt">Themes</a>
@@ -745,6 +753,27 @@ footer a:hover { color: var(--accent); }
             <p>The test suite parses <code>src/</code> and fails the build if the CLI or TUI imports the OBS client, or if the wire protocol imports implementation types.</p>
           </div>
         </div>
+      </section>
+
+      <!-- ═══ demo recording ══════════════════════════════════════════ -->
+      <section id="demo">
+        <div class="section-lede">
+          <p class="eyebrow">52 seconds, unedited</p>
+          <h2>Watch it drive OBS</h2>
+          <p>A real terminal session, recorded with asciinema — not a video. Text, so it stays sharp at any size, and you can scrub, pause and copy straight out of it.</p>
+        </div>
+
+        <figure class="cast">
+          <div class="shot">
+            <div class="bar"><i style="background:#E06C5F"></i><i style="background:#E0B44C"></i><i style="background:#87B37B"></i><span style="margin-left:.4rem">asciinema rec — obsctl tui</span></div>
+            <div id="castPlayer"></div>
+          </div>
+          <figcaption><b>A live session</b> — scenes and the audio matrix, the <code>:</code> command palette, the <code>&lt;Space&gt;</code> which-key menu, and the theme picker.</figcaption>
+        </figure>
+
+        <p class="note" style="text-align:center">
+          Prefer your own terminal? The cast file lives in the repo — <code>asciinema play docs/demo/obsctl-rs.cast</code>.
+        </p>
       </section>
 
       <!-- ═══ the dashboard ═══════════════════════════════════════════ -->
@@ -1110,6 +1139,26 @@ footer a:hover { color: var(--accent); }
     e.currentTarget.setAttribute("aria-pressed", String(stressed));
     e.currentTarget.textContent = stressed ? "restore headroom" : "simulate encoder load";
     tick();
+  });
+})();
+</script>
+
+<!-- asciinema-player 3.17.0, vendored rather than pulled from a CDN so the
+     site stays self-contained and has no third-party runtime dependency. -->
+<script src="vendor/asciinema-player.min.js"></script>
+<script>
+(() => {
+  const mount = document.getElementById("castPlayer");
+  if (!mount || !window.AsciinemaPlayer) return;
+  AsciinemaPlayer.create("demo/obsctl-rs.cast", mount, {
+    // The recording is 110x58; fit to the column width and let the height
+    // follow, so no part of the dashboard is cropped.
+    fit: "width",
+    // Park on a frame where the dashboard is already up, so the section
+    // reads as the app rather than as an empty shell prompt.
+    poster: "npt:0:10",
+    idleTimeLimit: 2,
+    controls: true,
   });
 })();
 </script>
