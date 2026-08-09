@@ -43,6 +43,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     obs::state::AudioState,
@@ -55,8 +56,11 @@ use crate::{
 };
 
 /// Quietest level the meter shows; below this the input reads as silent.
-/// OBS's meter bottoms out at the same -60 dBFS.
-const FLOOR_DB: f32 = -60.0;
+/// OBS's meter bottoms out at the same -60 dBFS. Kept as both a positive
+/// depth (for counting whole-decibel scale ticks) and the signed value the
+/// meter maths uses, so the two can never drift apart.
+const FLOOR_DEPTH_DB: u32 = 60;
+const FLOOR_DB: f32 = -(FLOOR_DEPTH_DB as f32);
 /// Zone boundaries in dBFS, matching OBS's default "error" and "warning"
 /// meter levels.
 const RED_DB: f32 = -9.0;
@@ -287,11 +291,7 @@ fn render_strip(
     // Ratatui clips an over-long title from the left, which would leave a
     // name reading as "…r Capture"; trim it to what the border can hold
     // (two corners and a space either side) before handing it over.
-    let name: String = input
-        .name
-        .chars()
-        .take(usize::from(rect.width).saturating_sub(4))
-        .collect();
+    let name = truncate_to_cells(&input.name, usize::from(rect.width).saturating_sub(4));
 
     let mut block = Block::default()
         .borders(Borders::ALL)
@@ -355,17 +355,18 @@ fn strip_lines(
     }
 
     let reading = meter.unwrap_or_default();
-    let bar_db = linear_to_db(reading.peak_program);
-    let hold_db = linear_to_db(reading.peak_hold);
+    let column = MeterColumn {
+        bar_db: linear_to_db(reading.peak_program),
+        hold_db: linear_to_db(reading.peak_hold),
+        volume_percent: input.volume_percent,
+        muted,
+    };
     for (row, label) in scale_labels(meter_rows).iter().enumerate() {
         lines.push(meter_line(
             row,
             meter_rows,
             width,
-            bar_db,
-            hold_db,
-            input.volume_percent,
-            muted,
+            column,
             label.as_deref(),
             model,
         ));
@@ -421,121 +422,196 @@ fn footer_line(input: &AudioState, model: &TuiModel) -> Line<'static> {
     Line::from(Span::styled(text, Style::default().fg(color)))
 }
 
-/// One row of the fader / meter / scale block.
-///
-/// `row` counts down from the top, where 0 dBFS lives; `rows` is how many
-/// rows the whole -60..0 dBFS range is spread across.
-#[allow(clippy::too_many_arguments)]
-fn meter_line(
-    row: usize,
-    rows: usize,
-    width: usize,
+/// Everything the fader and meter of one strip need in order to color
+/// themselves, hoisted out of the per-row arguments.
+#[derive(Debug, Clone, Copy)]
+struct MeterColumn {
+    /// Peak program level in dBFS — how far up the bar reaches.
     bar_db: f32,
+    /// Peak hold marker in dBFS.
     hold_db: f32,
+    /// Fader position, when OBS has reported a volume for this input.
     volume_percent: Option<u8>,
     muted: bool,
-    label: Option<&str>,
-    model: &TuiModel,
-) -> Line<'static> {
-    let theme = model.theme;
-    let rich = model.advanced_ui;
-    // fader (1) + gap (1) + meter + gap (1) + scale (3)
+}
+
+/// How a strip's interior splits sideways.
+struct MeterColumns {
+    meter: usize,
+    /// Zero on strips too narrow to afford both a scale and a meter worth
+    /// looking at, in which case the meter takes those columns instead.
+    scale: usize,
+}
+
+/// fader (1) + gap (1) + meter + gap (1) + scale (3)
+fn meter_columns(width: usize) -> MeterColumns {
     let scale = if width >= SCALE_WIDTH + 5 {
         SCALE_WIDTH
     } else {
         0
     };
     let reserved = 2 + if scale > 0 { scale + 1 } else { 0 };
-    let meter_cells = width.saturating_sub(reserved);
+    MeterColumns {
+        meter: width.saturating_sub(reserved),
+        scale,
+    }
+}
+
+/// dB range one sub-row of the meter covers, top edge first.
+fn sub_bounds(sub: usize, subs: usize) -> (f32, f32) {
+    (
+        FLOOR_DB * (sub as f32 / subs.max(1) as f32),
+        FLOOR_DB * ((sub + 1) as f32 / subs.max(1) as f32),
+    )
+}
+
+/// What one sub-row of the meter is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeterMark {
+    /// The peak-hold marker, parked at the loudest recent level.
+    Peak,
+    /// Inside the bar.
+    Lit,
+    /// Above the bar — the meter's own dimmed background.
+    Unlit,
+}
+
+fn meter_mark(sub: usize, subs: usize, column: MeterColumn) -> MeterMark {
+    let (top, bottom) = sub_bounds(sub, subs);
+    if column.hold_db > FLOOR_DB && column.hold_db <= top && column.hold_db > bottom {
+        MeterMark::Peak
+    } else if column.bar_db > bottom {
+        MeterMark::Lit
+    } else {
+        MeterMark::Unlit
+    }
+}
+
+fn meter_color(mark: MeterMark, sub: usize, subs: usize, muted: bool, theme: Theme) -> Color {
+    let (top, bottom) = sub_bounds(sub, subs);
+    let zone = zone_color((top + bottom) / 2.0, theme);
+    match mark {
+        MeterMark::Unlit => unlit_color(zone, theme),
+        _ if muted => theme.muted,
+        MeterMark::Peak => theme.fg,
+        MeterMark::Lit => zone,
+    }
+}
+
+/// One cell of a vertical bar with the rich UI on: a half-block showing two
+/// independent sub-rows, `top` in the foreground and `bottom` behind it.
+/// This is what doubles the vertical resolution a short pane can express.
+fn stacked_cell(top: Color, bottom: Color) -> Span<'static> {
+    Span::styled("▀", Style::default().fg(top).bg(bottom))
+}
+
+/// One row of the fader / meter / scale block.
+///
+/// `row` counts down from the top, where 0 dBFS lives; `rows` is how many
+/// rows the whole -60..0 dBFS range is spread across.
+fn meter_line(
+    row: usize,
+    rows: usize,
+    width: usize,
+    column: MeterColumn,
+    label: Option<&str>,
+    model: &TuiModel,
+) -> Line<'static> {
+    let columns = meter_columns(width);
     // Each cell covers two sub-rows when half-blocks are available.
-    let subs = if rich { rows * 2 } else { rows };
-    let sub_of = |half: usize| if rich { row * 2 + half } else { row };
+    let subs = if model.advanced_ui { rows * 2 } else { rows };
+    let (top_sub, bottom_sub) = if model.advanced_ui {
+        (row * 2, row * 2 + 1)
+    } else {
+        (row, row)
+    };
 
-    let mut spans = Vec::with_capacity(4 + meter_cells);
+    let mut spans = Vec::with_capacity(4 + columns.meter);
+    spans.push(fader_span(top_sub, bottom_sub, subs, column, model));
+    spans.push(Span::raw(" "));
+    spans.extend(meter_spans(
+        columns.meter,
+        top_sub,
+        bottom_sub,
+        subs,
+        column,
+        model,
+    ));
+    if columns.scale > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(scale_span(label, columns.scale, model.theme));
+    }
+    Line::from(spans)
+}
 
-    // Fader: a vertical track with the knob at the current volume.
-    let knob = volume_percent.map(|percent| {
+/// The vertical volume slider down the left of the strip, with its knob
+/// parked at the input's current volume.
+fn fader_span(
+    top_sub: usize,
+    bottom_sub: usize,
+    subs: usize,
+    column: MeterColumn,
+    model: &TuiModel,
+) -> Span<'static> {
+    let theme = model.theme;
+    let knob = column.volume_percent.map(|percent| {
         let travel = subs.saturating_sub(1) as f32;
         ((1.0 - f32::from(percent) / 100.0) * travel).round() as usize
     });
-    let fader_color = |sub: usize| {
+    let color = |sub| {
         if knob == Some(sub) {
             theme.fg
         } else {
             unlit_color(theme.info, theme)
         }
     };
-    if rich {
-        spans.push(Span::styled(
-            "▀",
-            Style::default()
-                .fg(fader_color(sub_of(0)))
-                .bg(fader_color(sub_of(1))),
-        ));
+    if model.advanced_ui {
+        stacked_cell(color(top_sub), color(bottom_sub))
+    } else if knob == Some(top_sub) {
+        Span::styled("#", Style::default().fg(theme.fg))
     } else {
-        let is_knob = knob == Some(sub_of(0));
-        spans.push(Span::styled(
-            if is_knob { "#" } else { "|" },
-            Style::default().fg(if is_knob { theme.fg } else { theme.info }),
-        ));
+        Span::styled("|", Style::default().fg(theme.info))
     }
-    spans.push(Span::raw(" "));
+}
 
-    // Meter.
-    let sub_color = |sub: usize| -> Color {
-        // dB range this sub-row covers, top edge first.
-        let top = FLOOR_DB * (sub as f32 / subs as f32);
-        let bottom = FLOOR_DB * ((sub + 1) as f32 / subs as f32);
-        let zone = zone_color((top + bottom) / 2.0, theme);
-        if hold_db > FLOOR_DB && hold_db <= top && hold_db > bottom {
-            if muted { theme.muted } else { theme.fg }
-        } else if bar_db > bottom {
-            if muted { theme.muted } else { zone }
-        } else {
-            unlit_color(zone, theme)
-        }
+/// The meter itself. Every cell of a row shows the same thing, so the row is
+/// one span repeated across the meter's width.
+fn meter_spans(
+    cells: usize,
+    top_sub: usize,
+    bottom_sub: usize,
+    subs: usize,
+    column: MeterColumn,
+    model: &TuiModel,
+) -> Vec<Span<'static>> {
+    let theme = model.theme;
+    let color = |sub| {
+        meter_color(
+            meter_mark(sub, subs, column),
+            sub,
+            subs,
+            column.muted,
+            theme,
+        )
     };
-    for _ in 0..meter_cells {
-        if rich {
-            spans.push(Span::styled(
-                "▀",
-                Style::default()
-                    .fg(sub_color(sub_of(0)))
-                    .bg(sub_color(sub_of(1))),
-            ));
-        } else {
-            let sub = sub_of(0);
-            let bottom = FLOOR_DB * ((sub + 1) as f32 / subs as f32);
-            let top = FLOOR_DB * (sub as f32 / subs as f32);
-            let (glyph, color) = if hold_db > FLOOR_DB && hold_db <= top && hold_db > bottom {
-                ("=", theme.fg)
-            } else if bar_db > bottom {
-                (
-                    "#",
-                    if muted {
-                        theme.muted
-                    } else {
-                        zone_color((top + bottom) / 2.0, theme)
-                    },
-                )
-            } else {
-                (".", theme.border)
-            };
-            spans.push(Span::styled(glyph, Style::default().fg(color)));
-        }
-    }
+    let cell = if model.advanced_ui {
+        stacked_cell(color(top_sub), color(bottom_sub))
+    } else {
+        let mark = meter_mark(top_sub, subs, column);
+        let glyph = match mark {
+            MeterMark::Peak => "=",
+            MeterMark::Lit => "#",
+            MeterMark::Unlit => ".",
+        };
+        Span::styled(glyph, Style::default().fg(color(top_sub)))
+    };
+    vec![cell; cells]
+}
 
-    // dB scale.
-    if scale > 0 {
-        spans.push(Span::raw(" "));
-        let text = label.unwrap_or("");
-        spans.push(Span::styled(
-            format!("{text:>scale$}"),
-            Style::default().fg(theme.muted),
-        ));
-    }
-
-    Line::from(spans)
+/// This row's dB tick, right-aligned so the scale reads as a ruled column.
+fn scale_span(label: Option<&str>, width: usize, theme: Theme) -> Span<'static> {
+    let text = label.unwrap_or("");
+    Span::styled(format!("{text:>width$}"), Style::default().fg(theme.muted))
 }
 
 /// dB tick label for each meter row, or `None` for rows that get none.
@@ -548,34 +624,59 @@ fn scale_labels(rows: usize) -> Vec<Option<String>> {
     if rows == 0 {
         return labels;
     }
-    let step = match rows {
-        0..=1 => 60.0_f32,
-        2..=3 => 30.0,
-        4..=6 => 20.0,
-        7..=10 => 12.0,
-        _ => 6.0,
+    // Whole decibels, counted rather than accumulated: stepping a float down
+    // to the floor would decide how many ticks there are by rounding error.
+    let step: u32 = match rows {
+        0..=1 => FLOOR_DEPTH_DB,
+        2..=3 => 30,
+        4..=6 => 20,
+        7..=10 => 12,
+        _ => 6,
     };
-    let mut db = 0.0_f32;
-    while db >= FLOOR_DB {
-        let row = ((-db / -FLOOR_DB) * rows as f32).floor() as usize;
+    for tick in 0..=(FLOOR_DEPTH_DB / step) {
+        let depth = tick * step;
+        let row = ((depth as f32 / FLOOR_DEPTH_DB as f32) * rows as f32).floor() as usize;
         let row = row.min(rows - 1);
         if labels[row].is_none() {
-            labels[row] = Some(format!("{db:.0}"));
+            labels[row] = Some(if depth == 0 {
+                "0".to_string()
+            } else {
+                format!("-{depth}")
+            });
         }
-        db -= step;
     }
     labels
 }
 
+/// Longest prefix of `text` that fits in `cells` terminal cells.
+///
+/// Counting characters is not the same as counting cells: an emoji or a CJK
+/// ideograph occupies two. Truncating by character would let a name overflow
+/// its strip, and ratatui would then clip the row's last cell.
+fn truncate_to_cells(text: &str, cells: usize) -> String {
+    let mut used = 0;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let width = ch.width().unwrap_or(0);
+        if used + width > cells {
+            break;
+        }
+        used += width;
+        out.push(ch);
+    }
+    out
+}
+
 /// Center `text` in exactly `width` cells, truncating when it does not fit.
 fn pad_center(text: &str, width: usize) -> String {
-    let mut trimmed: String = text.chars().take(width).collect();
-    let len = trimmed.chars().count();
+    let trimmed = truncate_to_cells(text, width);
+    let len = trimmed.width();
     let left = width.saturating_sub(len) / 2;
     let right = width.saturating_sub(left + len);
-    trimmed.insert_str(0, &" ".repeat(left));
-    trimmed.push_str(&" ".repeat(right));
-    trimmed
+    let mut padded = " ".repeat(left);
+    padded.push_str(&trimmed);
+    padded.push_str(&" ".repeat(right));
+    padded
 }
 
 #[cfg(test)]

@@ -772,14 +772,15 @@ fn audio_stacks_each_input_into_its_own_bordered_vertical_strip() {
         "strips should be separated by a blank column; got: {top}"
     );
 
-    // The dB scale is ruled down the side of every meter.
+    // Every meter is ruled with its own dB scale. The floor tick is the one
+    // to count: it is drawn whatever step the scale settles on, and unlike a
+    // bare "0" it cannot be matched by the panel's count badge or by "80%".
     let joined = lines.join("\n");
-    for tick in ["-60", "0"] {
-        assert!(
-            joined.contains(tick),
-            "meter should be labelled with {tick}; got: {joined}"
-        );
-    }
+    assert_eq!(
+        joined.matches("-60").count(),
+        2,
+        "each strip should rule its own dB scale down to the floor; got: {joined}"
+    );
 }
 
 #[test]
