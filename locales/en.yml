@@ -59,6 +59,13 @@ cli:
     error_with_code: "error [%{code}]: %{message}"
 
 tui:
+  status:
+    title: "STATUS"
+    idle_hint: "standing by"
+
+  splash:
+    preparing: "Preparing..."
+
   header:
     daemon_connected: "daemon: connected"
     daemon_disconnected: "daemon: disconnected"

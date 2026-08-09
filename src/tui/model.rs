@@ -149,8 +149,10 @@ pub struct TuiModel {
     /// Whether rich borders, Unicode charts, gradients, and terminal art are
     /// enabled. False selects the simplified ASCII-safe rendering path.
     pub advanced_ui: bool,
-    /// Short rolling histories used by the animated status sparklines.
+    /// Short rolling histories used by the animated status sparklines and by
+    /// the braille meters, which need a peak to scale and mark against.
     pub cpu_history: Vec<f64>,
+    pub memory_history: Vec<f64>,
     pub bitrate_history: Vec<f64>,
     pub fps_history: Vec<f64>,
     pub frame_time_history: Vec<f64>,
@@ -205,6 +207,7 @@ impl Default for TuiModel {
             show_icons: true,
             advanced_ui: true,
             cpu_history: Vec::new(),
+            memory_history: Vec::new(),
             bitrate_history: Vec::new(),
             fps_history: Vec::new(),
             frame_time_history: Vec::new(),
@@ -355,6 +358,7 @@ impl TuiModel {
         let stats = self.stats().copied();
         if let Some(stats) = stats {
             self.cpu_history.push(stats.cpu_usage_percent);
+            self.memory_history.push(stats.memory_usage_mb);
             self.fps_history.push(stats.active_fps);
             self.frame_time_history
                 .push(stats.average_frame_render_time_ms);
@@ -364,6 +368,7 @@ impl TuiModel {
         }
         for history in [
             &mut self.cpu_history,
+            &mut self.memory_history,
             &mut self.bitrate_history,
             &mut self.fps_history,
             &mut self.frame_time_history,

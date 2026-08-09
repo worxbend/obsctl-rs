@@ -1,7 +1,19 @@
 //! Color themes for the TUI, selectable via `ui.theme` in config or the
 //! in-app settings view (styled after btop's theme switcher).
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
+
+use crate::tui::anim;
+
+/// How much of the highlight color is mixed into the panel background for the
+/// selected row. Low enough that the row still reads as part of the list, high
+/// enough to locate the cursor at a glance on every built-in palette.
+const SELECTION_TINT_FOCUSED: f32 = 0.32;
+
+/// The same tint for a list whose panel does not hold focus — present so the
+/// cursor position is not lost when you tab away, but faint enough that only
+/// the focused panel draws the eye.
+const SELECTION_TINT_UNFOCUSED: f32 = 0.12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
@@ -684,6 +696,47 @@ impl Theme {
     pub fn index(self) -> usize {
         ALL.iter().position(|t| t.id == self.id).unwrap_or(0)
     }
+
+    /// Row style for the selected entry of a dashboard list.
+    ///
+    /// Terminals have no alpha channel, so "semi-transparent" is approximated
+    /// by mixing the theme's highlight color into its own background: the
+    /// selected row reads as a tint of the panel rather than a solid bar
+    /// stamped over it. Because the style sets only a background, the row's
+    /// spans keep their own colors (scene markers, aliases, shortcuts) instead
+    /// of being flattened to one foreground — which is what makes it look
+    /// translucent rather than painted over.
+    ///
+    /// Every theme derives its own tint from its own palette, so this stays
+    /// correct for the built-ins and for user-defined custom themes alike.
+    pub fn selection_style(self, focused: bool) -> Style {
+        let modifier = if focused {
+            Modifier::BOLD
+        } else {
+            Modifier::DIM
+        };
+        let tint = if focused {
+            SELECTION_TINT_FOCUSED
+        } else {
+            SELECTION_TINT_UNFOCUSED
+        };
+
+        match (self.bg, self.highlight_bg) {
+            (Color::Rgb(..), Color::Rgb(..)) => Style::default()
+                .bg(anim::blend(self.bg, self.highlight_bg, tint))
+                .add_modifier(modifier),
+            // Named terminal colors have no channels to mix, and `mono` uses
+            // `Color::Reset` for its background precisely so it inherits the
+            // user's terminal. There is nothing to blend against, so fall back
+            // to dimming: still softer than the old solid bar, and it survives
+            // on a 16-color TTY.
+            _ if focused => Style::default()
+                .bg(self.highlight_bg)
+                .fg(self.highlight_fg)
+                .add_modifier(Modifier::DIM),
+            _ => Style::default().add_modifier(Modifier::DIM),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -799,5 +852,143 @@ mod tests {
     fn from_custom_spec_falls_back_to_default_background() {
         let theme = Theme::from_custom_spec(CustomThemeSpec::default());
         assert_eq!(theme.bg, Theme::default_theme().bg);
+    }
+
+    fn channels(color: Color) -> (i32, i32, i32) {
+        match color {
+            Color::Rgb(r, g, b) => (r as i32, g as i32, b as i32),
+            other => panic!("expected an RGB color, got {other:?}"),
+        }
+    }
+
+    /// Largest per-channel distance between two colors.
+    fn distance(a: Color, b: Color) -> i32 {
+        let (ar, ag, ab) = channels(a);
+        let (br, bg, bb) = channels(b);
+        (ar - br).abs().max((ag - bg).abs()).max((ab - bb).abs())
+    }
+
+    #[test]
+    fn selection_sets_only_a_background_so_row_colors_survive() {
+        // This is what makes the selection read as translucent: leaving `fg`
+        // unset means ratatui does not flatten the row's spans (scene marker,
+        // alias, shortcut) to a single foreground.
+        let style = Theme::default_theme().selection_style(true);
+        assert!(style.bg.is_some(), "selection needs a background tint");
+        assert_eq!(
+            style.fg, None,
+            "setting a foreground would repaint every span in the row"
+        );
+    }
+
+    #[test]
+    fn every_rgb_theme_tints_its_selection_between_background_and_highlight() {
+        for theme in ALL.iter().filter(|t| !matches!(t.bg, Color::Reset)) {
+            let selection = theme
+                .selection_style(true)
+                .bg
+                .unwrap_or_else(|| panic!("{} has no selection tint", theme.id));
+
+            // A real blend: neither the flat background nor the solid
+            // highlight bar it replaces.
+            assert_ne!(
+                selection, theme.bg,
+                "{} selection is invisible against its background",
+                theme.id
+            );
+            assert_ne!(
+                selection, theme.highlight_bg,
+                "{} selection is still the solid highlight",
+                theme.id
+            );
+
+            // Each channel lands between the two endpoints.
+            let (sr, sg, sb) = channels(selection);
+            let (br, bg, bb) = channels(theme.bg);
+            let (hr, hg, hb) = channels(theme.highlight_bg);
+            for (s, b, h) in [(sr, br, hr), (sg, bg, hg), (sb, bb, hb)] {
+                assert!(
+                    s >= b.min(h) && s <= b.max(h),
+                    "{} selection channel {s} is outside [{b}, {h}]",
+                    theme.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_rgb_theme_keeps_its_selection_visible_but_not_shouting() {
+        // Guards both failure modes at once: a tint too faint to locate the
+        // cursor, and one so strong it is the old solid bar by another name.
+        for theme in ALL.iter().filter(|t| !matches!(t.bg, Color::Reset)) {
+            let selection = theme.selection_style(true).bg.unwrap();
+            let from_bg = distance(selection, theme.bg);
+            let from_highlight = distance(selection, theme.highlight_bg);
+            assert!(
+                from_bg >= 12,
+                "{} selection is only {from_bg} from its background — too faint to see",
+                theme.id
+            );
+            assert!(
+                from_highlight > from_bg,
+                "{} selection sits closer to the solid highlight than to the panel",
+                theme.id
+            );
+        }
+    }
+
+    #[test]
+    fn unfocused_selection_is_fainter_than_focused() {
+        for theme in ALL.iter().filter(|t| !matches!(t.bg, Color::Reset)) {
+            let focused = theme.selection_style(true).bg.unwrap();
+            let unfocused = theme.selection_style(false).bg.unwrap();
+            assert!(
+                distance(unfocused, theme.bg) < distance(focused, theme.bg),
+                "{} does not fade its selection when the panel loses focus",
+                theme.id
+            );
+        }
+    }
+
+    #[test]
+    fn focused_and_unfocused_selections_are_dimmed_or_bold_respectively() {
+        let theme = Theme::default_theme();
+        assert!(
+            theme
+                .selection_style(true)
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert!(
+            theme
+                .selection_style(false)
+                .add_modifier
+                .contains(Modifier::DIM)
+        );
+    }
+
+    #[test]
+    fn mono_theme_dims_instead_of_blending() {
+        // `Color::Reset` has no channels to mix, so the TTY-safe theme falls
+        // back to dimming rather than producing an invisible selection.
+        let focused = MONO.selection_style(true);
+        assert_eq!(focused.bg, Some(MONO.highlight_bg));
+        assert!(focused.add_modifier.contains(Modifier::DIM));
+
+        let unfocused = MONO.selection_style(false);
+        assert_eq!(unfocused.bg, None);
+        assert!(unfocused.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn custom_themes_derive_a_tint_from_their_own_palette() {
+        let theme = Theme::from_custom_spec(CustomThemeSpec {
+            bg: Some("#000000".to_string()),
+            highlight_bg: Some("#ffffff".to_string()),
+            ..Default::default()
+        });
+        let selection = theme.selection_style(true).bg.unwrap();
+        // 32% of the way from black to white.
+        assert_eq!(selection, Color::Rgb(82, 82, 82));
     }
 }

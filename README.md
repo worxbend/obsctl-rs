@@ -48,13 +48,14 @@ A real-time, themeable command center with animated gradient chrome, rounded/hea
 - 📚 **Collections panel** (`c`) — `Enter` to switch OBS scene collections
 - ⌨️ **Vim / AstroNvim keymap** — `j`/`k`, `gg`/`G`, `Ctrl-D`/`Ctrl-U`, count prefixes (`12j`), `Ctrl-hjkl` window moves, `Tab` to cycle panes, and a `<Space>` leader with a which-key popup
 - 🖱️ **Mouse navigation** — click a row to focus and select it, click again to activate, wheel to scroll a panel or the log history, right-click to cancel
-- 📡 **Telemetry deck** — animated LIVE/REC badges, elapsed durations, CPU and bitrate sparklines, FPS, memory, and stream bitrate
+- 🚦 **Broadcast status pane** — pinned to the top-right corner, spelling the current state in oversized block letters: `IDLE` when nothing is running, `LIVE` and `REC` (side by side when both) with elapsed durations as they start. Each state animates its own distinct spinner, so the state is readable from the animation alone
+- 📡 **Telemetry deck** — active scene, FPS, stream bitrate with a sparkline, and braille meters for CPU and memory that mark the session peak alongside the live value
 - 🪵 **Logs panel** — severity glyphs, colored targets/timestamps, and semantic highlighting for actions, status/error keywords, commands, numbers, and live OBS scene/profile/collection/input names
 - ⚡ **Stats panel** — appears beside the logs the moment you go live: active FPS against the rate you've been holding, average frame render time as a share of the frame budget, and render/output frames skipped. Every row is colored by health and topped with a plain-language verdict (`HEALTHY` / `STRAINED` / `DROPPING`). Drop counts are measured from the start of the current stream, not OBS's since-launch totals
 - 🎛️ **Command palette** (`:`) — `:scene`, `:profile`, `:collection`, `:mute`, `:vol`, `:stream`, `:rec`; `Tab` completes, `Ctrl-W`/`Ctrl-U` edit the line, and results stream in with a typewriter animation
 - 🧭 **Header** — animated gradient identity, daemon/OBS connection chips, active scene/profile, and a render frame indicator
 - 🌈 **Settings view** (`F2`, `Ctrl-T`, `<Space>ut`, or `:themes`) — btop-style theme picker with live full-UI preview; `Enter` persists, `Esc` reverts
-- 🎇 A responsive animated splash (~2s, skippable by any keypress) with a large block logo, slither and liquid-wave loaders, a multi-color progress rail, and staged boot messages
+- 🎇 A responsive animated splash (~2s, skippable by any keypress) with a large block logo, slither and liquid-wave loaders, a shimmering `Preparing...` braille band, a multi-color progress rail, and staged boot messages
 
 <table>
 <tr>
@@ -87,7 +88,7 @@ website](https://worxbend.github.io/obsctl-rs/#demo)**, or locally from a clone:
 asciinema play docs/demo/obsctl-rs.cast
 ```
 
-Dashboard layout, top to bottom: header, status bar, a scenes/audio row (larger, since those lists tend to be longer), a profiles/collections row (smaller), logs, and the command palette. While streaming, the stats panel takes the right-hand 46 columns of the logs strip — on terminals too narrow to fit both, logs keep the full width.
+Dashboard layout, top to bottom: header, status bar, a scenes/audio row (larger, since those lists tend to be longer), a profiles/collections row (smaller), logs, and the command palette. The broadcast status pane takes the top-right 32 columns across both chrome rows; below 76 columns of terminal width it steps aside and the status bar shows inline `IDLE`/`LIVE`/`REC` badges instead. While streaming, the stats panel takes the right-hand 46 columns of the logs strip — on terminals too narrow to fit both, logs keep the full width.
 
 See [Themes](#-themes) for the full list of built-in themes and how to define a custom palette.
 
@@ -207,7 +208,7 @@ keymap:
 
 ### TTY compatibility
 
-`ui.advanced_ui` defaults to `true` and enables the animated logo, Unicode borders, icons, segmented meters, sparklines, and gradient titles. Set it to `false` for an ASCII-safe interface: the dashboard, settings, connection view, and splash then use `+|-` borders, ASCII meters and graphs, plain titles, and ASCII status markers. This switch forces ASCII fallbacks even when `show_icons` remains enabled.
+`ui.advanced_ui` defaults to `true` and enables the animated logo, Unicode borders, icons, segmented meters, braille CPU/memory bars, sparklines, and gradient titles. Set it to `false` for an ASCII-safe interface: the dashboard, settings, connection view, and splash then use `+|-` borders, ASCII meters and graphs, ASCII state spinners, plain titles, and ASCII status markers. This switch forces ASCII fallbacks even when `show_icons` remains enabled.
 
 `ui.show_icons: false` is a narrower option that hides emoji and decorative symbols while preserving the rest of the advanced interface. For terminals without reliable truecolor support, combine `advanced_ui: false` with `theme: "mono"`.
 
@@ -240,9 +241,17 @@ ui:
     warning: "#E5C07B"       # OBS disconnected, shortcuts
     danger: "#E06C75"        # errors, LIVE/REC badges
     info: "#56B6C2"          # volume levels, stats readout
-    highlight_bg: "#61AFEF"  # selected list row background
-    highlight_fg: "#282C34"  # selected list row text
+    highlight_bg: "#61AFEF"  # selected list row tint (mixed into bg, see below)
+    highlight_fg: "#282C34"  # selected row text in the settings/which-key popups
 ```
+
+The scenes, audio, profiles, and collections lists don't paint `highlight_bg` solid.
+Terminals have no alpha channel, so the selected row is drawn by mixing `highlight_bg`
+into `bg` — 32% when the panel has focus, 12% when it doesn't — which leaves the row's
+own colors (scene marker, alias, shortcut) showing through instead of flattening them
+to `highlight_fg`. Every theme, built-in or custom, derives its tint from its own
+palette. The `mono` theme is the exception: its `bg` is `Color::Reset` so it inherits
+your terminal background, and with nothing to blend against it dims the row instead.
 
 ---
 

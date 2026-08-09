@@ -1,22 +1,43 @@
+//! The telemetry strip under the header: what scene is live, how the encoder
+//! is doing, and — on terminals too narrow for the top-right status pane —
+//! inline IDLE/LIVE/REC badges.
+//!
+//! CPU and memory are drawn as `ratatui-braille-bar` meters rather than
+//! sparklines: a sparkline answers "how has this moved", a meter answers "how
+//! close to the limit is this right now", which is the question that matters
+//! mid-broadcast. Each meter carries a peak marker so a spike that has already
+//! passed stays visible.
+
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
 };
+use ratatui_braille_bar::BrailleBar;
 
 use crate::tui::widgets::chrome;
-use crate::tui::{anim, model::TuiModel, theme::Theme};
+use crate::tui::{anim, model::TuiModel, spinner, theme::Theme};
 
 const PULSE_PERIOD_TICKS: u64 = 24;
 
-pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
+/// Cells per braille meter. Ten cells is enough to read a rough percentage
+/// while leaving the labels and values room on a narrow strip.
+const METER_WIDTH: usize = 10;
+
+/// Memory has no natural ceiling the way CPU has 100%, so the meter scales to
+/// the next multiple of this (in MB) above the session peak. Rounding to a
+/// step keeps the scale from shifting under the bar on every sample.
+const MEMORY_SCALE_STEP_MB: f64 = 256.0;
+
+/// `include_badges` asks for the inline IDLE/LIVE/REC badges. The caller
+/// passes `false` when [`crate::tui::widgets::status`] is on screen, so the
+/// broadcast state is stated once rather than twice.
+pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, include_badges: bool) {
     let theme = model.theme;
-    let streaming = model.snapshot.as_ref().is_some_and(|s| s.streaming);
-    let recording = model.snapshot.as_ref().is_some_and(|s| s.recording);
     let pulse = model.anim.pulse(PULSE_PERIOD_TICKS);
-    let active = streaming || recording;
+    let active = model.streaming() || model.recording();
     let border = if !model.advanced_ui {
         theme.border
     } else if active {
@@ -52,38 +73,221 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     };
     let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let live = badge("LIVE", streaming, model.stream_duration_ms(), pulse, model);
-    let rec = badge("REC", recording, model.record_duration_ms(), pulse, model);
-    if inner.height < 2 {
-        let compact = Line::from(vec![
-            live,
-            Span::raw("  "),
-            rec,
-            separator(model, theme),
-            compact_metrics(model, theme),
-        ]);
-        f.render_widget(Paragraph::new(compact), inner);
+    if inner.width == 0 || inner.height == 0 {
         return;
     }
 
-    let first = Line::from(vec![
-        live,
-        Span::raw("  "),
-        rec,
+    let mut first = Vec::new();
+    if include_badges {
+        first.extend(badges(model, pulse));
+        first.push(separator(model, theme));
+    }
+    first.push(Span::styled(
+        format!(
+            "{} {}",
+            model.symbol("🎬", "SCN"),
+            model.current_scene().unwrap_or("no active scene")
+        ),
+        Style::default().fg(theme.fg),
+    ));
+
+    if inner.height < 2 {
+        first.push(separator(model, theme));
+        first.push(compact_metrics(model, theme));
+        f.render_widget(Paragraph::new(Line::from(first)), inner);
+        return;
+    }
+
+    first.extend(throughput_spans(model, theme));
+    f.render_widget(
+        Paragraph::new(vec![Line::from(first), meters_line(model, theme)]),
+        inner,
+    );
+}
+
+/// Inline state badges for the narrow layout — one per active state, or a
+/// single IDLE badge when neither the stream nor the recording is running.
+fn badges(model: &TuiModel, pulse: f32) -> Vec<Span<'static>> {
+    let theme = model.theme;
+    let states = spinner::active_states(model.streaming(), model.recording());
+    let mut spans = Vec::with_capacity(states.len() * 2);
+    for (index, state) in states.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let frame = spinner::frame(*state, model.rich_ui(), model.anim.frame);
+        let detail = match state {
+            spinner::BroadcastState::Idle => String::new(),
+            spinner::BroadcastState::Live => chrome::format_duration(model.stream_duration_ms()),
+            spinner::BroadcastState::Rec => chrome::format_duration(model.record_duration_ms()),
+        };
+        let text = if detail.is_empty() {
+            format!(" {frame} {} ", state.label())
+        } else {
+            format!(" {frame} {} {detail} ", state.label())
+        };
+        let style = match state {
+            spinner::BroadcastState::Idle => Style::default().fg(theme.muted),
+            spinner::BroadcastState::Live => Style::default()
+                .fg(anim::blend(theme.danger, theme.warning, pulse * 0.45))
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            spinner::BroadcastState::Rec => Style::default()
+                .fg(anim::blend(theme.warning, theme.danger, pulse * 0.45))
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        };
+        spans.push(Span::styled(text, style));
+    }
+    spans
+}
+
+/// FPS and network throughput — the numbers that share the scene row.
+fn throughput_spans(model: &TuiModel, theme: Theme) -> Vec<Span<'static>> {
+    let Some(stats) = model.stats() else {
+        return vec![
+            separator(model, theme),
+            Span::styled(
+                if model.advanced_ui {
+                    "waiting for OBS metrics…"
+                } else {
+                    "waiting for OBS metrics..."
+                },
+                Style::default().fg(theme.muted),
+            ),
+        ];
+    };
+    let graph = if model.advanced_ui {
+        anim::sparkline
+    } else {
+        anim::sparkline_ascii
+    };
+    let bitrate = model
+        .stream_bitrate_kbps()
+        .map(|value| format!("{value:.0}kbps"))
+        .unwrap_or_else(|| "--kbps".to_string());
+    vec![
         separator(model, theme),
         Span::styled(
+            format!("FPS {:.1}", stats.active_fps),
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        ),
+        separator(model, theme),
+        Span::styled(
+            format!("NET {bitrate} {}", graph(&model.bitrate_history, 8)),
+            Style::default()
+                .fg(theme.accent_alt)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]
+}
+
+/// The CPU and memory meter row.
+fn meters_line(model: &TuiModel, theme: Theme) -> Line<'static> {
+    let Some(stats) = model.stats() else {
+        return Line::from(vec![Span::styled(
             format!(
                 "{} {}",
-                model.symbol("🎬", "SCN"),
-                model.current_scene().unwrap_or("no active scene")
+                model.symbol("⌁", "~"),
+                if model.advanced_ui {
+                    "telemetry idle — no CPU or memory samples yet"
+                } else {
+                    "telemetry idle - no CPU or memory samples yet"
+                }
             ),
-            Style::default().fg(theme.fg),
-        ),
-    ]);
+            Style::default().fg(theme.muted),
+        )]);
+    };
 
-    let second = metrics_line(model, theme);
-    f.render_widget(Paragraph::new(vec![first, second]), inner);
+    let cpu_peak = peak(&model.cpu_history, stats.cpu_usage_percent);
+    let memory_peak = peak(&model.memory_history, stats.memory_usage_mb);
+
+    let mut spans = meter(
+        model,
+        "CPU",
+        format!("{:>5.1}%", stats.cpu_usage_percent),
+        stats.cpu_usage_percent,
+        cpu_peak,
+        100.0,
+        theme.warning,
+    );
+    spans.push(separator(model, theme));
+    spans.extend(meter(
+        model,
+        "MEM",
+        format!("{:>5.0}MB", stats.memory_usage_mb),
+        stats.memory_usage_mb,
+        memory_peak,
+        memory_scale(memory_peak),
+        theme.info,
+    ));
+    Line::from(spans)
+}
+
+/// One `LABEL value ▁bar▁` group.
+fn meter(
+    model: &TuiModel,
+    label: &str,
+    value: String,
+    current: f64,
+    peak: f64,
+    scale_max: f64,
+    color: Color,
+) -> Vec<Span<'static>> {
+    let theme = model.theme;
+    let mut spans = vec![
+        Span::styled(
+            format!("{label} "),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{value} "),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if model.advanced_ui {
+        spans.extend(
+            BrailleBar::new(current, scale_max)
+                .peak(peak)
+                .fill_color(color)
+                .peak_color(theme.danger)
+                .empty_color(theme.border)
+                .into_line(METER_WIDTH)
+                .spans,
+        );
+    } else {
+        spans.push(Span::styled(
+            ascii_meter(current, scale_max),
+            Style::default().fg(color),
+        ));
+    }
+    spans
+}
+
+/// ASCII stand-in for the braille meter, for terminals without Unicode.
+fn ascii_meter(current: f64, scale_max: f64) -> String {
+    let ratio = if scale_max > 0.0 {
+        (current / scale_max).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let filled = (ratio * METER_WIDTH as f64).round() as usize;
+    std::iter::repeat_n('#', filled)
+        .chain(std::iter::repeat_n('-', METER_WIDTH - filled))
+        .collect()
+}
+
+/// Highest value seen this session, never below the live one so the marker
+/// can't sit behind the fill.
+fn peak(history: &[f64], current: f64) -> f64 {
+    history.iter().copied().fold(current, f64::max)
+}
+
+/// Round the peak up to a fixed step so the memory scale stays put between
+/// samples instead of rescaling the bar under the reader.
+fn memory_scale(peak_mb: f64) -> f64 {
+    let steps = (peak_mb / MEMORY_SCALE_STEP_MB).ceil().max(1.0);
+    steps * MEMORY_SCALE_STEP_MB
 }
 
 fn compact_metrics(model: &TuiModel, theme: Theme) -> Span<'static> {
@@ -112,88 +316,6 @@ fn compact_metrics(model: &TuiModel, theme: Theme) -> Span<'static> {
     }
 }
 
-fn badge(
-    label: &str,
-    active: bool,
-    duration_ms: Option<u64>,
-    pulse: f32,
-    model: &TuiModel,
-) -> Span<'static> {
-    let theme = model.theme;
-    if !active {
-        return Span::styled(
-            format!(" {} {label} off ", model.symbol("○", "-")),
-            Style::default().fg(theme.muted),
-        );
-    }
-    let color = anim::blend(theme.danger, theme.warning, pulse * 0.45);
-    let dot = if pulse > 0.5 {
-        model.symbol("●", "*")
-    } else {
-        model.symbol("◉", "*")
-    };
-    Span::styled(
-        format!(" {dot} {label} {} ", format_duration(duration_ms)),
-        Style::default()
-            .fg(color)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-    )
-}
-
-fn metrics_line(model: &TuiModel, theme: Theme) -> Line<'static> {
-    let Some(stats) = model.stats() else {
-        return Line::from(vec![
-            Span::styled(
-                format!("{} telemetry", model.symbol("⌁", "~")),
-                Style::default().fg(theme.info),
-            ),
-            Span::styled(
-                if model.advanced_ui {
-                    "  waiting for OBS metrics…"
-                } else {
-                    "  waiting for OBS metrics..."
-                },
-                Style::default().fg(theme.muted),
-            ),
-        ]);
-    };
-    let graph = if model.advanced_ui {
-        anim::sparkline
-    } else {
-        anim::sparkline_ascii
-    };
-    let cpu_graph = graph(&model.cpu_history, 10);
-    let bitrate_graph = graph(&model.bitrate_history, 10);
-    let bitrate = model
-        .stream_bitrate_kbps()
-        .map(|value| format!("{value:.0}kbps"))
-        .unwrap_or_else(|| "--kbps".to_string());
-    Line::from(vec![
-        metric(
-            "CPU",
-            &format!("{:.1}%", stats.cpu_usage_percent),
-            &cpu_graph,
-            theme.warning,
-        ),
-        separator(model, theme),
-        metric(
-            "FPS",
-            &format!("{:.1}", stats.active_fps),
-            "",
-            theme.success,
-        ),
-        separator(model, theme),
-        metric(
-            "MEM",
-            &format!("{:.0}MB", stats.memory_usage_mb),
-            "",
-            theme.info,
-        ),
-        separator(model, theme),
-        metric("NET", &bitrate, &bitrate_graph, theme.accent_alt),
-    ])
-}
-
 fn separator(model: &TuiModel, theme: Theme) -> Span<'static> {
     Span::styled(
         if model.advanced_ui {
@@ -205,49 +327,43 @@ fn separator(model: &TuiModel, theme: Theme) -> Span<'static> {
     )
 }
 
-fn metric(label: &str, value: &str, graph: &str, color: ratatui::style::Color) -> Span<'static> {
-    let suffix = if graph.is_empty() {
-        String::new()
-    } else {
-        format!(" {graph}")
-    };
-    Span::styled(
-        format!("{label} {value}{suffix}"),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    )
-}
-
-fn format_duration(ms: Option<u64>) -> String {
-    let Some(ms) = ms else {
-        return "--:--".to_string();
-    };
-    let total_secs = ms / 1000;
-    let h = total_secs / 3600;
-    let m = (total_secs % 3600) / 60;
-    let s = total_secs % 60;
-    if h > 0 {
-        format!("{h:02}:{m:02}:{s:02}")
-    } else {
-        format!("{m:02}:{s:02}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn format_duration_handles_none() {
-        assert_eq!(format_duration(None), "--:--");
+    fn memory_scale_rounds_up_to_a_stable_step() {
+        assert_eq!(memory_scale(0.0), 256.0);
+        assert_eq!(memory_scale(100.0), 256.0);
+        assert_eq!(memory_scale(256.0), 256.0);
+        assert_eq!(memory_scale(257.0), 512.0);
+        assert_eq!(memory_scale(1_100.0), 1_280.0);
     }
 
     #[test]
-    fn format_duration_formats_minutes_and_seconds() {
-        assert_eq!(format_duration(Some(65_000)), "01:05");
+    fn memory_scale_never_collapses_to_zero() {
+        // A zero/negative reading must not produce a zero divisor.
+        assert!(memory_scale(0.0) > 0.0);
+        assert!(memory_scale(-5.0) > 0.0);
     }
 
     #[test]
-    fn format_duration_formats_hours_when_long() {
-        assert_eq!(format_duration(Some(3_661_000)), "01:01:01");
+    fn peak_tracks_the_session_high_but_never_trails_the_live_value() {
+        assert_eq!(peak(&[10.0, 40.0, 20.0], 20.0), 40.0);
+        // A fresh spike above every recorded sample wins.
+        assert_eq!(peak(&[10.0, 40.0], 90.0), 90.0);
+        // No history at all falls back to the live value.
+        assert_eq!(peak(&[], 12.0), 12.0);
+    }
+
+    #[test]
+    fn ascii_meter_is_fixed_width_and_clamps() {
+        assert_eq!(ascii_meter(0.0, 100.0).chars().count(), METER_WIDTH);
+        assert_eq!(ascii_meter(50.0, 100.0), "#####-----");
+        assert_eq!(ascii_meter(100.0, 100.0).matches('#').count(), METER_WIDTH);
+        // Over scale clamps rather than overflowing the strip.
+        assert_eq!(ascii_meter(500.0, 100.0).matches('#').count(), METER_WIDTH);
+        // A zero scale is survivable, not a divide-by-zero panic.
+        assert_eq!(ascii_meter(5.0, 0.0).matches('#').count(), 0);
     }
 }

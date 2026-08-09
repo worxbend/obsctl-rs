@@ -710,7 +710,12 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) -> Hitboxes {
     }
 
     widgets::header::render(f, areas.header, model);
-    widgets::live_bar::render(f, areas.live_bar, model);
+    // The live bar only draws its own state badges when the big top-right
+    // pane is not on screen, so the state is never spelled out twice.
+    widgets::live_bar::render(f, areas.live_bar, model, areas.status.is_none());
+    if let Some(status_area) = areas.status {
+        widgets::status::render(f, status_area, model);
+    }
     widgets::scenes::render(f, areas.scenes, model);
     widgets::audio::render(f, areas.audio, model);
     widgets::profiles::render(f, areas.profiles, model);

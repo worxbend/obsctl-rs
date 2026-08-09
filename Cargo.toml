@@ -30,6 +30,8 @@ base64 = "0.22"
 anyhow = "1"
 libc = "0.2"
 rust-i18n = "4"
+rattles = "0.3.1"
+ratatui-braille-bar = "0.3.0"
 
 [dev-dependencies]
 tempfile = "3"

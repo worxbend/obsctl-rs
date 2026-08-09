@@ -8,5 +8,6 @@ pub mod layout;
 pub mod model;
 pub mod mouse;
 pub mod session;
+pub mod spinner;
 pub mod theme;
 pub mod widgets;

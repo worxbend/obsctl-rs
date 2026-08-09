@@ -94,14 +94,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         model,
     );
 
-    let highlight_style = if focused {
-        Style::default()
-            .bg(theme.highlight_bg)
-            .fg(theme.highlight_fg)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().add_modifier(Modifier::DIM)
-    };
+    let highlight_style = theme.selection_style(focused);
 
     let mut state = ListState::default();
     if !model.scenes().is_empty() {

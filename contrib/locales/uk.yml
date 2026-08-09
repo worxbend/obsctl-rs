@@ -63,6 +63,13 @@ cli:
     error_with_code: "помилка [%{code}]: %{message}"
 
 tui:
+  status:
+    title: "СТАН"
+    idle_hint: "очікування"
+
+  splash:
+    preparing: "Підготовка..."
+
   header:
     daemon_connected: "демон: з'єднано"
     daemon_disconnected: "демон: не з'єднано"

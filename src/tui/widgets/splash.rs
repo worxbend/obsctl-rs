@@ -5,13 +5,18 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
 };
+use ratatui_braille_bar::BrailleSpinner;
+use rust_i18n::t;
 
-use crate::tui::{anim, theme::Theme, widgets::chrome};
+use crate::tui::{anim, spinner, theme::Theme, widgets::chrome};
 
 const TAGLINE: &str = "Broadcast control, without breaking flow.";
 const APP_DESCRIPTION: &str =
     "Scenes, audio, profiles, recording, and live telemetry — one command center.";
 const PROGRESS_BAR_WIDTH: usize = 30;
+
+/// Width of the shimmering "preparing" noise band under the boot label.
+const PREPARING_BAND_WIDTH: usize = 44;
 const LARGE_LOGO: &[&str] = &[
     " ██████╗ ██████╗ ███████╗ ██████╗████████╗██╗     ",
     "██╔═══██╗██╔══██╗██╔════╝██╔════╝╚══██╔══╝██║     ",
@@ -56,8 +61,8 @@ pub fn render_with_symbols(
         return;
     }
 
-    let desired_height = 10.min(area.height);
-    let desired_width = 56.min(area.width);
+    let desired_height = 13.min(area.height);
+    let desired_width = 60.min(area.width);
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -79,11 +84,7 @@ pub fn render_with_symbols(
 
     let pulse = ((frame as f32 * 0.18).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
     let border = anim::blend(theme.accent, theme.accent_alt, pulse);
-    let orbit = if show_icons {
-        ["✦", "✧", "◆", "◇"][(frame as usize / 3) % 4]
-    } else {
-        ["*", "+", "o", "."][(frame as usize / 3) % 4]
-    };
+    let orbit = spinner::splash_frame(show_icons, frame);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -120,6 +121,14 @@ pub fn render_with_symbols(
     if inner.height >= 7 {
         lines.push(loader_line("SYNC", slither(frame, 18), theme.info, theme));
     }
+    if inner.height >= 9 {
+        lines.extend(preparing_lines(
+            theme,
+            frame,
+            (inner.width as usize).min(PREPARING_BAND_WIDTH),
+            show_icons,
+        ));
+    }
 
     let progress = (frame as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
     lines.push(progress_line(progress, theme, frame).alignment(Alignment::Center));
@@ -143,7 +152,7 @@ fn render_ascii(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
         " \\___/|____/|____/ \\____| |_| |_____|",
     ];
     let area = f.area();
-    let height = 13.min(area.height);
+    let height = 15.min(area.height);
     let width = 64.min(area.width);
     let rows = Layout::vertical([
         Constraint::Min(0),
@@ -173,7 +182,7 @@ fn render_ascii(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
         ".".repeat(30usize.saturating_sub(filled)),
         (progress * 100.0).round() as u8
     );
-    let spinner = ["|", "/", "-", "\\"][(frame as usize / 2) % 4];
+    let tick = spinner::splash_frame(false, frame);
     let mut lines = ASCII_LOGO
         .iter()
         .map(|line| {
@@ -194,16 +203,23 @@ fn render_ascii(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
         )
         .alignment(Alignment::Center),
         Line::styled(
-            format!("{spinner}  (o) LIVE  {spinner}"),
+            format!("{tick}  (o) LIVE  {tick}"),
             Style::default()
                 .fg(theme.danger)
                 .add_modifier(Modifier::BOLD),
         )
         .alignment(Alignment::Center),
-        Line::raw(""),
+    ]);
+    lines.extend(preparing_lines(
+        theme,
+        frame,
+        (inner.width as usize).min(PREPARING_BAND_WIDTH),
+        false,
+    ));
+    lines.extend([
         Line::styled(bar, Style::default().fg(theme.info)).alignment(Alignment::Center),
         Line::styled(
-            format!("{spinner} initializing studio link"),
+            format!("{tick} initializing studio link"),
             Style::default().fg(theme.muted),
         )
         .alignment(Alignment::Center),
@@ -279,17 +295,24 @@ fn render_large(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64, show
     f.render_widget(card, sections[2]);
 
     let progress = (frame as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
-    let lines = vec![
+    let mut lines = vec![
         loader_line("SIGNAL", slither(frame, 32), theme.accent, theme),
         loader_line("LIQUID", liquid_wave(frame, 32), theme.accent_alt, theme),
-        Line::raw(""),
+    ];
+    lines.extend(preparing_lines(
+        theme,
+        frame,
+        (inner.width as usize).min(PREPARING_BAND_WIDTH),
+        show_icons,
+    ));
+    lines.extend([
         progress_line(progress, theme, frame).alignment(Alignment::Center),
         Line::styled(
             boot_message(progress, show_icons),
             Style::default().fg(theme.muted),
         )
         .alignment(Alignment::Center),
-    ];
+    ]);
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -322,6 +345,63 @@ fn live_identity_line(frame: u64, theme: Theme, show_icons: bool) -> Line<'stati
         Span::styled(format!("  {}", wings.1), Style::default().fg(theme.muted)),
     ])
     .alignment(Alignment::Center)
+}
+
+/// The "Preparing…" boot band: a labelled spinner over a shimmering field of
+/// braille dots.
+///
+/// The band is deliberately non-deterministic — `BrailleSpinner` reseeds from
+/// the RNG on every render, which is what produces the shimmer. That makes it
+/// the one animation here that is not a pure function of `frame`, so tests
+/// assert its shape (width, label) rather than its contents.
+///
+/// Terminals without Unicode get [`ascii_noise`], a frame-seeded stand-in that
+/// shimmers the same way while staying inside ASCII.
+fn preparing_lines(theme: Theme, frame: u64, width: usize, rich: bool) -> Vec<Line<'static>> {
+    let tick = spinner::splash_frame(rich, frame);
+    let label = Line::from(vec![
+        Span::styled(
+            format!("{tick} "),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            t!("tui.splash.preparing").into_owned(),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+    ])
+    .alignment(Alignment::Center);
+
+    let band = if rich {
+        BrailleSpinner::new()
+            .color(theme.accent)
+            .into_line(width)
+            .alignment(Alignment::Center)
+    } else {
+        Line::styled(ascii_noise(frame, width), Style::default().fg(theme.accent))
+            .alignment(Alignment::Center)
+    };
+
+    vec![label, band]
+}
+
+/// Frame-seeded ASCII shimmer. A tiny xorshift keeps it reproducible for a
+/// given (frame, column) so the ASCII splash stays testable, while still
+/// looking like noise as the frame advances.
+fn ascii_noise(frame: u64, width: usize) -> String {
+    const GLYPHS: &[u8] = b" .:-=+*#%@";
+    (0..width)
+        .map(|column| {
+            let mut state = frame
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(column as u64 + 1);
+            state ^= state >> 33;
+            state = state.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+            state ^= state >> 29;
+            GLYPHS[(state % GLYPHS.len() as u64) as usize] as char
+        })
+        .collect()
 }
 
 fn loader_line(

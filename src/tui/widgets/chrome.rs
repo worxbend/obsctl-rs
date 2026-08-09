@@ -87,3 +87,44 @@ pub fn status_dot(active: bool, fancy: bool) -> &'static str {
         (false, false) => "-",
     }
 }
+
+/// Elapsed stream/record time as `mm:ss`, widening to `hh:mm:ss` only once
+/// the session passes an hour so short sessions stay narrow. `None` (OBS has
+/// not reported a duration yet) renders as a placeholder of the same width.
+///
+/// Shared by the live bar and the top-right status pane so both spell a
+/// running broadcast the same way.
+pub fn format_duration(ms: Option<u64>) -> String {
+    let Some(ms) = ms else {
+        return "--:--".to_string();
+    };
+    let total_secs = ms / 1000;
+    let h = total_secs / 3600;
+    let m = (total_secs % 3600) / 60;
+    let s = total_secs % 60;
+    if h > 0 {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_duration_handles_none() {
+        assert_eq!(format_duration(None), "--:--");
+    }
+
+    #[test]
+    fn format_duration_formats_minutes_and_seconds() {
+        assert_eq!(format_duration(Some(65_000)), "01:05");
+    }
+
+    #[test]
+    fn format_duration_formats_hours_when_long() {
+        assert_eq!(format_duration(Some(3_661_000)), "01:01:01");
+    }
+}

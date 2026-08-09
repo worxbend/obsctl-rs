@@ -7,6 +7,11 @@ pub struct LayoutAreas {
     pub header: Rect,
     /// Animated LIVE/REC banner + CPU/FPS/bitrate readout.
     pub live_bar: Rect,
+    /// Oversized IDLE/LIVE/REC pane in the top-right corner, spanning the
+    /// header and live-bar rows. `None` on terminals too narrow to give it
+    /// its width without squeezing the header — the live bar then falls back
+    /// to its inline badges so the state is never hidden.
+    pub status: Option<Rect>,
     pub scenes: Rect,
     pub audio: Rect,
     pub profiles: Rect,
@@ -35,6 +40,17 @@ const STATS_PANE_WIDTH: u16 = 46;
 /// pane yields the whole strip back to it.
 const LOGS_MIN_WIDTH: u16 = 30;
 
+/// Width of the top-right broadcast-state pane. Sized to the widest thing it
+/// draws — `LIVE` and `REC` side by side in the block font, 15 + 2 + 11
+/// columns — plus borders and a column of breathing room each side. Every
+/// column past that is taken straight off the header, which needs it to spell
+/// out the scene and profile names.
+pub const STATUS_PANE_WIDTH: u16 = 32;
+
+/// The header still has to spell out daemon/OBS/scene/profile; below this it
+/// is better to drop the status pane than to truncate all of that.
+const CHROME_MIN_WIDTH: u16 = 44;
+
 /// `show_stats` requests the stream-health pane (the caller passes whether
 /// OBS is streaming); the returned `stats` area is still `None` when the
 /// terminal cannot spare the width.
@@ -52,11 +68,34 @@ pub fn compute(frame: &Frame, show_stats: bool) -> LayoutAreas {
         ])
         .split(area);
 
-    let header = vertical[0];
-    let live_bar = vertical[1];
     let middle = vertical[2];
     let logs_strip = vertical[3];
     let palette = vertical[4];
+
+    // The status pane occupies the top-right corner across both chrome rows,
+    // so the header and live bar give up the same slice of width.
+    let (header, live_bar, status) = if area.width >= STATUS_PANE_WIDTH + CHROME_MIN_WIDTH {
+        let split = |row: Rect| {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Min(CHROME_MIN_WIDTH),
+                    Constraint::Length(STATUS_PANE_WIDTH),
+                ])
+                .split(row)
+        };
+        let header_cols = split(vertical[0]);
+        let live_bar_cols = split(vertical[1]);
+        let status = Rect {
+            x: header_cols[1].x,
+            y: header_cols[1].y,
+            width: header_cols[1].width,
+            height: vertical[0].height + vertical[1].height,
+        };
+        (header_cols[0], live_bar_cols[0], Some(status))
+    } else {
+        (vertical[0], vertical[1], None)
+    };
 
     let (logs, stats) = if show_stats && logs_strip.width >= STATS_PANE_WIDTH + LOGS_MIN_WIDTH {
         let cols = Layout::default()
@@ -96,6 +135,7 @@ pub fn compute(frame: &Frame, show_stats: bool) -> LayoutAreas {
     LayoutAreas {
         header,
         live_bar,
+        status,
         scenes: scenes_audio_cols[0],
         audio: scenes_audio_cols[1],
         profiles: profiles_collections_cols[0],
@@ -187,5 +227,53 @@ mod tests {
         assert_eq!(areas.live_bar.height, 4);
         assert_eq!(areas.logs.height, 7);
         assert_eq!(areas.palette.height, 4);
+    }
+
+    #[test]
+    fn status_pane_sits_in_the_top_right_corner_across_both_chrome_rows() {
+        let areas = compute_for(120, 40);
+        let status = areas.status.expect("status pane on a wide terminal");
+
+        assert_eq!(status.width, STATUS_PANE_WIDTH);
+        // Flush against the top-right corner.
+        assert_eq!(status.y, 0);
+        assert_eq!(status.x + status.width, 120);
+        // Spans the header and live-bar rows as one pane.
+        assert_eq!(status.height, areas.header.height + areas.live_bar.height);
+        // The chrome rows yield exactly that width, and nothing overlaps.
+        assert_eq!(areas.header.x + areas.header.width, status.x);
+        assert_eq!(areas.live_bar.x + areas.live_bar.width, status.x);
+        assert_eq!(areas.header.width, 120 - STATUS_PANE_WIDTH);
+        assert_eq!(areas.live_bar.width, 120 - STATUS_PANE_WIDTH);
+    }
+
+    #[test]
+    fn narrow_terminals_drop_the_status_pane_and_keep_full_width_chrome() {
+        // One column short of fitting both.
+        let areas = compute_for(STATUS_PANE_WIDTH + CHROME_MIN_WIDTH - 1, 40);
+        assert!(areas.status.is_none());
+        assert_eq!(areas.header.width, STATUS_PANE_WIDTH + CHROME_MIN_WIDTH - 1);
+        assert_eq!(
+            areas.live_bar.width,
+            STATUS_PANE_WIDTH + CHROME_MIN_WIDTH - 1
+        );
+
+        // Exactly wide enough: the pane appears, the header at its minimum.
+        let areas = compute_for(STATUS_PANE_WIDTH + CHROME_MIN_WIDTH, 40);
+        assert!(areas.status.is_some());
+        assert_eq!(areas.header.width, CHROME_MIN_WIDTH);
+    }
+
+    #[test]
+    fn status_pane_is_wide_enough_for_live_and_rec_side_by_side() {
+        use crate::tui::spinner;
+
+        let inner = STATUS_PANE_WIDTH as usize - 2; // borders
+        let both = spinner::block_width("LIVE") + 2 + spinner::block_width("REC");
+        assert!(
+            both <= inner,
+            "LIVE+REC needs {both} columns but the pane only has {inner}"
+        );
+        assert!(spinner::block_width("IDLE") <= inner);
     }
 }

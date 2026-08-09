@@ -190,19 +190,44 @@ fn header_renders_daemon_disconnected() {
 // ── live bar widget ─────────────────────────────────────────────────────────
 
 #[test]
-fn live_bar_renders_off_state_and_stats_placeholder() {
+fn live_bar_renders_idle_badge_and_stats_placeholder() {
     let model = model_connected();
     let mut t = term(100, 3);
     t.draw(|f| {
-        widgets::live_bar::render(f, Rect::new(0, 0, 100, 3), &model);
+        widgets::live_bar::render(f, Rect::new(0, 0, 100, 3), &model, true);
     })
     .unwrap();
     let out = buf_string(&t);
-    assert!(out.contains("LIVE off"), "should show LIVE off badge");
-    assert!(out.contains("REC off"), "should show REC off badge");
+    assert!(
+        out.contains("IDLE"),
+        "nothing running should read as IDLE; got: {out}"
+    );
+    assert!(
+        !out.contains("LIVE 0") && !out.contains("REC 0"),
+        "idle must not show a running duration; got: {out}"
+    );
     assert!(
         out.contains("waiting"),
         "should show stats placeholder when no stats yet; got: {out}"
+    );
+}
+
+#[test]
+fn live_bar_omits_its_badges_when_the_status_pane_is_showing() {
+    let model = model_connected();
+    let mut t = term(100, 3);
+    t.draw(|f| {
+        widgets::live_bar::render(f, Rect::new(0, 0, 100, 3), &model, false);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        !out.contains("IDLE"),
+        "state is owned by the status pane here, not the live bar; got: {out}"
+    );
+    assert!(
+        out.contains("Main"),
+        "scene should still render; got: {out}"
     );
 }
 
@@ -224,7 +249,7 @@ fn live_bar_renders_active_stream_and_record_with_stats() {
     }
     let mut t = term(100, 3);
     t.draw(|f| {
-        widgets::live_bar::render(f, Rect::new(0, 0, 100, 3), &model);
+        widgets::live_bar::render(f, Rect::new(0, 0, 100, 3), &model, true);
     })
     .unwrap();
     let out = buf_string(&t);
@@ -233,6 +258,251 @@ fn live_bar_renders_active_stream_and_record_with_stats() {
     assert!(out.contains("00:05"), "should show record duration");
     assert!(out.contains("4500"), "should show bitrate");
     assert!(out.contains("60.0"), "should show fps");
+}
+
+#[test]
+fn live_bar_draws_braille_meters_for_cpu_and_memory() {
+    let mut model = model_connected();
+    if let Some(snap) = model.snapshot.as_mut() {
+        snap.stats = Some(obsctl_rs::obs::state::ObsStats {
+            cpu_usage_percent: 42.0,
+            active_fps: 60.0,
+            memory_usage_mb: 512.0,
+            ..Default::default()
+        });
+    }
+    // Two rows of inner height, so the meter row renders.
+    let mut t = term(100, 4);
+    t.draw(|f| {
+        widgets::live_bar::render(f, Rect::new(0, 0, 100, 4), &model, false);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+
+    assert!(out.contains("CPU"), "CPU meter label; got: {out}");
+    assert!(out.contains("42.0%"), "CPU value; got: {out}");
+    assert!(out.contains("MEM"), "MEM meter label; got: {out}");
+    assert!(out.contains("512MB"), "memory value; got: {out}");
+    // The braille bar's body glyph — proof the meters are bars, not text.
+    assert!(
+        out.contains('\u{28FF}'),
+        "expected braille meter cells; got: {out}"
+    );
+}
+
+#[test]
+fn live_bar_meters_fall_back_to_ascii_in_simplified_mode() {
+    let mut model = model_connected();
+    model.advanced_ui = false;
+    if let Some(snap) = model.snapshot.as_mut() {
+        snap.stats = Some(obsctl_rs::obs::state::ObsStats {
+            cpu_usage_percent: 50.0,
+            active_fps: 60.0,
+            memory_usage_mb: 128.0,
+            ..Default::default()
+        });
+    }
+    let mut t = term(100, 4);
+    t.draw(|f| {
+        widgets::live_bar::render(f, Rect::new(0, 0, 100, 4), &model, false);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.is_ascii(), "simplified meters must stay ASCII: {out}");
+    assert!(
+        out.contains("#####-----"),
+        "CPU at 50% should be a half-filled ASCII meter; got: {out}"
+    );
+}
+
+// ── status pane ─────────────────────────────────────────────────────────────
+
+/// The pane spells its state in a 3-row block font; assert on the top row of
+/// that art so the test fails if the word or the font stops rendering.
+fn block_top_row(word: &str) -> String {
+    obsctl_rs::tui::spinner::block_word(word, '█')[0].clone()
+}
+
+#[test]
+fn status_pane_shows_idle_when_nothing_is_running() {
+    let model = model_connected();
+    let mut t = term(32, 8);
+    t.draw(|f| {
+        widgets::status::render(f, Rect::new(0, 0, 32, 8), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.contains(&block_top_row("IDLE")),
+        "idle state should render IDLE in block letters; got: {out}"
+    );
+    assert!(out.contains("standing by"), "idle hint; got: {out}");
+    assert!(
+        !out.contains(&block_top_row("LIVE")),
+        "nothing is streaming; got: {out}"
+    );
+}
+
+#[test]
+fn status_pane_shows_live_and_rec_side_by_side_with_durations() {
+    let mut model = model_connected();
+    if let Some(snap) = model.snapshot.as_mut() {
+        snap.streaming = true;
+        snap.recording = true;
+        snap.stream_duration_ms = Some(65_000);
+        snap.record_duration_ms = Some(5_000);
+    }
+    let mut t = term(32, 8);
+    t.draw(|f| {
+        widgets::status::render(f, Rect::new(0, 0, 32, 8), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.contains(&block_top_row("LIVE")),
+        "LIVE block letters; got: {out}"
+    );
+    assert!(
+        out.contains(&block_top_row("REC")),
+        "REC block letters; got: {out}"
+    );
+    assert!(out.contains("01:05"), "stream duration; got: {out}");
+    assert!(out.contains("00:05"), "record duration; got: {out}");
+    assert!(
+        !out.contains(&block_top_row("IDLE")),
+        "not idle while on air; got: {out}"
+    );
+}
+
+#[test]
+fn status_pane_shows_rec_alone_while_only_recording() {
+    let mut model = model_connected();
+    if let Some(snap) = model.snapshot.as_mut() {
+        snap.recording = true;
+        snap.record_duration_ms = Some(3_600_000);
+    }
+    let mut t = term(32, 8);
+    t.draw(|f| {
+        widgets::status::render(f, Rect::new(0, 0, 32, 8), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.contains(&block_top_row("REC")), "REC art; got: {out}");
+    assert!(
+        !out.contains(&block_top_row("LIVE")),
+        "not streaming; got: {out}"
+    );
+    assert!(out.contains("01:00:00"), "hour-long record; got: {out}");
+}
+
+#[test]
+fn status_pane_spinner_distinguishes_live_from_idle_at_the_same_tick() {
+    use obsctl_rs::tui::spinner::{self, BroadcastState};
+
+    let idle = spinner::frame(BroadcastState::Idle, true, 7);
+    let live = spinner::frame(BroadcastState::Live, true, 7);
+    let rec = spinner::frame(BroadcastState::Rec, true, 7);
+
+    let mut model = model_connected();
+    let mut t = term(32, 8);
+    t.draw(|f| widgets::status::render(f, Rect::new(0, 0, 32, 8), &model))
+        .unwrap();
+    let idle_out = buf_string(&t);
+
+    if let Some(snap) = model.snapshot.as_mut() {
+        snap.streaming = true;
+    }
+    let mut t = term(32, 8);
+    t.draw(|f| widgets::status::render(f, Rect::new(0, 0, 32, 8), &model))
+        .unwrap();
+    let live_out = buf_string(&t);
+
+    assert_ne!(
+        idle, live,
+        "idle and live must not share a spinner frame at tick 7"
+    );
+    assert_ne!(live, rec);
+    assert_ne!(idle_out, live_out, "the pane should look different on air");
+}
+
+#[test]
+fn status_pane_degrades_to_a_single_line_when_too_small_for_block_letters() {
+    let mut model = model_connected();
+    if let Some(snap) = model.snapshot.as_mut() {
+        snap.streaming = true;
+        snap.stream_duration_ms = Some(65_000);
+    }
+    // Three rows total leaves one inner row — no room for the 3-row font.
+    let mut t = term(24, 3);
+    t.draw(|f| {
+        widgets::status::render(f, Rect::new(0, 0, 24, 3), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.contains("LIVE"),
+        "compact form still names the state; got: {out}"
+    );
+    assert!(
+        !out.contains(&block_top_row("LIVE")),
+        "block art must not be attempted at this size; got: {out}"
+    );
+}
+
+#[test]
+fn status_pane_renders_without_a_snapshot() {
+    // No OBS data at all (daemon up, OBS not connected yet) must still paint
+    // a state rather than panicking on a missing snapshot.
+    let mut model = TuiModel::default();
+    model.connected_to_daemon = true;
+    let mut t = term(32, 8);
+    t.draw(|f| {
+        widgets::status::render(f, Rect::new(0, 0, 32, 8), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.contains(&block_top_row("IDLE")),
+        "no snapshot reads as idle; got: {out}"
+    );
+    assert!(out.contains("--:--") || out.contains("standing by"));
+}
+
+#[test]
+fn status_pane_is_ascii_in_simplified_mode() {
+    let mut model = model_connected();
+    model.advanced_ui = false;
+    model.show_icons = true;
+    if let Some(snap) = model.snapshot.as_mut() {
+        snap.streaming = true;
+        snap.recording = true;
+        snap.stream_duration_ms = Some(1_000);
+        snap.record_duration_ms = Some(1_000);
+    }
+    let mut t = term(32, 8);
+    t.draw(|f| {
+        widgets::status::render(f, Rect::new(0, 0, 32, 8), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.is_ascii(),
+        "simplified status pane must be ASCII: {out}"
+    );
+    assert!(
+        out.contains(&obsctl_rs::tui::spinner::block_word("LIVE", '#')[0]),
+        "ASCII block letters; got: {out}"
+    );
+}
+
+#[test]
+fn status_pane_survives_a_degenerate_area() {
+    let model = model_connected();
+    let mut t = term(4, 2);
+    t.draw(|f| {
+        widgets::status::render(f, Rect::new(0, 0, 4, 2), &model);
+    })
+    .unwrap();
 }
 
 // ── connection widget ───────────────────────────────────────────────────────
@@ -298,6 +568,93 @@ fn scenes_renders_active_scene_marker() {
     assert!(out.contains("Scenes"), "should show Scenes title");
     assert!(out.contains("Main"), "should show scene name");
     assert!(out.contains("▶"), "should show active marker");
+}
+
+/// Foreground colors on the row the cursor is on, left to right.
+fn row_foregrounds(terminal: &Terminal<TestBackend>, y: u16) -> Vec<Option<ratatui::style::Color>> {
+    let buf = terminal.backend().buffer().clone();
+    (0..buf.area().width)
+        .map(|x| buf.cell((x, y)).unwrap().style().fg)
+        .collect()
+}
+
+#[test]
+fn selected_scene_is_tinted_rather_than_painted_over() {
+    use obsctl_rs::tui::model::FocusPanel;
+
+    let mut model = model_connected();
+    model.focus = FocusPanel::Scenes;
+    model.scene_cursor = 0;
+    let theme = model.theme;
+
+    let mut t = term(60, 10);
+    t.draw(|f| {
+        widgets::scenes::render(f, Rect::new(0, 0, 60, 10), &model);
+    })
+    .unwrap();
+
+    // Row 1 is the first list entry (row 0 is the panel border).
+    let buf = t.backend().buffer().clone();
+    let selected_bg = buf.cell((2, 1)).unwrap().style().bg;
+    let expected = theme.selection_style(true).bg;
+
+    assert_eq!(
+        selected_bg, expected,
+        "selected row should carry the blended tint"
+    );
+    assert_ne!(
+        selected_bg,
+        Some(theme.highlight_bg),
+        "selected row must not be the solid highlight bar"
+    );
+
+    // The whole point of tinting: the row keeps its own span colors instead
+    // of every cell being repainted to one foreground.
+    let foregrounds: std::collections::HashSet<_> = row_foregrounds(&t, 1)
+        .into_iter()
+        .flatten()
+        .filter(|c| *c != theme.border)
+        .collect();
+    assert!(
+        foregrounds.len() > 1,
+        "selected row was flattened to a single foreground: {foregrounds:?}"
+    );
+    assert!(
+        foregrounds.contains(&theme.success),
+        "the active-scene marker should keep its color under the selection; got {foregrounds:?}"
+    );
+}
+
+#[test]
+fn unfocused_scene_selection_is_fainter_than_focused() {
+    use obsctl_rs::tui::model::FocusPanel;
+
+    let mut model = model_connected();
+    model.scene_cursor = 0;
+
+    let render_bg = |model: &TuiModel| {
+        let mut t = term(60, 10);
+        t.draw(|f| widgets::scenes::render(f, Rect::new(0, 0, 60, 10), model))
+            .unwrap();
+        t.backend()
+            .buffer()
+            .clone()
+            .cell((2, 1))
+            .unwrap()
+            .style()
+            .bg
+    };
+
+    model.focus = FocusPanel::Scenes;
+    let focused = render_bg(&model);
+    model.focus = FocusPanel::Audio;
+    let unfocused = render_bg(&model);
+
+    assert_ne!(
+        focused, unfocused,
+        "losing focus should soften the selection"
+    );
+    assert_eq!(focused, model.theme.selection_style(true).bg);
 }
 
 #[test]
@@ -499,7 +856,10 @@ fn full_dashboard_renders_all_panels_with_new_layout() {
     t.draw(|f| {
         let areas = layout::compute(f, model.streaming());
         widgets::header::render(f, areas.header, &model);
-        widgets::live_bar::render(f, areas.live_bar, &model);
+        widgets::live_bar::render(f, areas.live_bar, &model, areas.status.is_none());
+        if let Some(status) = areas.status {
+            widgets::status::render(f, status, &model);
+        }
         widgets::scenes::render(f, areas.scenes, &model);
         widgets::audio::render(f, areas.audio, &model);
         widgets::profiles::render(f, areas.profiles, &model);
@@ -762,6 +1122,68 @@ fn splash_progress_bar_fills_as_frames_advance() {
 }
 
 #[test]
+fn splash_renders_the_preparing_band() {
+    let mut t = term(100, 20);
+    t.draw(|f| {
+        widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 12, 40);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.contains("Preparing..."),
+        "should label the preparing stage; got: {out}"
+    );
+    // The band is a field of braille dots (U+2800..U+28FF). Its content is
+    // reseeded every render, so assert the character class, not the glyphs.
+    let braille = out
+        .chars()
+        .filter(|c| ('\u{2800}'..='\u{28FF}').contains(c))
+        .count();
+    assert!(
+        braille >= 20,
+        "expected a braille shimmer band, found {braille} braille cells in: {out}"
+    );
+}
+
+#[test]
+fn splash_preparing_band_shimmers_between_renders() {
+    let render_once = || {
+        let mut t = term(100, 20);
+        t.draw(|f| {
+            widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 12, 40);
+        })
+        .unwrap();
+        buf_string(&t)
+    };
+    // Same frame number, different noise — the band is what animates here.
+    // 1-in-256^44 says this cannot collide by chance.
+    assert_ne!(
+        render_once(),
+        render_once(),
+        "the preparing band should reseed on every render"
+    );
+}
+
+#[test]
+fn splash_preparing_band_is_ascii_noise_in_simplified_mode() {
+    let mut t = term(100, 20);
+    t.draw(|f| {
+        widgets::splash::render_with_appearance(
+            f,
+            obsctl_rs::tui::theme::Theme::default_theme(),
+            12,
+            40,
+            false,
+            false,
+        );
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(out.is_ascii(), "ASCII splash must stay ASCII: {out}");
+    assert!(out.contains("Preparing..."), "got: {out}");
+}
+
+#[test]
 fn splash_survives_minimum_terminal_size() {
     let mut t = term(20, 4);
     t.draw(|f| {
@@ -782,8 +1204,9 @@ fn simplified_ui_renders_the_dashboard_and_splash_as_ascii_only() {
     let mut dashboard = term(120, 34);
     dashboard
         .draw(|f| {
-            widgets::header::render(f, Rect::new(0, 0, 120, 4), &model);
-            widgets::live_bar::render(f, Rect::new(0, 4, 120, 4), &model);
+            widgets::header::render(f, Rect::new(0, 0, 88, 4), &model);
+            widgets::live_bar::render(f, Rect::new(0, 4, 88, 4), &model, false);
+            widgets::status::render(f, Rect::new(88, 0, 32, 8), &model);
             widgets::scenes::render(f, Rect::new(0, 8, 40, 10), &model);
             widgets::audio::render(f, Rect::new(40, 8, 40, 10), &model);
             widgets::profiles::render(f, Rect::new(80, 8, 20, 10), &model);
