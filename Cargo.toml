@@ -32,6 +32,9 @@ libc = "0.2"
 rust-i18n = "4"
 rattles = "0.3.1"
 ratatui-braille-bar = "0.3.0"
+# Already in the tree via ratatui; named directly so widgets can measure text
+# in terminal cells rather than characters when centering and truncating.
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

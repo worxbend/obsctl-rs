@@ -625,9 +625,18 @@ async fn run_action(
 
 /// Rows one `Ctrl-D`/`Ctrl-U` covers: half the focused pane's visible height,
 /// falling back to a sensible step before the first frame has been drawn.
+/// How far `Ctrl-D`/`Ctrl-U` (and `PgDn`/`PgUp`) move in `panel` — half a
+/// screenful of whatever that panel scrolls. The list panels scroll rows;
+/// the audio matrix scrolls channel strips sideways, so half a page there is
+/// half the strips that fit across it, not half its height.
 fn half_page(hits: &Hitboxes, panel: FocusPanel) -> usize {
-    let rows = hits.panel(panel).height.saturating_sub(2) / 2;
-    usize::from(rows).max(1)
+    let area = hits.panel(panel);
+    let items = if panel == FocusPanel::Audio {
+        widgets::audio::visible_strips(area.width.saturating_sub(2))
+    } else {
+        usize::from(area.height.saturating_sub(2))
+    };
+    (items / 2).max(1)
 }
 
 fn volume_delta(steps: usize) -> i16 {

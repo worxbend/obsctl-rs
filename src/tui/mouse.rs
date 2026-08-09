@@ -87,23 +87,23 @@ fn inner(area: Rect) -> Rect {
     }
 }
 
-/// Row heights of `panel`'s list items. Audio rows grow to two lines once
-/// OBS starts reporting meter levels for that input, so the mapping from a
-/// clicked row back to an index is not simply `y - top`.
-fn item_heights(model: &TuiModel, panel: FocusPanel) -> Vec<u16> {
+/// Index of the item a click lands on. Every panel but the audio matrix is a
+/// list of one-row items, so the lookup is a row lookup; the audio matrix
+/// draws vertical channel strips side by side, so there it is a column
+/// lookup against the same layout the widget used to draw them.
+fn index_at(model: &TuiModel, panel: FocusPanel, area: Rect, pos: Position) -> Option<usize> {
+    let cursor = model.panel_cursor(panel);
     match panel {
-        FocusPanel::Audio => model
-            .audio_inputs()
-            .iter()
-            .map(|a| {
-                if model.meter_levels.contains_key(&a.name) {
-                    2
-                } else {
-                    1
-                }
-            })
-            .collect(),
-        other => vec![1; model.panel_len(other)],
+        FocusPanel::Audio => crate::tui::widgets::audio::strip_index_at(
+            inner(area),
+            model.panel_len(panel),
+            cursor,
+            pos,
+        ),
+        other => {
+            let heights = vec![1u16; model.panel_len(other)];
+            index_at_row(area, &heights, cursor, pos.y)
+        }
     }
 }
 
@@ -275,8 +275,7 @@ fn main_mouse(
             cursor.saturating_add(WHEEL_ROWS),
         )),
         MouseEventKind::Down(MouseButton::Left) => {
-            let heights = item_heights(model, panel);
-            let index = index_at_row(area, &heights, cursor, event.row)?;
+            let index = index_at(model, panel, area, pos)?;
             // First click focuses and selects; clicking the row that is
             // already selected in the already-focused panel activates it.
             if model.focus == panel && index == cursor {
@@ -376,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn two_row_audio_items_map_clicks_to_the_right_input() {
+    fn audio_clicks_resolve_by_column_because_the_strips_are_vertical() {
         let mut model = TuiModel::default();
         model.snapshot = Some(ObsSnapshot {
             audio_inputs: vec![
@@ -391,22 +390,30 @@ mod tests {
             ],
             ..Default::default()
         });
-        // Mic has a meter, so it renders as two rows and pushes Desktop down.
-        model.meter_levels.insert("Mic".to_string(), 0.5);
         model.clamp_cursors();
 
+        // The audio pane is 40 columns starting at x=40, so its interior is
+        // 41..=78. Two strips cap out at 16 columns each and the pair is
+        // centered: 43..=58, a gap at 59, then 60..=75.
         assert_eq!(
-            handle_mouse(&model, &hits_main(), click(45, 1)),
+            handle_mouse(&model, &hits_main(), click(43, 1)),
+            Some(TuiAction::SelectIndex(FocusPanel::Audio, 0))
+        );
+        // A click low down the same strip is still that input — the whole
+        // column belongs to it, whatever row was hit.
+        assert_eq!(
+            handle_mouse(&model, &hits_main(), click(50, 9)),
             Some(TuiAction::SelectIndex(FocusPanel::Audio, 0))
         );
         assert_eq!(
-            handle_mouse(&model, &hits_main(), click(45, 2)),
-            Some(TuiAction::SelectIndex(FocusPanel::Audio, 0))
-        );
-        assert_eq!(
-            handle_mouse(&model, &hits_main(), click(45, 3)),
+            handle_mouse(&model, &hits_main(), click(62, 4)),
             Some(TuiAction::SelectIndex(FocusPanel::Audio, 1))
         );
+        // Column 59 is the blank gap between the two strips.
+        assert_eq!(handle_mouse(&model, &hits_main(), click(59, 4)), None);
+        // Left of the first strip and right of the last there is nothing.
+        assert_eq!(handle_mouse(&model, &hits_main(), click(41, 4)), None);
+        assert_eq!(handle_mouse(&model, &hits_main(), click(77, 4)), None);
     }
 
     #[test]

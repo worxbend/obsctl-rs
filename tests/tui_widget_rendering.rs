@@ -711,20 +711,103 @@ fn scenes_renders_alias_and_shortcut() {
 
 // ── audio widget ────────────────────────────────────────────────────────────
 
+/// Draw the audio matrix on its own and return the buffer as lines, so a
+/// test can talk about columns as well as text.
+fn audio_lines(model: &TuiModel, width: u16, height: u16) -> Vec<String> {
+    let mut t = term(width, height);
+    t.draw(|f| {
+        widgets::audio::render(f, Rect::new(0, 0, width, height), model);
+    })
+    .unwrap();
+    buf_string(&t).lines().map(str::to_string).collect()
+}
+
 #[test]
 fn audio_renders_mute_and_volume() {
     let model = model_connected();
-    let mut t = term(80, 10);
-    t.draw(|f| {
-        widgets::audio::render(f, Rect::new(0, 0, 80, 10), &model);
-    })
-    .unwrap();
-    let out = buf_string(&t);
+    let out = audio_lines(&model, 80, 12).join("\n");
     assert!(out.contains("Audio"), "should show Audio title");
     assert!(out.contains("Mic"), "should show audio input name");
+    assert!(out.contains("80%"), "should show volume; got: {out}");
     assert!(
-        out.contains("80%") || out.contains("80"),
-        "should show volume"
+        out.contains("mute"),
+        "a muted input should say so; got: {out}"
+    );
+}
+
+#[test]
+fn audio_stacks_each_input_into_its_own_bordered_vertical_strip() {
+    let mut model = model_connected();
+    model.record_meter_level("Mic".into(), 0.5);
+    let lines = audio_lines(&model, 60, 14);
+
+    // Both inputs are on the same row, side by side, rather than stacked.
+    // Each strip carries its name on its own top border.
+    let top = lines
+        .iter()
+        .find(|line| line.contains("Mic"))
+        .expect("a row carrying the input names");
+    assert!(
+        top.contains("Desktop"),
+        "inputs should sit side by side on one row; got: {top}"
+    );
+    assert!(
+        top.find("Mic") < top.find("Desktop"),
+        "strips keep snapshot order left to right; got: {top}"
+    );
+
+    // One box per input, with a blank column immediately before the second
+    // box starts — the gap the strips are separated by.
+    let cells: Vec<char> = top.chars().collect();
+    let corners: Vec<usize> = cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| **c == '╭' || **c == '┏')
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(corners.len(), 2, "one border per input; got: {top}");
+    assert_eq!(
+        cells[corners[1] - 1],
+        ' ',
+        "strips should be separated by a blank column; got: {top}"
+    );
+
+    // Every meter is ruled with its own dB scale. The floor tick is the one
+    // to count: it is drawn whatever step the scale settles on, and unlike a
+    // bare "0" it cannot be matched by the panel's count badge or by "80%".
+    let joined = lines.join("\n");
+    assert_eq!(
+        joined.matches("-60").count(),
+        2,
+        "each strip should rule its own dB scale down to the floor; got: {joined}"
+    );
+}
+
+#[test]
+fn audio_meters_line_up_across_strips() {
+    // "Mic" has an alias and "Desktop" does not, but the extra row must be
+    // spent on both strips so their meters stay level with each other.
+    let mut model = model_connected();
+    model.record_meter_level("Mic".into(), 0.5);
+    model.record_meter_level("Desktop".into(), 0.1);
+    let lines = audio_lines(&model, 60, 16);
+
+    let scale_rows: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("-60"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        scale_rows.len(),
+        1,
+        "both -60 marks belong on the same row; got: {lines:#?}"
+    );
+    assert_eq!(
+        lines[scale_rows[0]].matches("-60").count(),
+        2,
+        "each strip rules its own scale; got: {}",
+        lines[scale_rows[0]]
     );
 }
 
@@ -732,15 +815,17 @@ fn audio_renders_mute_and_volume() {
 fn audio_uses_ascii_symbols_when_icons_are_disabled() {
     let mut model = model_connected();
     model.show_icons = false;
-    let mut t = term(80, 10);
-    t.draw(|f| {
-        widgets::audio::render(f, Rect::new(0, 0, 80, 10), &model);
-    })
-    .unwrap();
-    let out = buf_string(&t);
+    let out = audio_lines(&model, 80, 12).join("\n");
     assert!(!out.contains("🔊"));
     assert!(!out.contains("🔇"));
-    assert!(out.contains("A Mic"));
+    assert!(
+        out.contains("A 80%"),
+        "unmuted input should keep its ASCII marker and volume; got: {out}"
+    );
+    assert!(
+        out.contains("M mute"),
+        "muted input should keep its ASCII marker; got: {out}"
+    );
 }
 
 #[test]
@@ -749,13 +834,54 @@ fn audio_renders_empty_list_without_panic() {
     if let Some(ref mut snap) = model.snapshot {
         snap.audio_inputs.clear();
     }
-    let mut t = term(60, 8);
-    t.draw(|f| {
-        widgets::audio::render(f, Rect::new(0, 0, 60, 8), &model);
-    })
-    .unwrap();
-    let out = buf_string(&t);
+    let out = audio_lines(&model, 60, 8).join("\n");
     assert!(out.contains("Audio"), "should still render block title");
+    assert!(
+        out.contains("no audio inputs"),
+        "an empty matrix should say why it is empty; got: {out}"
+    );
+}
+
+#[test]
+fn audio_says_so_when_the_pane_is_too_narrow_for_a_strip() {
+    let model = model_connected();
+    let out = audio_lines(&model, 12, 8).join("\n");
+    assert!(
+        out.contains("too narrow"),
+        "should explain the empty pane rather than just drawing a box; got: {out}"
+    );
+}
+
+#[test]
+fn audio_scrolls_sideways_to_keep_the_selected_strip_visible() {
+    let mut model = model_connected();
+    if let Some(ref mut snap) = model.snapshot {
+        snap.audio_inputs = (0..6)
+            .map(|i| AudioState {
+                name: format!("In{i}"),
+                muted: Some(false),
+                volume_percent: Some(50),
+                ..Default::default()
+            })
+            .collect();
+    }
+    model.clamp_cursors();
+
+    // Only three strips fit in 38 columns of pane interior.
+    let first = audio_lines(&model, 40, 12).join("\n");
+    assert!(first.contains("In0") && first.contains("In2"));
+    assert!(!first.contains("In5"), "In5 is off the right edge yet");
+
+    model.audio_cursor = 5;
+    let scrolled = audio_lines(&model, 40, 12).join("\n");
+    assert!(
+        scrolled.contains("In5"),
+        "the selected strip must be on screen; got: {scrolled}"
+    );
+    assert!(
+        !scrolled.contains("In0"),
+        "the window should have scrolled past In0; got: {scrolled}"
+    );
 }
 
 #[test]
@@ -1199,7 +1325,7 @@ fn simplified_ui_renders_the_dashboard_and_splash_as_ascii_only() {
     // Icons remain enabled in config by default; simplified mode must still
     // force every widget onto its ASCII fallback.
     model.show_icons = true;
-    model.meter_levels.insert("Mic".into(), 0.42);
+    model.record_meter_level("Mic".into(), 0.42);
 
     let mut dashboard = term(120, 34);
     dashboard

@@ -43,7 +43,7 @@ A single Rust binary: a daemon that owns the OBS connection, a live TUI, and a s
 A real-time, themeable command center with animated gradient chrome, rounded/heavy focus borders, Unicode symbols, and responsive layouts. The advanced interface is enabled by default; set `ui.advanced_ui: false` for a simplified ASCII-safe TTY mode, or `ui.show_icons: false` to hide icons while keeping the other advanced elements.
 
 - 🎬 **Scenes panel** (`s`) — navigate with `j`/`k` or arrows, `Enter` to switch; the newly active scene briefly flashes
-- 🔊 **Audio panel** (`a`) — `m` to mute/unmute, `h`/`l` or `←`/`→` to nudge volume ±5%, segmented multi-color dB meters
+- 🔊 **Audio matrix** (`a`) — OBS's Audio Mixer in the terminal: one bordered vertical channel strip per input, each with a fader, a green/yellow/red dB meter, and its own dB scale. `←`/`→` (or `h`/`l`) picks a strip, `↑`/`↓` (or `k`/`j`) nudges its volume ±5%, `m` mutes
 - 🗂️ **Profiles panel** (`p`) — `Enter` to switch OBS profiles
 - 📚 **Collections panel** (`c`) — `Enter` to switch OBS scene collections
 - ⌨️ **Vim / AstroNvim keymap** — `j`/`k`, `gg`/`G`, `Ctrl-D`/`Ctrl-U`, count prefixes (`12j`), `Ctrl-hjkl` window moves, `Tab` to cycle panes, and a `<Space>` leader with a which-key popup
@@ -331,10 +331,10 @@ which-key popup lists what the next keystroke can be.
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` (or `↓` / `↑`) | Move down / up in the focused panel |
+| `j` / `k` (or `↓` / `↑`) | Move down / up in the focused panel (the audio matrix rebinds these — see Panes) |
 | `<count>j` / `<count>k` | Repeat the motion — `12j` moves twelve rows |
-| `gg` / `G` (or `Home` / `End`) | Jump to the first / last row |
-| `Ctrl-D` / `Ctrl-U` (or `PgDn` / `PgUp`) | Move half the focused pane |
+| `gg` / `G` (or `Home` / `End`) | Jump to the first / last row, or the leftmost / rightmost audio strip |
+| `Ctrl-D` / `Ctrl-U` (or `PgDn` / `PgUp`) | Move half the focused pane — half its rows, or half its audio strips |
 | `Enter` | Act on the focused row — switch scene/profile/collection, or toggle mute in the audio panel |
 
 ### Panes
@@ -345,7 +345,8 @@ which-key popup lists what the next keystroke can be.
 | `Tab` / `Shift-Tab` | Cycle focus through the panels in reading order |
 | `s` / `a` / `p` / `c` | Focus the scenes / audio / profiles / collections panel |
 | `m` | Mute/unmute the focused audio input |
-| `h` / `l` (or `←` / `→`) | Nudge the focused input's volume by ∓5% — `3l` nudges +15% |
+| `h` / `l` (or `←` / `→`) | In the audio matrix: move to the previous / next channel strip |
+| `k` / `j` (or `↑` / `↓`) | In the audio matrix: nudge the focused input's volume by ±5% — `3k` nudges +15% |
 
 ### Command line
 
@@ -396,7 +397,7 @@ terminals fall back to that behavior while `Shift` is held).
 
 | Input | Action |
 |-------|--------|
-| Left-click a row | Focus that panel and select the row |
+| Left-click a row | Focus that panel and select the row; in the audio matrix, click a channel strip |
 | Left-click the selected row again | Activate it — switch scene/profile/collection, or toggle mute |
 | Wheel over a panel | Move that panel's cursor |
 | Wheel over the logs | Scroll the log history; scroll back down (or press `Esc`) to resume following |

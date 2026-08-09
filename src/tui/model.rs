@@ -85,6 +85,34 @@ pub enum View {
     Settings,
 }
 
+/// One audio input's volume-meter state.
+///
+/// OBS reports a bare magnitude several times a second and nothing else, but
+/// its own meter shows two moving things: a bar that falls off gradually
+/// after the sound stops (a "peak program meter"), and a marker parked at the
+/// loudest value from the last few seconds. Both are derived here from the
+/// raw samples so the terminal meter reads the way the OBS one does.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MeterReading {
+    /// Magnitude (0-1) reported by the most recent `InputVolumeMeters` event.
+    pub level: f32,
+    /// Peak program level (0-1) — `level` with fall-off decay applied. This
+    /// is what the meter's main bar draws.
+    pub peak_program: f32,
+    /// Loudest level (0-1) seen in the last few seconds, drawn as a marker
+    /// above the bar so a brief clip stays visible after it has passed.
+    pub peak_hold: f32,
+}
+
+/// Fraction of the bar that survives one meter sample once the input goes
+/// quiet. Multiplying by a constant is a constant drop in decibels, so 0.88
+/// is roughly -1.1 dB per sample; at the ~20 samples a second obs-websocket
+/// sends that lands near OBS's own 23.5 dB/s default fall-off.
+const PEAK_PROGRAM_FALLOFF: f32 = 0.88;
+/// The same idea for the peak marker, tuned so a peak takes ~20 seconds to
+/// slide from the top of the meter to its floor — OBS's peak hold window.
+const PEAK_HOLD_FALLOFF: f32 = 0.985;
+
 /// The four cumulative frame counters `GetStats` reports.
 ///
 /// OBS counts these since *it* launched, not since the stream started, so
@@ -139,8 +167,9 @@ pub struct TuiModel {
     pub audio_cursor: usize,
     pub profile_cursor: usize,
     pub collection_cursor: usize,
-    /// Latest RMS magnitude (0-1) per input name, updated from InputVolumeMeters events.
-    pub meter_levels: HashMap<String, f32>,
+    /// Meter state per input name, folded from `InputVolumeMeters` events by
+    /// [`record_meter_level`](TuiModel::record_meter_level).
+    pub meters: HashMap<String, MeterReading>,
     /// Active color theme, chosen via config or the settings view.
     pub theme: Theme,
     /// Whether rich Unicode icons/emoji are enabled. When false, widgets use
@@ -202,7 +231,7 @@ impl Default for TuiModel {
             audio_cursor: 0,
             profile_cursor: 0,
             collection_cursor: 0,
-            meter_levels: HashMap::new(),
+            meters: HashMap::new(),
             theme: Theme::default_theme(),
             show_icons: true,
             advanced_ui: true,
@@ -609,6 +638,28 @@ impl TuiModel {
 
     pub fn focused_audio(&self) -> Option<&AudioState> {
         self.audio_inputs().get(self.audio_cursor)
+    }
+
+    /// Fold one `InputVolumeMeters` sample into the stored reading for
+    /// `name`. The bar and the peak marker only ever jump *up* instantly;
+    /// on the way down they decay, which is what stops the meter from
+    /// flickering between full and empty on every sample.
+    pub fn record_meter_level(&mut self, name: String, level: f32) {
+        let level = if level.is_finite() {
+            level.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let reading = self.meters.entry(name).or_default();
+        reading.level = level;
+        reading.peak_program = level.max(reading.peak_program * PEAK_PROGRAM_FALLOFF);
+        reading.peak_hold = level.max(reading.peak_hold * PEAK_HOLD_FALLOFF);
+    }
+
+    /// Meter state for `name`, or `None` when OBS has not reported a level
+    /// for that input yet.
+    pub fn meter(&self, name: &str) -> Option<MeterReading> {
+        self.meters.get(name).copied()
     }
 
     /// Compute the new volume percentage for the focused audio input after
