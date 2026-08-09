@@ -501,19 +501,8 @@ pre.block .n { color: var(--info); }
 
 figure { margin: 0; }
 
-/* Screenshot grid: the full dashboard leads at full width — shrunk into a
-   third of the page it reads as noise rather than as a dashboard — with the
-   two detail views paired beneath it. */
-.shots {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: clamp(1.2rem, 3vw, 2rem);
-}
-.shots > .lead { grid-column: 1 / -1; }
-@media (max-width: 720px) {
-  .shots { grid-template-columns: minmax(0, 1fr); }
-}
-
+/* Window chrome for the recording — a title bar over a rounded frame, so the
+   player reads as a terminal rather than as an embedded video. */
 .shot {
   border: 1px solid var(--rule);
   border-radius: 10px;
@@ -527,11 +516,8 @@ figure { margin: 0; }
   font-family: var(--mono); font-size: .7rem; color: var(--muted);
 }
 .shot .bar i { width: .5rem; height: .5rem; border-radius: 50%; display: block; }
-.shot img { display: block; width: 100%; height: auto; }
-/* The asciinema player reuses the .shot window chrome so the recording sits
-   in the same frame as the screenshots. The cast is 110x58, so its natural
-   aspect is close to square — cap the width to keep the section from running
-   past a screenful on a wide display. */
+/* The cast is 112x57, so its natural aspect is close to square — cap the
+   width to keep the section from running past a screenful on a wide display. */
 .cast { max-width: 860px; margin: 0 auto; }
 
 figcaption { font-size: .88rem; color: var(--ink-dim); margin-top: .7rem; }
@@ -689,12 +675,17 @@ footer a:hover { color: var(--accent); }
                 <div class="line"> <span class="dim">03 ◇</span> Gameplay</div>
                 <div class="line"> <span class="dim">04 ◇</span> BRB</div>
               </div>
+              <!-- One bordered vertical channel strip per input, the way the
+                   real audio matrix draws them: a fader beside a meter that
+                   fills from the bottom up, ruled with its own dB scale. -->
               <div class="tp">
-                <span class="tp-title"><span class="n">🔊 Audio Matrix</span> <span class="c">02</span> <span class="h">[a] m mute</span></span>
-                <div class="line"> 🔊 Mic/Aux <span class="ok">82%</span></div>
-                <div class="line dim">   <span class="ok" id="meterA">▰▰▰▰▰▰▰▱▱▱</span> -8.4 dB</div>
-                <div class="line"> 🔇 Desktop <span class="crit">muted</span></div>
-                <div class="line dim">   <span id="meterB">▱▱▱▱▱▱▱▱▱▱</span> -60.0 dB</div>
+                <span class="tp-title"><span class="n">🔊 Audio Matrix</span> <span class="c">02</span> <span class="h">[a] ↑↓ gain</span></span>
+                <div class="line"><span class="acc">┏━━ Mic ━━┓</span> <span class="dim">╭ Desktop ╮</span></div>
+                <div class="line"><span class="acc">┃</span><span class="dim">│</span> <span id="mA0" class="dim">░░░</span> <span class="dim">  0</span><span class="acc">┃</span> <span class="dim">││ ░░░   0│</span></div>
+                <div class="line"><span class="acc">┃</span><span class="info">█</span> <span id="mA1" class="dim">░░░</span> <span class="dim">-20</span><span class="acc">┃</span> <span class="dim">││ ░░░ -20│</span></div>
+                <div class="line"><span class="acc">┃</span><span class="dim">│</span> <span id="mA2" class="ok">███</span> <span class="dim">-40</span><span class="acc">┃</span> <span class="dim">││ ░░░ -40│</span></div>
+                <div class="line"><span class="acc">┃</span><span class="dim">│</span> <span id="mA3" class="ok">███</span> <span class="dim">-60</span><span class="acc">┃</span> <span class="dim">│</span><span class="info">█</span><span class="dim"> ░░░ -60│</span></div>
+                <div class="line"><span class="acc">┗━ </span><span class="ok">●</span><span class="acc"> 82% ━┛</span> <span class="dim">╰ </span><span class="crit">○</span><span class="dim"> muted ╯</span></div>
               </div>
             </div>
 
@@ -758,9 +749,9 @@ footer a:hover { color: var(--accent); }
       <!-- ═══ demo recording ══════════════════════════════════════════ -->
       <section id="demo">
         <div class="section-lede">
-          <p class="eyebrow">52 seconds, unedited</p>
+          <p class="eyebrow">65 seconds, unedited</p>
           <h2>Watch it drive OBS</h2>
-          <p>A real terminal session, recorded with asciinema — not a video. Text, so it stays sharp at any size, and you can scrub, pause and copy straight out of it.</p>
+          <p>A real terminal session, recorded with asciinema — not a video and not a screenshot. It is text, so it stays sharp at any size, and you can scrub, pause and copy straight out of it.</p>
         </div>
 
         <figure class="cast">
@@ -768,7 +759,7 @@ footer a:hover { color: var(--accent); }
             <div class="bar"><i style="background:#E06C5F"></i><i style="background:#E0B44C"></i><i style="background:#87B37B"></i><span style="margin-left:.4rem">asciinema rec — obsctl tui</span></div>
             <div id="castPlayer"></div>
           </div>
-          <figcaption><b>A live session</b> — scenes and the audio matrix, the <code>:</code> command palette, the <code>&lt;Space&gt;</code> which-key menu, and the theme picker.</figcaption>
+          <figcaption><b>A live session</b> — the splash, the dashboard, scene switching, the audio matrix with its vertical channel strips, the <code>:</code> command palette, the <code>&lt;Space&gt;</code> which-key menu, and the theme picker previewing across the whole UI.</figcaption>
         </figure>
 
         <p class="note" style="text-align:center">
@@ -782,33 +773,10 @@ footer a:hover { color: var(--accent); }
           <p class="eyebrow">The TUI</p>
           <h2>A dashboard you operate, not one you read</h2>
           <p>Every panel is reachable with one key. Scene switches, mutes and volume nudges apply optimistically and are debounced on the way out, so the interface never stalls waiting on OBS to answer.</p>
+          <p class="note">Every binding below is exercised in <a href="#demo">the recording above</a> — that is the whole tour, and it is the only showcase here on purpose. A screenshot goes stale the moment a panel is redrawn; a cast is re-recorded from the code it documents.</p>
         </div>
 
-        <div class="shots">
-          <figure class="lead">
-            <div class="shot">
-              <div class="bar"><i style="background:#E06C5F"></i><i style="background:#E0B44C"></i><i style="background:#87B37B"></i><span style="margin-left:.4rem">obsctl tui</span></div>
-              <img src="images/tui_screenshot.png" alt="The obsctl dashboard: header with daemon and OBS connection status, a live telemetry bar, scenes and audio matrix panels side by side, profiles and collections beneath, and a log stream." loading="lazy" width="1712" height="982">
-            </div>
-            <figcaption><b>The dashboard</b> — scenes, an audio matrix with dB meters, profiles and collections, over a live daemon log feed.</figcaption>
-          </figure>
-          <figure>
-            <div class="shot">
-              <div class="bar"><i style="background:#E06C5F"></i><i style="background:#E0B44C"></i><i style="background:#87B37B"></i><span style="margin-left:.4rem">command palette</span></div>
-              <img src="images/tui_screenshot_cmd_pallete.png" alt="The command palette open at the bottom of the dashboard with a slash command typed and its result echoed back." loading="lazy" width="1712" height="982">
-            </div>
-            <figcaption><b>Command palette</b> — press <code>:</code> and run any action inline; results stream back with a typewriter reveal.</figcaption>
-          </figure>
-          <figure>
-            <div class="shot">
-              <div class="bar"><i style="background:#E06C5F"></i><i style="background:#E0B44C"></i><i style="background:#87B37B"></i><span style="margin-left:.4rem">appearance lab</span></div>
-              <img src="images/tui_screenshot_theme.png" alt="The theme picker listing built-in palettes with color swatches beside a live preview pane." loading="lazy" width="1712" height="982">
-            </div>
-            <figcaption><b>Appearance Lab</b> — arrow through 29 palettes with a live whole-UI preview; <code>Enter</code> persists, <code>Esc</code> reverts.</figcaption>
-          </figure>
-        </div>
-
-        <div class="panel" style="margin-top:2.6rem">
+        <div class="panel">
           <span class="panel-title"><span class="t-icon">⌨</span><span class="t-label">Key Bindings</span><span class="t-count">12</span><span class="t-hint">vim motions, AstroNvim leader, and a mouse</span></span>
           <div class="scroller">
             <table>
@@ -818,7 +786,7 @@ footer a:hover { color: var(--accent); }
                 <tr><td><code>gg</code> <code>G</code> · <code>Ctrl-D</code> <code>Ctrl-U</code></td><td class="desc">Jump to the ends of a list, or move half a pane</td></tr>
                 <tr><td><code>Ctrl</code>+<code>hjkl</code> · <code>⇥</code></td><td class="desc">Move focus across the 2×2 panel grid, or cycle through it</td></tr>
                 <tr><td><code>↵</code></td><td class="desc">Switch to the focused scene, profile or collection</td></tr>
-                <tr><td><code>m</code> · <code>h</code> <code>l</code></td><td class="desc">Mute the focused input, or nudge its volume by ±5%</td></tr>
+                <tr><td><code>m</code> · <code>h</code> <code>l</code> · <code>k</code> <code>j</code></td><td class="desc">In the audio matrix: mute the focused input, move between channel strips, or ride the selected fader by ±5%</td></tr>
                 <tr><td><code>:</code></td><td class="desc">Open the command palette</td></tr>
                 <tr><td><code>&lt;Space&gt;</code></td><td class="desc">Leader — a which-key popup lists what comes next</td></tr>
                 <tr><td>click · wheel · right-click</td><td class="desc">Select and activate rows, scroll a panel or the logs, cancel</td></tr>
@@ -1127,8 +1095,19 @@ footer a:hover { color: var(--accent); }
       ` <span class="${verdicts[0]}">${verdicts[1]}</span> <span class="dim">${verdicts[2]}</span>`;
     $("#stBar").className = verdicts[0];
 
+    // The audio matrix draws vertical channel strips, so its meter fills from
+    // the bottom row upwards. Row 0 is the top of the scale (0 dBFS, close to
+    // clipping) and row 3 the floor, which is why the zone colors run from
+    // red down to green rather than the other way round.
     const level = Math.round(rand(stressed ? 4 : 6, stressed ? 10 : 8));
-    $("#meterA").textContent = "▰".repeat(level) + "▱".repeat(10 - level);
+    const lit = Math.round(level * 0.4);
+    const zones = ["crit", "warn", "ok", "ok"];
+    for (let row = 0; row < zones.length; row++) {
+      const cell = $("#mA" + row);
+      const on = row >= zones.length - lit;
+      cell.textContent = on ? "███" : "░░░";
+      cell.className = on ? zones[row] : "dim";
+    }
   }
 
   tick();
@@ -1151,7 +1130,7 @@ footer a:hover { color: var(--accent); }
   const mount = document.getElementById("castPlayer");
   if (!mount || !window.AsciinemaPlayer) return;
   AsciinemaPlayer.create("demo/obsctl-rs.cast", mount, {
-    // The recording is 110x58; fit to the column width and let the height
+    // The recording is 112x57; fit to the column width and let the height
     // follow, so no part of the dashboard is cropped.
     fit: "width",
     // Park on a frame where the dashboard is already up, so the section

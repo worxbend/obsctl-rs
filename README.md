@@ -37,8 +37,10 @@ A single Rust binary: a daemon that owns the OBS connection, a live TUI, and a s
 ## 🖥️ The TUI
 
 <div align="center">
-<img src="docs/images/tui_screenshot.png" alt="obsctl TUI dashboard: header, live telemetry, scenes, audio matrix with dB meters, profiles, collections, and a live log stream" width="900">
+<img src="docs/demo/obsctl-rs.gif" alt="An obsctl TUI session: the splash, the dashboard, scene switching, the audio matrix with its vertical channel strips, the command palette, the which-key menu, and live theme previews" width="772">
 </div>
+
+<div align="center"><sub>An unedited session — the same recording <a href="https://worxbend.github.io/obsctl-rs/#demo">plays as sharp, scrubbable text on the website</a>.</sub></div>
 
 A real-time, themeable command center with animated gradient chrome, rounded/heavy focus borders, Unicode symbols, and responsive layouts. The advanced interface is enabled by default; set `ui.advanced_ui: false` for a simplified ASCII-safe TTY mode, or `ui.show_icons: false` to hide icons while keeping the other advanced elements.
 
@@ -57,32 +59,17 @@ A real-time, themeable command center with animated gradient chrome, rounded/hea
 - 🌈 **Settings view** (`F2`, `Ctrl-T`, `<Space>ut`, or `:themes`) — btop-style theme picker with live full-UI preview; `Enter` persists, `Esc` reverts
 - 🎇 A responsive animated splash (~2s, skippable by any keypress) with a large block logo, slither and liquid-wave loaders, a shimmering `Preparing...` braille band, a multi-color progress rail, and staged boot messages
 
-<table>
-<tr>
-<td width="50%" align="center">
-<img src="docs/images/tui_screenshot_cmd_pallete.png" alt="Command palette open with a slash command typed and its result echoed" width="100%"><br>
-<sub><b>Command palette</b> — run any action inline; results stream back with a typewriter animation.</sub>
-</td>
-<td width="50%" align="center">
-<img src="docs/images/tui_screenshot_theme.png" alt="Appearance Lab theme picker showing 29 palettes with swatches and a live preview pane" width="100%"><br>
-<sub><b>Appearance Lab</b> — 29 palettes with swatches and a live whole-UI preview.</sub>
-</td>
-</tr>
-</table>
-
 ### 📽️ Watch a session
 
-<div align="center">
-<img src="docs/demo/obsctl-rs.gif" alt="An obsctl TUI session: the splash, then the dashboard, scene switching, the command palette, the which-key menu, and live theme previews" width="827">
-</div>
+The recording at the top of this section is the whole tour: the splash, the dashboard,
+scene switching, the audio matrix, the `:` command palette, the `<Space>` which-key menu,
+and live theme previews.
 
-An unedited session: the splash, then scene switching, the audio matrix, the `:` command
-palette, the `<Space>` which-key menu, and live theme previews.
-
-The GIF above is generated from an [asciinema](https://asciinema.org) cast, which is the
-better way to watch it — the text stays sharp at any size and you can pause and copy
-straight out of it. It **[plays in the browser on the
-website](https://worxbend.github.io/obsctl-rs/#demo)**, or locally from a clone:
+It is a GIF here only because GitHub cannot play a terminal recording inline. The source
+is an [asciinema](https://asciinema.org) cast, which is the better way to watch it — the
+text stays sharp at any size and you can pause and copy straight out of it. It **[plays in
+the browser on the website](https://worxbend.github.io/obsctl-rs/#demo)**, or locally from
+a clone:
 
 ```sh
 asciinema play docs/demo/obsctl-rs.cast
