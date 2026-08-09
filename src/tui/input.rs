@@ -211,6 +211,26 @@ fn main_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('p') => Some(TuiAction::FocusProfiles),
         KeyCode::Char('c') => Some(TuiAction::FocusCollections),
 
+        // Audio-panel actions. The audio matrix draws its inputs as vertical
+        // channel strips laid out left to right, so its axes are the other
+        // way round from the list panels: sideways moves between inputs and
+        // up/down rides the fader, matching the direction of the fader on
+        // screen. These have to be matched before the generic motions below,
+        // which would otherwise claim the same keys.
+        KeyCode::Char('m') if model.focus == FocusPanel::Audio => Some(TuiAction::ToggleMute),
+        KeyCode::Left | KeyCode::Char('h') if model.focus == FocusPanel::Audio => {
+            Some(TuiAction::NavUp(count))
+        }
+        KeyCode::Right | KeyCode::Char('l') if model.focus == FocusPanel::Audio => {
+            Some(TuiAction::NavDown(count))
+        }
+        KeyCode::Up | KeyCode::Char('k') if model.focus == FocusPanel::Audio => {
+            Some(TuiAction::VolumeUp(count))
+        }
+        KeyCode::Down | KeyCode::Char('j') if model.focus == FocusPanel::Audio => {
+            Some(TuiAction::VolumeDown(count))
+        }
+
         // Motions
         KeyCode::Up | KeyCode::Char('k') => Some(TuiAction::NavUp(count)),
         KeyCode::Down | KeyCode::Char('j') => Some(TuiAction::NavDown(count)),
@@ -219,15 +239,6 @@ fn main_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Home => Some(TuiAction::NavTop),
         KeyCode::End => Some(TuiAction::NavBottom),
         KeyCode::Enter => Some(TuiAction::Activate),
-
-        // Audio-panel actions
-        KeyCode::Char('m') if model.focus == FocusPanel::Audio => Some(TuiAction::ToggleMute),
-        KeyCode::Left | KeyCode::Char('h') if model.focus == FocusPanel::Audio => {
-            Some(TuiAction::VolumeDown(count))
-        }
-        KeyCode::Right | KeyCode::Char('l') if model.focus == FocusPanel::Audio => {
-            Some(TuiAction::VolumeUp(count))
-        }
 
         _ => None,
     }
@@ -303,11 +314,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_pane_navigation_takes_priority_over_audio_volume_keys() {
+    fn ctrl_pane_navigation_takes_priority_over_audio_panel_keys() {
         let mut model = TuiModel::default();
         model.focus = FocusPanel::Audio;
         assert_eq!(
             handle_key(&model, key(KeyCode::Left)),
+            Some(TuiAction::NavUp(1))
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Down)),
             Some(TuiAction::VolumeDown(1))
         );
         assert_eq!(
@@ -318,6 +333,38 @@ mod tests {
             handle_key(&model, ctrl_key(KeyCode::Char('h'))),
             Some(TuiAction::FocusPaneLeft)
         );
+        assert_eq!(
+            handle_key(&model, ctrl_key(KeyCode::Char('j'))),
+            Some(TuiAction::FocusPaneDown)
+        );
+    }
+
+    #[test]
+    fn the_audio_matrix_swaps_the_navigation_axes() {
+        let mut model = TuiModel::default();
+        model.focus = FocusPanel::Audio;
+        // Sideways moves between channel strips...
+        for k in [KeyCode::Left, KeyCode::Char('h')] {
+            assert_eq!(handle_key(&model, key(k)), Some(TuiAction::NavUp(1)));
+        }
+        for k in [KeyCode::Right, KeyCode::Char('l')] {
+            assert_eq!(handle_key(&model, key(k)), Some(TuiAction::NavDown(1)));
+        }
+        // ...and up/down rides the fader of the selected one.
+        for k in [KeyCode::Up, KeyCode::Char('k')] {
+            assert_eq!(handle_key(&model, key(k)), Some(TuiAction::VolumeUp(1)));
+        }
+        for k in [KeyCode::Down, KeyCode::Char('j')] {
+            assert_eq!(handle_key(&model, key(k)), Some(TuiAction::VolumeDown(1)));
+        }
+
+        // Every other panel keeps up/down as its list motion.
+        model.focus = FocusPanel::Scenes;
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Down)),
+            Some(TuiAction::NavDown(1))
+        );
+        assert_eq!(handle_key(&model, key(KeyCode::Left)), None);
     }
 
     #[test]
@@ -431,8 +478,11 @@ mod tests {
         let mut model = TuiModel::default();
         model.focus = FocusPanel::Audio;
         model.pending_count = Some(3);
-        assert_eq!(handle_key(&model, ch('l')), Some(TuiAction::VolumeUp(3)));
-        assert_eq!(handle_key(&model, ch('h')), Some(TuiAction::VolumeDown(3)));
+        assert_eq!(handle_key(&model, ch('k')), Some(TuiAction::VolumeUp(3)));
+        assert_eq!(handle_key(&model, ch('j')), Some(TuiAction::VolumeDown(3)));
+        // The count scales the sideways strip motion just the same.
+        assert_eq!(handle_key(&model, ch('l')), Some(TuiAction::NavDown(3)));
+        assert_eq!(handle_key(&model, ch('h')), Some(TuiAction::NavUp(3)));
     }
 
     #[test]

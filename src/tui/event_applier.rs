@@ -37,7 +37,7 @@ pub fn apply_server_message(model: &mut TuiModel, msg: ServerMessage) -> bool {
                 match serde_json::from_value::<ObsEventPayload>(data) {
                     Ok(ObsEventPayload::InputVolumeMeters { inputs }) => {
                         for entry in inputs {
-                            model.meter_levels.insert(entry.name, entry.level);
+                            model.record_meter_level(entry.name, entry.level);
                         }
                         return false; // let the ticker redraw at normal rate
                     }
