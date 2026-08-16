@@ -27,9 +27,13 @@ use crate::obs::{
     validation::extract_resource_names,
 };
 use crate::server::{client_registry::ClientRegistry, state_store::StateStore};
-use crate::support::validation::{
-    MAX_TARGET_TOKEN_LENGTH, parse_u8_in_range, trim_and_validate_token_with_max_len,
-};
+use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
+
+/// What happened when a freshly dumped config was read back in.
+struct DumpReloadOutcome {
+    warnings: Vec<String>,
+    error: Option<String>,
+}
 
 pub struct CommandExecutorConfig {
     pub state: StateStore,
@@ -284,112 +288,119 @@ impl CommandExecutor {
     }
 
     async fn cmd_toggle_stream(&self) -> crate::domain::result::Result<Value> {
-        let client = self.require_obs().await?;
-        let result = client.request(requests::toggle_stream()).await?;
-        let active = match result.get("outputActive").and_then(|v| v.as_bool()) {
-            Some(active) => Some(active),
-            None => {
-                warn!("Malformed toggle_stream response: missing or invalid outputActive");
-                None
-            }
-        };
-        let state = match active {
-            Some(true) => "started",
-            Some(false) => "stopped",
-            None => "toggled",
-        };
-        info!("Streaming {state}");
-        Ok(json!({ "message": format!("streaming {state}") }))
+        self.toggle_output(requests::toggle_stream(), "streaming")
+            .await
     }
 
     async fn cmd_toggle_record(&self) -> crate::domain::result::Result<Value> {
-        let client = self.require_obs().await?;
-        let result = client.request(requests::toggle_record()).await?;
-        let active = match result.get("outputActive").and_then(|v| v.as_bool()) {
-            Some(active) => Some(active),
-            None => {
-                warn!("Malformed toggle_record response: missing or invalid outputActive");
-                None
-            }
-        };
-        let state = match active {
-            Some(true) => "started",
-            Some(false) => "stopped",
-            None => "toggled",
-        };
-        info!("Recording {state}");
-        Ok(json!({ "message": format!("recording {state}") }))
+        self.toggle_output(requests::toggle_record(), "recording")
+            .await
     }
 
-    async fn cmd_dump_config(&self) -> crate::domain::result::Result<Value> {
+    /// Flip a stream or recording output and report where it ended up.
+    ///
+    /// OBS answers a toggle with the resulting `outputActive`, so the reply can
+    /// say "started"/"stopped" rather than the ambiguous "toggled" — which is
+    /// kept only for the case where OBS sends a reply we cannot read.
+    async fn toggle_output(
+        &self,
+        request: crate::obs::protocol::RequestData,
+        output: &str,
+    ) -> crate::domain::result::Result<Value> {
         let client = self.require_obs().await?;
+        let result = client.request(request).await?;
 
-        // Fetch scene and input lists from OBS.
-        let scene_resp = client
-            .request(crate::obs::requests::get_scene_list())
-            .await?;
-        let scenes = extract_resource_names(&scene_resp, "scenes", "sceneName")?;
-
-        let input_resp = client
-            .request(crate::obs::requests::get_input_list())
-            .await?;
-        let inputs = extract_resource_names(&input_resp, "inputs", "inputName")?;
-
-        let obs_resources = dump_config_mod::ObsResources { scenes, inputs };
-
-        let config_guard = self.config.lock().await;
-        let current_config = config_guard.clone();
-        drop(config_guard);
-
-        let merged = dump_config_mod::merge(&current_config, &obs_resources)?;
-        let mut reload_warnings = Vec::new();
-        let mut reload_failed = false;
-        let mut reload_error = None;
-
-        if let Some(path) = &self.config_path {
-            let backup = dump_config_mod::write_backup(path)?;
-            crate::config::writer::write_atomic(&merged, path)?;
-            info!(
-                "Config dumped to {} (backup: {})",
-                path.display(),
-                backup.display()
-            );
-
-            // Reload config in memory.
-            match crate::config::loader::load_with_warnings(path) {
-                Ok((new_cfg, warnings)) => {
-                    self.log_config_warnings(&warnings, "after dump reload");
-                    reload_warnings = Self::warning_messages(&warnings);
-
-                    let mut guard = self.config.lock().await;
-                    *guard = new_cfg;
-                }
-                Err(e) => {
-                    warn!("Failed to reload config after dump: {e}");
-                    self.publish_log(
-                        LogLevel::Warn,
-                        format!("Config reload after dump failed: {e}"),
-                    );
-                    reload_error = Some(e.to_string());
-                    reload_failed = true;
-                }
+        let state = match result.get("outputActive").and_then(|v| v.as_bool()) {
+            Some(true) => "started",
+            Some(false) => "stopped",
+            None => {
+                warn!("Malformed toggle response for {output}: missing or invalid outputActive");
+                "toggled"
             }
-        } else {
-            return Err(crate::domain::errors::ObsctlError::ConfigInvalid(
-                "dump-config requires a config file path".to_string(),
-            ));
-        }
+        };
+
+        info!("{output} {state}");
+        Ok(json!({ "message": format!("{output} {state}") }))
+    }
+
+    /// Write a config file that lists every scene and input OBS currently has,
+    /// merged over whatever the user already configured, then reload it.
+    async fn cmd_dump_config(&self) -> crate::domain::result::Result<Value> {
+        // Checked first: without a path there is nowhere to write, and the OBS
+        // round-trips below would be work thrown away.
+        let path = self.config_path.as_ref().ok_or_else(|| {
+            ObsctlError::ConfigInvalid("dump-config requires a config file path".to_string())
+        })?;
+
+        let obs_resources = self.fetch_dumpable_obs_resources().await?;
+
+        let current_config = self.config.lock().await.clone();
+        let merged = dump_config_mod::merge(&current_config, &obs_resources)?;
+
+        let backup = dump_config_mod::write_backup(path)?;
+        crate::config::writer::write_atomic(&merged, path)?;
+        info!(
+            "Config dumped to {} (backup: {})",
+            path.display(),
+            backup.display()
+        );
+
+        let reload = self.reload_after_dump(path).await;
 
         let scene_count = merged.scenes.len();
         let input_count = merged.audio.inputs.len();
         Ok(json!({
             "message": format!("config dumped: {scene_count} scenes, {input_count} inputs"),
-            "reload_failed": reload_failed,
-            "warnings": reload_warnings,
-            "reload_error": reload_error,
+            "reload_failed": reload.error.is_some(),
+            "warnings": reload.warnings,
+            "reload_error": reload.error,
             "scenes": scene_count,
             "inputs": input_count,
         }))
+    }
+
+    /// The scene and input names a dumped config should list.
+    async fn fetch_dumpable_obs_resources(
+        &self,
+    ) -> crate::domain::result::Result<dump_config_mod::ObsResources> {
+        let client = self.require_obs().await?;
+
+        let scene_resp = client.request(requests::get_scene_list()).await?;
+        let scenes = extract_resource_names(&scene_resp, "scenes", "sceneName")?;
+
+        let input_resp = client.request(requests::get_input_list()).await?;
+        let inputs = extract_resource_names(&input_resp, "inputs", "inputName")?;
+
+        Ok(dump_config_mod::ObsResources { scenes, inputs })
+    }
+
+    /// Load the file `cmd_dump_config` just wrote back into memory.
+    ///
+    /// A failure here is reported, not returned: the dump itself succeeded and
+    /// the file is on disk, so the caller gets `reload_error` in its result
+    /// rather than an error that would imply nothing was written.
+    async fn reload_after_dump(&self, path: &std::path::Path) -> DumpReloadOutcome {
+        match crate::config::loader::load_with_warnings(path) {
+            Ok((new_config, warnings)) => {
+                self.log_config_warnings(&warnings, "after dump reload");
+                *self.config.lock().await = new_config;
+                DumpReloadOutcome {
+                    warnings: Self::warning_messages(&warnings),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                warn!("Failed to reload config after dump: {e}");
+                self.publish_log(
+                    LogLevel::Warn,
+                    format!("Config reload after dump failed: {e}"),
+                );
+                DumpReloadOutcome {
+                    warnings: Vec::new(),
+                    error: Some(e.to_string()),
+                }
+            }
+        }
     }
 
     async fn cmd_validate_config(&self) -> crate::domain::result::Result<Value> {
@@ -530,16 +541,14 @@ fn required_u8_percentage(args: &Value, key: &str) -> crate::domain::result::Res
         .get(key)
         .ok_or_else(|| ObsctlError::CommandParseError(format!("missing {key}")))?;
 
-    let percent = if let Some(percent) = value.as_u64() {
-        parse_u8_in_range(&percent.to_string(), key, 0, 100)
-            .map_err(|error| ObsctlError::CommandParseError(error.to_string()))?
-    } else {
-        return Err(ObsctlError::CommandParseError(format!(
+    // `as_u64` rejects negatives and non-integers (including 50.5) for us, so
+    // the only remaining question is the 0-100 range.
+    match value.as_u64() {
+        Some(percent) if percent <= 100 => Ok(percent as u8),
+        _ => Err(ObsctlError::CommandParseError(format!(
             "{key} must be an integer 0-100"
-        )));
-    };
-
-    Ok(percent)
+        ))),
+    }
 }
 
 fn validate_object_args(args: &Value, command: &str, required: &[&str]) -> Result<()> {
@@ -582,6 +591,9 @@ fn validate_empty_payload(args: &Value, command: &str) -> Result<()> {
     )))
 }
 
+/// Alias/shortcut lookup tables for the two kinds of target a command can
+/// name. `resolve` works off `AliasEntry`, so both snapshot lists are projected
+/// into it the same way.
 fn scene_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry> {
     snap.scenes
         .iter()

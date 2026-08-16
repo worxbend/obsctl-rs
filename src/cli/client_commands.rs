@@ -52,7 +52,18 @@ impl ProxyCtx {
         client.send_command(payload).await
     }
 
+    /// Send `payload` and print the daemon's reply as a plain message.
     fn run_proxy(&self, payload: CommandPayload) -> i32 {
+        self.run_proxy_with(payload, print_result_message)
+    }
+
+    /// Send `payload`, then hand a successful result to `render`.
+    ///
+    /// Everything except the rendering — command-name validation, building the
+    /// runtime, the `--json` envelope, protocol errors, and the exit-code
+    /// mapping — is identical for every proxy command, so only the one varying
+    /// step is a parameter.
+    fn run_proxy_with(&self, payload: CommandPayload, render: fn(&serde_json::Value)) -> i32 {
         if let Err(error) = validate_command_name(&payload.name) {
             return self.emit_local_error(&ObsctlError::CommandParseError(format!(
                 "invalid command name: {error}"
@@ -72,11 +83,7 @@ impl ProxyCtx {
                     if self.json_output {
                         print_json_success(result);
                     } else if let Some(v) = result {
-                        if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
-                            println!("{msg}");
-                        } else {
-                            println!("{v}");
-                        }
+                        render(&v);
                     }
                     0
                 } else {
@@ -86,7 +93,6 @@ impl ProxyCtx {
             Ok(ServerMessage::Event { .. }) => {
                 self.emit_protocol_error(&t!("cli.client.unexpected_event"))
             }
-            Err(e @ ObsctlError::ServerUnavailable { .. }) => self.emit_local_error(&e),
             Err(e) => self.emit_local_error(&e),
         }
     }
@@ -96,29 +102,10 @@ impl ProxyCtx {
     }
 
     pub fn status(&self) -> i32 {
-        let rt = match Self::rt() {
-            Ok(rt) => rt,
-            Err(e) => return self.emit_local_error(&e),
-        };
-        match rt.block_on(self.send(CommandPayload::simple(ServerCommand::GetSnapshot))) {
-            Ok(ServerMessage::Response {
-                ok, result, error, ..
-            }) => {
-                if ok {
-                    if self.json_output {
-                        print_json_success(result);
-                    } else if let Some(v) = result {
-                        print_status_json(&v);
-                    }
-                    0
-                } else {
-                    self.emit_response_error(error.as_ref())
-                }
-            }
-            Ok(_) => self.emit_protocol_error(&t!("cli.client.unexpected_event")),
-            Err(e @ ObsctlError::ServerUnavailable { .. }) => self.emit_local_error(&e),
-            Err(e) => self.emit_local_error(&e),
-        }
+        self.run_proxy_with(
+            CommandPayload::simple(ServerCommand::GetSnapshot),
+            print_status_json,
+        )
     }
 
     pub fn server_status(&self) -> i32 {
@@ -256,6 +243,15 @@ impl ProxyCtx {
             Err(error) => return self.emit_local_error(&error),
         };
         self.run_proxy(CommandPayload::with_target(command, &target))
+    }
+}
+
+/// The default rendering for a successful proxy command: the daemon's
+/// human-readable `message`, or the raw result when a command has none.
+fn print_result_message(result: &serde_json::Value) {
+    match result.get("message").and_then(|m| m.as_str()) {
+        Some(message) => println!("{message}"),
+        None => println!("{result}"),
     }
 }
 
