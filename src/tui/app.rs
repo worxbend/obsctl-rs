@@ -362,6 +362,11 @@ async fn handle_action(
     outcome
 }
 
+/// Run one action: the ones that talk to the daemon are handled here, and
+/// everything else — cursor movement, focus, palette editing, theme preview —
+/// is a pure model update delegated to [`apply_local_action`].
+///
+/// Returns `(should_quit, status_line)`.
 async fn run_action(
     action: TuiAction,
     model: &mut TuiModel,
@@ -369,59 +374,6 @@ async fn run_action(
 ) -> (bool, Option<String>) {
     let socket_path = ctx.socket_path;
     match action {
-        TuiAction::Quit => (true, None),
-        TuiAction::SetPending(pending) => {
-            model.pending = pending;
-            (false, None)
-        }
-        TuiAction::ClearPending => {
-            model.clear_pending();
-            // Esc / right-click also snaps the log pane back to the live tail.
-            model.log_scroll = 0;
-            (false, None)
-        }
-        TuiAction::PushCount(digit) => {
-            model.push_count(digit);
-            (false, None)
-        }
-        TuiAction::OpenPalette { prefix, seed } => {
-            model.command_palette.active = true;
-            model.command_palette.input.clear();
-            model
-                .command_palette
-                .input
-                .push(prefix.unwrap_or(model.palette_prefix));
-            model.command_palette.input.push_str(seed);
-            refresh_completions(model);
-            (false, None)
-        }
-        TuiAction::ClosePalette => {
-            model.command_palette.active = false;
-            model.command_palette.input.clear();
-            model.command_palette.completions.clear();
-            model.command_palette.completion_idx = None;
-            (false, None)
-        }
-        TuiAction::PaletteChar(c) => {
-            model.command_palette.input.push(c);
-            refresh_completions(model);
-            (false, None)
-        }
-        TuiAction::PaletteBackspace => {
-            model.command_palette.input.pop();
-            refresh_completions(model);
-            (false, None)
-        }
-        TuiAction::PaletteClear => {
-            model.command_palette.clear_to_prefix();
-            refresh_completions(model);
-            (false, None)
-        }
-        TuiAction::PaletteDeleteWord => {
-            model.command_palette.delete_word();
-            refresh_completions(model);
-            (false, None)
-        }
         TuiAction::PaletteSubmit => {
             let input = model.command_palette.input.clone();
             model.command_palette.active = false;
@@ -470,75 +422,6 @@ async fn run_action(
             false,
             Some(send_simple(socket_path, ServerCommand::ReconnectObs).await),
         ),
-        TuiAction::FocusScenes => {
-            model.focus = FocusPanel::Scenes;
-            (false, None)
-        }
-        TuiAction::FocusAudio => {
-            model.focus = FocusPanel::Audio;
-            (false, None)
-        }
-        TuiAction::FocusProfiles => {
-            model.focus = FocusPanel::Profiles;
-            (false, None)
-        }
-        TuiAction::FocusCollections => {
-            model.focus = FocusPanel::Collections;
-            (false, None)
-        }
-        TuiAction::FocusPaneLeft => {
-            model.focus = model.focus.left();
-            (false, None)
-        }
-        TuiAction::FocusPaneRight => {
-            model.focus = model.focus.right();
-            (false, None)
-        }
-        TuiAction::FocusPaneUp => {
-            model.focus = model.focus.up();
-            (false, None)
-        }
-        TuiAction::FocusPaneDown => {
-            model.focus = model.focus.down();
-            (false, None)
-        }
-        TuiAction::FocusPaneNext => {
-            model.focus = model.focus.next();
-            (false, None)
-        }
-        TuiAction::FocusPanePrev => {
-            model.focus = model.focus.prev();
-            (false, None)
-        }
-        TuiAction::NavUp(rows) => {
-            model.move_up_by(rows);
-            (false, None)
-        }
-        TuiAction::NavDown(rows) => {
-            model.move_down_by(rows);
-            (false, None)
-        }
-        TuiAction::NavTop => {
-            model.move_to_top();
-            (false, None)
-        }
-        TuiAction::NavBottom => {
-            model.move_to_bottom();
-            (false, None)
-        }
-        TuiAction::NavHalfPageUp => {
-            model.move_up_by(half_page(ctx.hits, model.focus));
-            (false, None)
-        }
-        TuiAction::NavHalfPageDown => {
-            model.move_down_by(half_page(ctx.hits, model.focus));
-            (false, None)
-        }
-        TuiAction::SelectIndex(panel, index) => {
-            model.focus = panel;
-            model.set_panel_cursor(panel, index);
-            (false, None)
-        }
         TuiAction::ActivateIndex(panel, index) => {
             model.focus = panel;
             model.set_panel_cursor(panel, index);
@@ -554,23 +437,6 @@ async fn run_action(
                 (false, None)
             }
         }
-        TuiAction::VolumeDown(steps) => (
-            false,
-            adjust_focused_volume(model, ctx.vol_tx, -volume_delta(steps)),
-        ),
-        TuiAction::VolumeUp(steps) => (
-            false,
-            adjust_focused_volume(model, ctx.vol_tx, volume_delta(steps)),
-        ),
-        TuiAction::LogScrollUp(lines) => {
-            let visible = usize::from(ctx.hits.logs.height.saturating_sub(2));
-            model.scroll_logs_up(lines, visible);
-            (false, None)
-        }
-        TuiAction::LogScrollDown(lines) => {
-            model.scroll_logs_down(lines);
-            (false, None)
-        }
         TuiAction::RetryConnect => match TuiEventSession::connect(socket_path).await {
             Ok(session) => {
                 model.connected_to_daemon = true;
@@ -579,55 +445,6 @@ async fn run_action(
             }
             Err(e) => (false, Some(format!("Retry failed: {e}"))),
         },
-        TuiAction::CompleteNext => {
-            model.command_palette.cycle_next();
-            (false, None)
-        }
-        TuiAction::CompletePrev => {
-            model.command_palette.cycle_prev();
-            (false, None)
-        }
-        TuiAction::ToggleIcons => {
-            model.show_icons = !model.show_icons;
-            let state = if model.show_icons { "on" } else { "off" };
-            (false, Some(format!("icons {state}")))
-        }
-        TuiAction::ToggleAdvancedUi => {
-            model.advanced_ui = !model.advanced_ui;
-            let state = if model.advanced_ui { "on" } else { "off" };
-            (false, Some(format!("advanced UI {state}")))
-        }
-        TuiAction::OpenSettings => {
-            open_settings(model);
-            (false, None)
-        }
-        TuiAction::CloseSettings => {
-            if let Some(original) = model.theme_preview_origin.take() {
-                model.theme = original;
-            }
-            model.view = View::Main;
-            (false, None)
-        }
-        TuiAction::SettingsNavUp(rows) => {
-            preview_theme(model, model.settings_cursor.saturating_sub(rows));
-            (false, None)
-        }
-        TuiAction::SettingsNavDown(rows) => {
-            preview_theme(model, model.settings_cursor.saturating_add(rows));
-            (false, None)
-        }
-        TuiAction::SettingsNavTop => {
-            preview_theme(model, 0);
-            (false, None)
-        }
-        TuiAction::SettingsNavBottom => {
-            preview_theme(model, usize::MAX);
-            (false, None)
-        }
-        TuiAction::SettingsSelect(index) => {
-            preview_theme(model, index);
-            (false, None)
-        }
         TuiAction::ApplySettingsTheme => {
             let chosen = theme::ALL[model.settings_cursor];
             model.theme = chosen;
@@ -636,6 +453,227 @@ async fn run_action(
             let result = persist_theme_choice(ctx.config_path, chosen.id).await;
             (false, Some(result))
         }
+        local => apply_local_action(local, model, ctx)
+            .expect("every action not handled above is a local action"),
+    }
+}
+
+/// Every action that only rearranges the model. Synchronous and socket-free,
+/// so it can be exercised without a running daemon.
+///
+/// Returns `None` for the actions [`run_action`] handles itself. The match is
+/// deliberately exhaustive rather than ending in a wildcard: a newly added
+/// `TuiAction` then fails to compile here instead of panicking at runtime the
+/// first time a user presses the key.
+fn apply_local_action(
+    action: TuiAction,
+    model: &mut TuiModel,
+    ctx: &ActionCtx<'_>,
+) -> Option<(bool, Option<String>)> {
+    match action {
+        TuiAction::Quit => Some((true, None)),
+        TuiAction::SetPending(pending) => {
+            model.pending = pending;
+            Some((false, None))
+        }
+        TuiAction::ClearPending => {
+            model.clear_pending();
+            // Esc / right-click also snaps the log pane back to the live tail.
+            model.log_scroll = 0;
+            Some((false, None))
+        }
+        TuiAction::PushCount(digit) => {
+            model.push_count(digit);
+            Some((false, None))
+        }
+        TuiAction::OpenPalette { prefix, seed } => {
+            model.command_palette.active = true;
+            model.command_palette.input.clear();
+            model
+                .command_palette
+                .input
+                .push(prefix.unwrap_or(model.palette_prefix));
+            model.command_palette.input.push_str(seed);
+            refresh_completions(model);
+            Some((false, None))
+        }
+        TuiAction::ClosePalette => {
+            model.command_palette.active = false;
+            model.command_palette.input.clear();
+            model.command_palette.completions.clear();
+            model.command_palette.completion_idx = None;
+            Some((false, None))
+        }
+        TuiAction::PaletteChar(c) => {
+            model.command_palette.input.push(c);
+            refresh_completions(model);
+            Some((false, None))
+        }
+        TuiAction::PaletteBackspace => {
+            model.command_palette.input.pop();
+            refresh_completions(model);
+            Some((false, None))
+        }
+        TuiAction::PaletteClear => {
+            model.command_palette.clear_to_prefix();
+            refresh_completions(model);
+            Some((false, None))
+        }
+        TuiAction::PaletteDeleteWord => {
+            model.command_palette.delete_word();
+            refresh_completions(model);
+            Some((false, None))
+        }
+        TuiAction::FocusScenes => {
+            model.focus = FocusPanel::Scenes;
+            Some((false, None))
+        }
+        TuiAction::FocusAudio => {
+            model.focus = FocusPanel::Audio;
+            Some((false, None))
+        }
+        TuiAction::FocusProfiles => {
+            model.focus = FocusPanel::Profiles;
+            Some((false, None))
+        }
+        TuiAction::FocusCollections => {
+            model.focus = FocusPanel::Collections;
+            Some((false, None))
+        }
+        TuiAction::FocusPaneLeft => {
+            model.focus = model.focus.left();
+            Some((false, None))
+        }
+        TuiAction::FocusPaneRight => {
+            model.focus = model.focus.right();
+            Some((false, None))
+        }
+        TuiAction::FocusPaneUp => {
+            model.focus = model.focus.up();
+            Some((false, None))
+        }
+        TuiAction::FocusPaneDown => {
+            model.focus = model.focus.down();
+            Some((false, None))
+        }
+        TuiAction::FocusPaneNext => {
+            model.focus = model.focus.next();
+            Some((false, None))
+        }
+        TuiAction::FocusPanePrev => {
+            model.focus = model.focus.prev();
+            Some((false, None))
+        }
+        TuiAction::NavUp(rows) => {
+            model.move_up_by(rows);
+            Some((false, None))
+        }
+        TuiAction::NavDown(rows) => {
+            model.move_down_by(rows);
+            Some((false, None))
+        }
+        TuiAction::NavTop => {
+            model.move_to_top();
+            Some((false, None))
+        }
+        TuiAction::NavBottom => {
+            model.move_to_bottom();
+            Some((false, None))
+        }
+        TuiAction::NavHalfPageUp => {
+            model.move_up_by(half_page(ctx.hits, model.focus));
+            Some((false, None))
+        }
+        TuiAction::NavHalfPageDown => {
+            model.move_down_by(half_page(ctx.hits, model.focus));
+            Some((false, None))
+        }
+        TuiAction::SelectIndex(panel, index) => {
+            model.focus = panel;
+            model.set_panel_cursor(panel, index);
+            Some((false, None))
+        }
+        TuiAction::VolumeDown(steps) => Some((
+            false,
+            adjust_focused_volume(model, ctx.vol_tx, -volume_delta(steps)),
+        )),
+        TuiAction::VolumeUp(steps) => Some((
+            false,
+            adjust_focused_volume(model, ctx.vol_tx, volume_delta(steps)),
+        )),
+        TuiAction::LogScrollUp(lines) => {
+            let visible = usize::from(ctx.hits.logs.height.saturating_sub(2));
+            model.scroll_logs_up(lines, visible);
+            Some((false, None))
+        }
+        TuiAction::LogScrollDown(lines) => {
+            model.scroll_logs_down(lines);
+            Some((false, None))
+        }
+        TuiAction::CompleteNext => {
+            model.command_palette.cycle_next();
+            Some((false, None))
+        }
+        TuiAction::CompletePrev => {
+            model.command_palette.cycle_prev();
+            Some((false, None))
+        }
+        TuiAction::ToggleIcons => {
+            model.show_icons = !model.show_icons;
+            let state = if model.show_icons { "on" } else { "off" };
+            Some((false, Some(format!("icons {state}"))))
+        }
+        TuiAction::ToggleAdvancedUi => {
+            model.advanced_ui = !model.advanced_ui;
+            let state = if model.advanced_ui { "on" } else { "off" };
+            Some((false, Some(format!("advanced UI {state}"))))
+        }
+        TuiAction::OpenSettings => {
+            open_settings(model);
+            Some((false, None))
+        }
+        TuiAction::CloseSettings => {
+            if let Some(original) = model.theme_preview_origin.take() {
+                model.theme = original;
+            }
+            model.view = View::Main;
+            Some((false, None))
+        }
+        TuiAction::SettingsNavUp(rows) => {
+            preview_theme(model, model.settings_cursor.saturating_sub(rows));
+            Some((false, None))
+        }
+        TuiAction::SettingsNavDown(rows) => {
+            preview_theme(model, model.settings_cursor.saturating_add(rows));
+            Some((false, None))
+        }
+        TuiAction::SettingsNavTop => {
+            preview_theme(model, 0);
+            Some((false, None))
+        }
+        TuiAction::SettingsNavBottom => {
+            preview_theme(model, usize::MAX);
+            Some((false, None))
+        }
+        TuiAction::SettingsSelect(index) => {
+            preview_theme(model, index);
+            Some((false, None))
+        }
+        // Handled by `run_action`, which awaits the daemon.
+        TuiAction::PaletteSubmit
+        | TuiAction::ReloadConfig
+        | TuiAction::DumpConfig
+        | TuiAction::ValidateConfig
+        | TuiAction::ObsStatus
+        | TuiAction::ServerStatus
+        | TuiAction::ToggleStream
+        | TuiAction::ToggleRecord
+        | TuiAction::ReconnectObs
+        | TuiAction::ActivateIndex(..)
+        | TuiAction::Activate
+        | TuiAction::ToggleMute
+        | TuiAction::RetryConnect
+        | TuiAction::ApplySettingsTheme => None,
     }
 }
 
@@ -1012,9 +1050,86 @@ fn summarize_json(value: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_TARGET_TOKEN_LENGTH, command_to_payload, open_settings, persist_theme_choice};
+    use super::{
+        ActionCtx, Hitboxes, MAX_TARGET_TOKEN_LENGTH, apply_local_action, command_to_payload,
+        open_settings, persist_theme_choice,
+    };
     use crate::domain::command::Command;
-    use crate::tui::model::{TuiModel, View};
+    use crate::tui::input::TuiAction;
+    use crate::tui::model::{FocusPanel, TuiModel, View};
+    use std::path::Path;
+    use tokio::sync::mpsc;
+
+    /// Local actions never touch the socket, so the paths and channels here
+    /// exist only to satisfy the struct — nothing in this test reads them.
+    struct LocalCtx {
+        ipc_tx: mpsc::Sender<std::result::Result<crate::ipc::protocol::ServerMessage, String>>,
+        vol_tx: mpsc::UnboundedSender<(String, u8)>,
+        hits: Hitboxes,
+    }
+
+    impl LocalCtx {
+        fn new() -> Self {
+            Self {
+                ipc_tx: mpsc::channel(1).0,
+                vol_tx: mpsc::unbounded_channel().0,
+                hits: Hitboxes::default(),
+            }
+        }
+
+        fn ctx(&self) -> ActionCtx<'_> {
+            ActionCtx {
+                socket_path: Path::new("/nonexistent/obsctl.sock"),
+                config_path: None,
+                ipc_tx: &self.ipc_tx,
+                vol_tx: &self.vol_tx,
+                hits: &self.hits,
+            }
+        }
+    }
+
+    #[test]
+    fn local_actions_update_the_model_without_a_daemon() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+        let mut model = TuiModel::default();
+
+        assert_eq!(
+            apply_local_action(TuiAction::FocusAudio, &mut model, &ctx),
+            Some((false, None))
+        );
+        assert_eq!(model.focus, FocusPanel::Audio);
+
+        assert_eq!(
+            apply_local_action(TuiAction::Quit, &mut model, &ctx),
+            Some((true, None))
+        );
+
+        let (quit, status) =
+            apply_local_action(TuiAction::ToggleIcons, &mut model, &ctx).expect("local action");
+        assert!(!quit);
+        assert_eq!(status.as_deref(), Some("icons off"));
+        assert!(!model.show_icons);
+    }
+
+    /// The daemon-bound actions must report themselves as not-local, so
+    /// `run_action` keeps handling them rather than silently dropping them.
+    #[test]
+    fn daemon_actions_are_not_local() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+        let mut model = TuiModel::default();
+
+        for action in [
+            TuiAction::ToggleStream,
+            TuiAction::ToggleRecord,
+            TuiAction::ReloadConfig,
+            TuiAction::Activate,
+            TuiAction::RetryConnect,
+        ] {
+            assert_eq!(apply_local_action(action, &mut model, &ctx), None);
+        }
+    }
 
     #[test]
     fn open_settings_enters_settings_view_and_remembers_current_theme() {
