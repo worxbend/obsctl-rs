@@ -193,9 +193,10 @@ impl CommandExecutor {
         let known = snap.profiles.iter().any(|p| p == &target);
         drop(snap);
         if !known {
-            return Err(ObsctlError::ObsRequestFailed(format!(
-                "unknown profile: {target}"
-            )));
+            // Not `ObsRequestFailed`: no request was made, the name is simply
+            // not one OBS knows. Scenes and audio inputs report the same class
+            // of mistake through their own not-found codes.
+            return Err(ObsctlError::ProfileNotFound(target));
         }
 
         client
@@ -213,9 +214,7 @@ impl CommandExecutor {
         let known = snap.scene_collections.iter().any(|c| c == &target);
         drop(snap);
         if !known {
-            return Err(ObsctlError::ObsRequestFailed(format!(
-                "unknown scene collection: {target}"
-            )));
+            return Err(ObsctlError::SceneCollectionNotFound(target));
         }
 
         client

@@ -304,6 +304,8 @@ pub enum PublicErrorCode {
     ObsRequestFailed,
     SceneNotFound,
     AudioInputNotFound,
+    ProfileNotFound,
+    SceneCollectionNotFound,
     AliasAmbiguous,
     CommandParseError,
     IpcProtocolError,
@@ -312,7 +314,7 @@ pub enum PublicErrorCode {
 }
 
 impl PublicErrorCode {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::ConfigInvalid,
         Self::ServerUnavailable,
         Self::ObsUnavailable,
@@ -320,6 +322,8 @@ impl PublicErrorCode {
         Self::ObsRequestFailed,
         Self::SceneNotFound,
         Self::AudioInputNotFound,
+        Self::ProfileNotFound,
+        Self::SceneCollectionNotFound,
         Self::AliasAmbiguous,
         Self::CommandParseError,
         Self::IpcProtocolError,
@@ -336,6 +340,8 @@ impl PublicErrorCode {
             Self::ObsRequestFailed => "OBS_REQUEST_FAILED",
             Self::SceneNotFound => "SCENE_NOT_FOUND",
             Self::AudioInputNotFound => "AUDIO_INPUT_NOT_FOUND",
+            Self::ProfileNotFound => "PROFILE_NOT_FOUND",
+            Self::SceneCollectionNotFound => "SCENE_COLLECTION_NOT_FOUND",
             Self::AliasAmbiguous => "ALIAS_AMBIGUOUS",
             Self::CommandParseError => "COMMAND_PARSE_ERROR",
             Self::IpcProtocolError => "IPC_PROTOCOL_ERROR",
@@ -358,7 +364,9 @@ impl PublicErrorCode {
             | Self::RequestTimeout
             | Self::ObsRequestFailed
             | Self::SceneNotFound
-            | Self::AudioInputNotFound => 4,
+            | Self::AudioInputNotFound
+            | Self::ProfileNotFound
+            | Self::SceneCollectionNotFound => 4,
             Self::CommandParseError => 5,
             Self::IpcProtocolError => 6,
             Self::AliasAmbiguous | Self::ShutdownDisabled | Self::ServerError => 1,
@@ -374,6 +382,8 @@ impl PublicErrorCode {
             "OBS_REQUEST_FAILED" => Some(Self::ObsRequestFailed),
             "SCENE_NOT_FOUND" => Some(Self::SceneNotFound),
             "AUDIO_INPUT_NOT_FOUND" => Some(Self::AudioInputNotFound),
+            "PROFILE_NOT_FOUND" => Some(Self::ProfileNotFound),
+            "SCENE_COLLECTION_NOT_FOUND" => Some(Self::SceneCollectionNotFound),
             "ALIAS_AMBIGUOUS" => Some(Self::AliasAmbiguous),
             "COMMAND_PARSE_ERROR" => Some(Self::CommandParseError),
             "IPC_PROTOCOL_ERROR" => Some(Self::IpcProtocolError),
@@ -402,6 +412,8 @@ impl PublicErrorCode {
             ObsctlError::ObsRequestFailed(_) => Self::ObsRequestFailed,
             ObsctlError::SceneNotFound(_) => Self::SceneNotFound,
             ObsctlError::AudioInputNotFound(_) => Self::AudioInputNotFound,
+            ObsctlError::ProfileNotFound(_) => Self::ProfileNotFound,
+            ObsctlError::SceneCollectionNotFound(_) => Self::SceneCollectionNotFound,
             ObsctlError::AliasAmbiguous(_) => Self::AliasAmbiguous,
             ObsctlError::CommandParseError(_) => Self::CommandParseError,
             ObsctlError::ShutdownDisabled => Self::ShutdownDisabled,
@@ -490,6 +502,8 @@ mod tests {
             ObsctlError::ObsRequestFailed(_) => {}
             ObsctlError::SceneNotFound(_) => {}
             ObsctlError::AudioInputNotFound(_) => {}
+            ObsctlError::ProfileNotFound(_) => {}
+            ObsctlError::SceneCollectionNotFound(_) => {}
             ObsctlError::AliasAmbiguous(_) => {}
             ObsctlError::CommandParseError(_) => {}
             ObsctlError::ShutdownDisabled => {}
@@ -592,7 +606,7 @@ mod tests {
 
     #[test]
     fn error_response_wire_json_covers_all_public_error_codes() {
-        assert_eq!(PublicErrorCode::ALL.len(), 12);
+        assert_eq!(PublicErrorCode::ALL.len(), 14);
 
         for code in PublicErrorCode::ALL {
             let message = ServerMessage::Response {
@@ -1020,6 +1034,8 @@ mod tests {
             PublicErrorCode::ObsRequestFailed,
             PublicErrorCode::SceneNotFound,
             PublicErrorCode::AudioInputNotFound,
+            PublicErrorCode::ProfileNotFound,
+            PublicErrorCode::SceneCollectionNotFound,
             PublicErrorCode::AliasAmbiguous,
             PublicErrorCode::CommandParseError,
             PublicErrorCode::IpcProtocolError,
@@ -1036,6 +1052,12 @@ mod tests {
             (
                 PublicErrorCode::AudioInputNotFound,
                 "AUDIO_INPUT_NOT_FOUND",
+                4,
+            ),
+            (PublicErrorCode::ProfileNotFound, "PROFILE_NOT_FOUND", 4),
+            (
+                PublicErrorCode::SceneCollectionNotFound,
+                "SCENE_COLLECTION_NOT_FOUND",
                 4,
             ),
             (PublicErrorCode::AliasAmbiguous, "ALIAS_AMBIGUOUS", 1),
@@ -1064,7 +1086,7 @@ mod tests {
 
     #[test]
     fn obsctl_errors_map_to_public_ipc_error_codes() {
-        const OBSCTL_ERROR_VARIANT_COUNT: usize = 18;
+        const OBSCTL_ERROR_VARIANT_COUNT: usize = 20;
 
         let cases = [
             (
@@ -1111,6 +1133,14 @@ mod tests {
             (
                 ObsctlError::AudioInputNotFound("mic".to_string()),
                 PublicErrorCode::AudioInputNotFound,
+            ),
+            (
+                ObsctlError::ProfileNotFound("Streaming".to_string()),
+                PublicErrorCode::ProfileNotFound,
+            ),
+            (
+                ObsctlError::SceneCollectionNotFound("Podcast".to_string()),
+                PublicErrorCode::SceneCollectionNotFound,
             ),
             (
                 ObsctlError::AliasAmbiguous("cam".to_string()),

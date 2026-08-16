@@ -41,6 +41,12 @@ pub enum ObsctlError {
     #[error("audio input not found: {0}")]
     AudioInputNotFound(String),
 
+    #[error("profile not found: {0}")]
+    ProfileNotFound(String),
+
+    #[error("scene collection not found: {0}")]
+    SceneCollectionNotFound(String),
+
     #[error("ambiguous target: {0}")]
     AliasAmbiguous(String),
 
@@ -78,7 +84,9 @@ impl ObsctlError {
             | Self::ObsRequestFailed(_)
             | Self::RequestTimeout
             | Self::SceneNotFound(_)
-            | Self::AudioInputNotFound(_) => 4,
+            | Self::AudioInputNotFound(_)
+            | Self::ProfileNotFound(_)
+            | Self::SceneCollectionNotFound(_) => 4,
             Self::CommandParseError(_) => 5,
             Self::IpcProtocolError(_) => 6,
             Self::AliasAmbiguous(_)
@@ -111,6 +119,8 @@ mod tests {
             ObsctlError::ObsRequestFailed(_) => {}
             ObsctlError::SceneNotFound(_) => {}
             ObsctlError::AudioInputNotFound(_) => {}
+            ObsctlError::ProfileNotFound(_) => {}
+            ObsctlError::SceneCollectionNotFound(_) => {}
             ObsctlError::AliasAmbiguous(_) => {}
             ObsctlError::CommandParseError(_) => {}
             ObsctlError::ShutdownDisabled => {}
@@ -122,7 +132,7 @@ mod tests {
 
     #[test]
     fn all_obsctl_error_variants_have_intended_local_exit_codes() {
-        const OBSCTL_ERROR_VARIANT_COUNT: usize = 18;
+        const OBSCTL_ERROR_VARIANT_COUNT: usize = 20;
 
         let cases = [
             (
@@ -179,6 +189,16 @@ mod tests {
                 ObsctlError::AudioInputNotFound("mic".to_string()),
                 4,
                 "audio input not found",
+            ),
+            (
+                ObsctlError::ProfileNotFound("Streaming".to_string()),
+                4,
+                "profile not found",
+            ),
+            (
+                ObsctlError::SceneCollectionNotFound("Podcast".to_string()),
+                4,
+                "scene collection not found",
             ),
             (
                 ObsctlError::AliasAmbiguous("cam".to_string()),
@@ -251,6 +271,11 @@ mod tests {
         assert_eq!(ObsctlError::SceneNotFound("x".to_string()).exit_code(), 4);
         assert_eq!(
             ObsctlError::AudioInputNotFound("x".to_string()).exit_code(),
+            4
+        );
+        assert_eq!(ObsctlError::ProfileNotFound("x".to_string()).exit_code(), 4);
+        assert_eq!(
+            ObsctlError::SceneCollectionNotFound("x".to_string()).exit_code(),
             4
         );
     }

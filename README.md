@@ -566,6 +566,8 @@ Public error codes are stable and map to CLI exit codes as follows:
 | `OBS_REQUEST_FAILED` | OBS returned a request failure or the daemon could not process the OBS response | 4 |
 | `SCENE_NOT_FOUND` | Scene target could not be resolved | 4 |
 | `AUDIO_INPUT_NOT_FOUND` | Audio input target could not be resolved | 4 |
+| `PROFILE_NOT_FOUND` | Profile target is not one OBS knows | 4 |
+| `SCENE_COLLECTION_NOT_FOUND` | Scene collection target is not one OBS knows | 4 |
 | `ALIAS_AMBIGUOUS` | Target matched more than one configured alias/name | 1 |
 | `COMMAND_PARSE_ERROR` | Command name or arguments are invalid | 5 |
 | `IPC_PROTOCOL_ERROR` | IPC frame or response shape is invalid for the protocol | 6 |
