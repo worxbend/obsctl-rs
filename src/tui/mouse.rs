@@ -353,7 +353,7 @@ mod tests {
     fn clicking_the_already_selected_row_of_the_focused_panel_activates_it() {
         let mut model = model_with_scenes(5);
         model.focus = FocusPanel::Scenes;
-        model.scene_cursor = 2;
+        model.set_panel_cursor(FocusPanel::Scenes, 2);
         let action = handle_mouse(&model, &hits_main(), click(5, 3));
         assert_eq!(
             action,
@@ -421,7 +421,7 @@ mod tests {
         // 40 scenes in a 10-row viewport with the cursor at the end: the
         // list has scrolled, so the top visible row is not item 0.
         let mut model = model_with_scenes(40);
-        model.scene_cursor = 39;
+        model.set_panel_cursor(FocusPanel::Scenes, 39);
         let action = handle_mouse(&model, &hits_main(), click(5, 1));
         assert_eq!(action, Some(TuiAction::SelectIndex(FocusPanel::Scenes, 30)));
     }
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn the_wheel_moves_the_cursor_within_the_hovered_panel() {
         let mut model = model_with_scenes(20);
-        model.scene_cursor = 10;
+        model.set_panel_cursor(FocusPanel::Scenes, 10);
         assert_eq!(
             handle_mouse(
                 &model,

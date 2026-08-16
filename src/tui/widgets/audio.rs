@@ -199,7 +199,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let strips = strip_layout(inner, inputs.len(), model.audio_cursor);
+    let strips = strip_layout(inner, inputs.len(), model.panel_cursor(FocusPanel::Audio));
     if strips.is_empty() {
         // Either there is nothing to show or the pane is too narrow for even
         // one strip; say so rather than leaving an unexplained empty box.
@@ -232,7 +232,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             rect,
             &inputs[index],
             plan,
-            index == model.audio_cursor,
+            index == model.panel_cursor(FocusPanel::Audio),
             model,
         );
     }

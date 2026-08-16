@@ -22,6 +22,8 @@ pub enum FocusPanel {
 }
 
 impl FocusPanel {
+    pub const ALL: [Self; 4] = [Self::Scenes, Self::Audio, Self::Profiles, Self::Collections];
+
     /// Panels are arranged as a 2x2 grid:
     /// ```text
     /// Scenes    Audio
@@ -165,10 +167,12 @@ pub struct TuiModel {
     pub last_result_tick: u64,
     pub connected_to_daemon: bool,
     pub focus: FocusPanel,
-    pub scene_cursor: usize,
-    pub audio_cursor: usize,
-    pub profile_cursor: usize,
-    pub collection_cursor: usize,
+    /// Where the cursor sits in each panel's list. Read and written through
+    /// [`panel_cursor`](TuiModel::panel_cursor) and
+    /// [`set_panel_cursor`](TuiModel::set_panel_cursor), which clamp to the
+    /// list length — the raw indices are private so no caller can park a
+    /// cursor past the end of a list.
+    cursors: PanelCursors,
     /// Meter state per input name, folded from `InputVolumeMeters` events by
     /// [`record_meter_level`](TuiModel::record_meter_level).
     pub meters: HashMap<String, MeterReading>,
@@ -218,6 +222,25 @@ pub struct TuiModel {
     cached_visible_scenes: Vec<SceneState>,
 }
 
+/// One cursor per panel, addressed by [`FocusPanel`] so the four indices
+/// cannot drift apart or be matched against the wrong panel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PanelCursors([usize; 4]);
+
+impl std::ops::Index<FocusPanel> for PanelCursors {
+    type Output = usize;
+
+    fn index(&self, panel: FocusPanel) -> &usize {
+        &self.0[panel as usize]
+    }
+}
+
+impl std::ops::IndexMut<FocusPanel> for PanelCursors {
+    fn index_mut(&mut self, panel: FocusPanel) -> &mut usize {
+        &mut self.0[panel as usize]
+    }
+}
+
 impl Default for TuiModel {
     fn default() -> Self {
         Self {
@@ -229,10 +252,7 @@ impl Default for TuiModel {
             last_result_tick: 0,
             connected_to_daemon: false,
             focus: FocusPanel::default(),
-            scene_cursor: 0,
-            audio_cursor: 0,
-            profile_cursor: 0,
-            collection_cursor: 0,
+            cursors: PanelCursors::default(),
             meters: HashMap::new(),
             theme: Theme::default_theme(),
             show_icons: true,
@@ -558,24 +578,13 @@ impl TuiModel {
 
     /// Cursor position within `panel`'s list.
     pub fn panel_cursor(&self, panel: FocusPanel) -> usize {
-        match panel {
-            FocusPanel::Scenes => self.scene_cursor,
-            FocusPanel::Audio => self.audio_cursor,
-            FocusPanel::Profiles => self.profile_cursor,
-            FocusPanel::Collections => self.collection_cursor,
-        }
+        self.cursors[panel]
     }
 
     /// Move `panel`'s cursor to `index`, clamped to the list.
     pub fn set_panel_cursor(&mut self, panel: FocusPanel, index: usize) {
         let max = self.panel_len(panel).saturating_sub(1);
-        let index = index.min(max);
-        match panel {
-            FocusPanel::Scenes => self.scene_cursor = index,
-            FocusPanel::Audio => self.audio_cursor = index,
-            FocusPanel::Profiles => self.profile_cursor = index,
-            FocusPanel::Collections => self.collection_cursor = index,
-        }
+        self.cursors[panel] = index.min(max);
     }
 
     pub fn move_up(&mut self) {
@@ -611,22 +620,19 @@ impl TuiModel {
             .as_ref()
             .map(|s| s.scenes.iter().filter(|sc| !sc.hidden).cloned().collect())
             .unwrap_or_default();
-        let scene_max = self.cached_visible_scenes.len().saturating_sub(1);
-        self.scene_cursor = self.scene_cursor.min(scene_max);
-        let audio_max = self.audio_inputs().len().saturating_sub(1);
-        self.audio_cursor = self.audio_cursor.min(audio_max);
-        let profile_max = self.profiles().len().saturating_sub(1);
-        self.profile_cursor = self.profile_cursor.min(profile_max);
-        let collection_max = self.scene_collections().len().saturating_sub(1);
-        self.collection_cursor = self.collection_cursor.min(collection_max);
+        for panel in FocusPanel::ALL {
+            let max = self.panel_len(panel).saturating_sub(1);
+            self.cursors[panel] = self.cursors[panel].min(max);
+        }
     }
 
     pub fn focused_scene(&self) -> Option<&SceneState> {
-        self.cached_visible_scenes.get(self.scene_cursor)
+        self.cached_visible_scenes
+            .get(self.cursors[FocusPanel::Scenes])
     }
 
     pub fn focused_audio(&self) -> Option<&AudioState> {
-        self.audio_inputs().get(self.audio_cursor)
+        self.audio_inputs().get(self.cursors[FocusPanel::Audio])
     }
 
     /// Fold one `InputVolumeMeters` sample into the stored reading for
@@ -677,12 +683,14 @@ impl TuiModel {
     }
 
     pub fn focused_profile(&self) -> Option<&str> {
-        self.profiles().get(self.profile_cursor).map(String::as_str)
+        self.profiles()
+            .get(self.cursors[FocusPanel::Profiles])
+            .map(String::as_str)
     }
 
     pub fn focused_scene_collection(&self) -> Option<&str> {
         self.scene_collections()
-            .get(self.collection_cursor)
+            .get(self.cursors[FocusPanel::Collections])
             .map(String::as_str)
     }
 }
@@ -743,17 +751,25 @@ mod tests {
             model_with_scenes((0..10).map(|i| make_scene(&i.to_string(), false)).collect());
 
         model.move_down_by(4);
-        assert_eq!(model.scene_cursor, 4);
+        assert_eq!(model.panel_cursor(FocusPanel::Scenes), 4);
         model.move_down_by(100);
-        assert_eq!(model.scene_cursor, 9, "clamped to the last row");
+        assert_eq!(
+            model.panel_cursor(FocusPanel::Scenes),
+            9,
+            "clamped to the last row"
+        );
         model.move_up_by(3);
-        assert_eq!(model.scene_cursor, 6);
+        assert_eq!(model.panel_cursor(FocusPanel::Scenes), 6);
         model.move_to_top();
-        assert_eq!(model.scene_cursor, 0);
+        assert_eq!(model.panel_cursor(FocusPanel::Scenes), 0);
         model.move_to_bottom();
-        assert_eq!(model.scene_cursor, 9);
+        assert_eq!(model.panel_cursor(FocusPanel::Scenes), 9);
         model.move_up_by(100);
-        assert_eq!(model.scene_cursor, 0, "saturates rather than wrapping");
+        assert_eq!(
+            model.panel_cursor(FocusPanel::Scenes),
+            0,
+            "saturates rather than wrapping"
+        );
     }
 
     #[test]
@@ -761,7 +777,7 @@ mod tests {
         let mut model = TuiModel::default();
         model.move_to_bottom();
         model.move_down_by(5);
-        assert_eq!(model.scene_cursor, 0);
+        assert_eq!(model.panel_cursor(FocusPanel::Scenes), 0);
     }
 
     #[test]
@@ -893,7 +909,7 @@ mod tests {
             Some(("Mic".to_string(), 100))
         );
 
-        model.audio_cursor = 1;
+        model.set_panel_cursor(FocusPanel::Audio, 1);
         assert_eq!(
             model.adjusted_focused_volume(-5),
             Some(("Desktop".to_string(), 0))
@@ -967,11 +983,11 @@ mod tests {
             make_scene("hidden_a", true),
             make_scene("hidden_b", true),
         ]);
-        model.scene_cursor = 5; // set an out-of-bounds cursor before clamping
+        model.set_panel_cursor(FocusPanel::Scenes, 5); // set an out-of-bounds cursor before clamping
         model.clamp_cursors();
 
         assert_eq!(model.scenes().len(), 0);
-        assert_eq!(model.scene_cursor, 0);
+        assert_eq!(model.panel_cursor(FocusPanel::Scenes), 0);
     }
 
     #[test]

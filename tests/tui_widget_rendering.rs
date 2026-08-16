@@ -584,7 +584,7 @@ fn selected_scene_is_tinted_rather_than_painted_over() {
 
     let mut model = model_connected();
     model.focus = FocusPanel::Scenes;
-    model.scene_cursor = 0;
+    model.set_panel_cursor(FocusPanel::Scenes, 0);
     let theme = model.theme;
 
     let mut t = term(60, 10);
@@ -630,7 +630,7 @@ fn unfocused_scene_selection_is_fainter_than_focused() {
     use obsctl_rs::tui::model::FocusPanel;
 
     let mut model = model_connected();
-    model.scene_cursor = 0;
+    model.set_panel_cursor(FocusPanel::Scenes, 0);
 
     let render_bg = |model: &TuiModel| {
         let mut t = term(60, 10);
@@ -872,7 +872,9 @@ fn audio_scrolls_sideways_to_keep_the_selected_strip_visible() {
     assert!(first.contains("In0") && first.contains("In2"));
     assert!(!first.contains("In5"), "In5 is off the right edge yet");
 
-    model.audio_cursor = 5;
+    use obsctl_rs::tui::model::FocusPanel;
+
+    model.set_panel_cursor(FocusPanel::Audio, 5);
     let scrolled = audio_lines(&model, 40, 12).join("\n");
     assert!(
         scrolled.contains("In5"),

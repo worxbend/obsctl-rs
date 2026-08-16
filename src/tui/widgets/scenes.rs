@@ -98,7 +98,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 
     let mut state = ListState::default();
     if !model.scenes().is_empty() {
-        state.select(Some(model.scene_cursor));
+        state.select(Some(model.panel_cursor(FocusPanel::Scenes)));
     }
 
     f.render_stateful_widget(

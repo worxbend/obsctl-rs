@@ -60,7 +60,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 
     let mut state = ListState::default();
     if !model.profiles().is_empty() {
-        state.select(Some(model.profile_cursor));
+        state.select(Some(model.panel_cursor(FocusPanel::Profiles)));
     }
 
     f.render_stateful_widget(
