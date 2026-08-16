@@ -445,10 +445,8 @@ impl CommandExecutor {
             *guard = new_config;
         }
 
+        // `merge_config` broadcasts the updated alias/shortcut metadata itself.
         self.state.merge_config(&scenes, &audio_inputs).await;
-        // Re-broadcast current snapshot so subscribers see updated alias/shortcut metadata.
-        let snapshot = self.state.read().await;
-        self.state.replace(snapshot).await;
 
         info!("Config reloaded from {}", path.display());
         Ok(warnings)

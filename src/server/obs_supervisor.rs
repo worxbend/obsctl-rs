@@ -19,7 +19,9 @@ use crate::obs::{
 };
 use crate::runtime::reconnect_policy::ReconnectPolicy;
 use crate::server::obs_event_adapter::normalize_obs_event;
-use crate::server::state_store::{StateStore, build_snapshot};
+use crate::server::state_store::{
+    Listing, ObsVersions, OutputFlags, RawInputState, RefreshedObsState, StateStore,
+};
 use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
 pub struct ObsSupervisor {
@@ -322,7 +324,7 @@ async fn fetch_and_publish_snapshot_from(
         "inputName",
     )?;
 
-    let mut inputs: Vec<(String, Option<bool>, Option<f64>)> = Vec::new();
+    let mut inputs: Vec<RawInputState> = Vec::new();
     for name in &input_names {
         let muted = client
             .request(requests::get_input_mute(name)?)
@@ -358,7 +360,11 @@ async fn fetch_and_publish_snapshot_from(
                 },
             );
 
-        inputs.push((name.clone(), muted, vol));
+        inputs.push(RawInputState {
+            name: name.clone(),
+            muted,
+            volume_mul: vol,
+        });
     }
 
     let streaming = client
@@ -425,35 +431,32 @@ async fn fetch_and_publish_snapshot_from(
             (Vec::new(), String::new())
         });
 
-    let cfg = config.lock().await;
-    let mut snapshot = build_snapshot(
-        obs_version,
-        ws_version,
-        &scenes_raw,
-        &current_scene,
-        &inputs,
-        &cfg.scenes,
-        &cfg.audio.inputs,
-        streaming,
-        recording,
-        &profiles,
-        &current_profile,
-        &scene_collections,
-        &current_scene_collection,
-    );
-    drop(cfg);
+    let refreshed = RefreshedObsState {
+        versions: ObsVersions {
+            studio: obs_version.to_string(),
+            websocket: ws_version.to_string(),
+        },
+        scenes: Listing::new(scenes_raw, current_scene),
+        inputs,
+        profiles: Listing::new(profiles, current_profile),
+        collections: Listing::new(scene_collections, current_scene_collection),
+        outputs: OutputFlags {
+            streaming,
+            recording,
+        },
+    };
 
-    // build_snapshot always starts stats/bitrate/durations at their zero
-    // value; carry over whatever the independent stats poller last saw so a
-    // scene/profile-list-triggered full refresh doesn't flicker the live
-    // bar back to "waiting" for up to a poll interval.
-    let previous = state.read().await;
-    snapshot.stats = previous.stats;
-    snapshot.stream_bitrate_kbps = previous.stream_bitrate_kbps;
-    snapshot.stream_duration_ms = previous.stream_duration_ms;
-    snapshot.record_duration_ms = previous.record_duration_ms;
+    let (scene_cfgs, audio_cfgs) = {
+        let cfg = config.lock().await;
+        (cfg.scenes.clone(), cfg.audio.inputs.clone())
+    };
 
-    state.replace(snapshot).await;
+    // `apply_full_refresh` merges under the store's write lock, so the live
+    // metrics the stats poller owns survive and events that arrived during the
+    // round-trips above are not clobbered by this (necessarily stale) fetch.
+    state
+        .apply_full_refresh(&refreshed, &scene_cfgs, &audio_cfgs)
+        .await;
     Ok(())
 }
 
