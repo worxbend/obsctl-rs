@@ -32,6 +32,204 @@ pub struct CommandPayload {
     pub args: Value,
 }
 
+impl CommandPayload {
+    /// A command that takes no arguments.
+    pub fn simple(command: ServerCommand) -> Self {
+        Self {
+            name: command.name().to_string(),
+            args: Value::Null,
+        }
+    }
+
+    /// A command that names one scene, profile, collection, or audio input.
+    ///
+    /// `target` is passed through as given; callers are responsible for
+    /// trimming and validating it first (see `support::validation`).
+    pub fn with_target(command: ServerCommand, target: &str) -> Self {
+        Self {
+            name: command.name().to_string(),
+            args: serde_json::json!({ "target": target }),
+        }
+    }
+
+    /// `set_volume`, which is the only command taking a second argument.
+    pub fn set_volume(target: &str, percent: u8) -> Self {
+        Self {
+            name: ServerCommand::SetVolume.name().to_string(),
+            args: serde_json::json!({ "target": target, "percent": percent }),
+        }
+    }
+}
+
+/// The commands the daemon accepts.
+///
+/// This enum and [`COMMANDS`] are the canonical vocabulary of the IPC
+/// contract. The daemon parses incoming names through it, and the CLI and TUI
+/// build their payloads from it, so each command is spelled out in exactly one
+/// place — a typo in a client is a compile error rather than a runtime
+/// `unknown command`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ServerCommand {
+    Ping,
+    GetServerStatus,
+    GetObsStatus,
+    GetSnapshot,
+    SetScene,
+    SetProfile,
+    SetSceneCollection,
+    Mute,
+    Unmute,
+    ToggleMute,
+    SetVolume,
+    ValidateConfig,
+    ReloadConfig,
+    ReconnectObs,
+    ShutdownServer,
+    DumpConfig,
+    ToggleStream,
+    ToggleRecord,
+}
+
+/// One row of the command vocabulary: the wire name and the exact set of
+/// argument keys the payload must carry. An empty `args` means the command
+/// accepts no arguments at all.
+pub struct CommandSpec {
+    pub command: ServerCommand,
+    pub name: &'static str,
+    pub args: &'static [&'static str],
+}
+
+const TARGET: &[&str] = &["target"];
+const NONE: &[&str] = &[];
+
+/// Every command, in the order they appear in `ServerCommand`. Adding a
+/// command means adding a row here and a handler arm in the executor; the
+/// exhaustiveness guard in this module's tests catches a forgotten row.
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        command: ServerCommand::Ping,
+        name: "ping",
+        args: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::GetServerStatus,
+        name: "get_server_status",
+        args: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::GetObsStatus,
+        name: "get_obs_status",
+        args: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::GetSnapshot,
+        name: "get_snapshot",
+        args: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::SetScene,
+        name: "set_scene",
+        args: TARGET,
+    },
+    CommandSpec {
+        command: ServerCommand::SetProfile,
+        name: "set_profile",
+        args: TARGET,
+    },
+    CommandSpec {
+        command: ServerCommand::SetSceneCollection,
+        name: "set_scene_collection",
+        args: TARGET,
+    },
+    CommandSpec {
+        command: ServerCommand::Mute,
+        name: "mute",
+        args: TARGET,
+    },
+    CommandSpec {
+        command: ServerCommand::Unmute,
+        name: "unmute",
+        args: TARGET,
+    },
+    CommandSpec {
+        command: ServerCommand::ToggleMute,
+        name: "toggle_mute",
+        args: TARGET,
+    },
+    CommandSpec {
+        command: ServerCommand::SetVolume,
+        name: "set_volume",
+        args: &["target", "percent"],
+    },
+    CommandSpec {
+        command: ServerCommand::ValidateConfig,
+        name: "validate_config",
+        args: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::ReloadConfig,
+        name: "reload_config",
+        args: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::ReconnectObs,
+        name: "reconnect_obs",
+        args: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::ShutdownServer,
+        name: "shutdown_server",
+        args: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::DumpConfig,
+        name: "dump_config",
+        args: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::ToggleStream,
+        name: "toggle_stream",
+        args: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::ToggleRecord,
+        name: "toggle_record",
+        args: NONE,
+    },
+];
+
+impl ServerCommand {
+    fn spec(self) -> &'static CommandSpec {
+        COMMANDS
+            .iter()
+            .find(|spec| spec.command == self)
+            .expect("every ServerCommand variant has a row in COMMANDS")
+    }
+
+    pub fn name(self) -> &'static str {
+        self.spec().name
+    }
+
+    /// The argument keys this command requires — and, because payloads may not
+    /// carry anything else, the only keys it permits.
+    pub fn required_args(self) -> &'static [&'static str] {
+        self.spec().args
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        COMMANDS
+            .iter()
+            .find(|spec| spec.name == name)
+            .map(|spec| spec.command)
+    }
+}
+
+impl std::fmt::Display for ServerCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
@@ -485,6 +683,78 @@ mod tests {
             ObsEventPayload::CurrentSceneCollectionChanged { .. } => {}
             ObsEventPayload::SceneCollectionListChanged => {}
         }
+    }
+
+    /// Compile-time guard: a new `ServerCommand` variant fails to compile here
+    /// until it is added to the match, which is the prompt to add its row to
+    /// `COMMANDS` too. `every_command_has_a_spec` then proves the row exists.
+    #[allow(dead_code)]
+    fn _server_command_variant_guard(c: ServerCommand) {
+        match c {
+            ServerCommand::Ping => {}
+            ServerCommand::GetServerStatus => {}
+            ServerCommand::GetObsStatus => {}
+            ServerCommand::GetSnapshot => {}
+            ServerCommand::SetScene => {}
+            ServerCommand::SetProfile => {}
+            ServerCommand::SetSceneCollection => {}
+            ServerCommand::Mute => {}
+            ServerCommand::Unmute => {}
+            ServerCommand::ToggleMute => {}
+            ServerCommand::SetVolume => {}
+            ServerCommand::ValidateConfig => {}
+            ServerCommand::ReloadConfig => {}
+            ServerCommand::ReconnectObs => {}
+            ServerCommand::ShutdownServer => {}
+            ServerCommand::DumpConfig => {}
+            ServerCommand::ToggleStream => {}
+            ServerCommand::ToggleRecord => {}
+        }
+    }
+
+    #[test]
+    fn every_command_has_a_spec_and_round_trips_through_its_name() {
+        const SERVER_COMMAND_VARIANT_COUNT: usize = 18;
+        assert_eq!(COMMANDS.len(), SERVER_COMMAND_VARIANT_COUNT);
+
+        for spec in COMMANDS {
+            // `name()` panics if a variant has no row, so this exercises the
+            // lookup in both directions for every command.
+            assert_eq!(spec.command.name(), spec.name);
+            assert_eq!(ServerCommand::parse(spec.name), Some(spec.command));
+            assert!(
+                validate_command_name(spec.name).is_ok(),
+                "{} is not a legal wire name",
+                spec.name
+            );
+        }
+
+        let names: HashSet<&str> = COMMANDS.iter().map(|spec| spec.name).collect();
+        assert_eq!(names.len(), COMMANDS.len(), "duplicate command name");
+    }
+
+    #[test]
+    fn command_payload_constructors_use_the_shared_vocabulary() {
+        assert_eq!(
+            CommandPayload::simple(ServerCommand::Ping).name,
+            ServerCommand::Ping.name()
+        );
+
+        let payload = CommandPayload::with_target(ServerCommand::SetScene, "Main");
+        assert_eq!(payload.name, "set_scene");
+        assert_eq!(payload.args["target"], "Main");
+
+        let payload = CommandPayload::set_volume("Mic", 42);
+        assert_eq!(payload.name, "set_volume");
+        assert_eq!(payload.args["target"], "Mic");
+        assert_eq!(payload.args["percent"], 42);
+    }
+
+    #[test]
+    fn parse_rejects_unknown_command_names() {
+        assert_eq!(ServerCommand::parse("does-not-exist"), None);
+        assert_eq!(ServerCommand::parse("set_scene "), None);
+        assert_eq!(ServerCommand::parse(""), None);
     }
 
     #[allow(dead_code)]

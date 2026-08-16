@@ -17,7 +17,7 @@ use crate::domain::{
     volume::percent_to_mul,
 };
 use crate::ipc::{
-    protocol::{ErrorPayload, LogEvent, LogLevel, ServerMessage, public_error_code},
+    protocol::{ErrorPayload, LogEvent, LogLevel, ServerCommand, ServerMessage, public_error_code},
     session::{BroadcastHub, CommandDispatch},
 };
 use crate::obs::{
@@ -90,7 +90,7 @@ impl CommandExecutor {
         debug!("Command id={id} name={}", payload.name);
         let result = async {
             let command = parse_server_command(&payload.name)?;
-            command.validate_payload(&payload.args)?;
+            validate_payload(command, &payload.args)?;
 
             match command {
                 ServerCommand::Ping => Ok(json!({ "message": "pong" })),
@@ -495,106 +495,23 @@ impl CommandExecutor {
     }
 }
 
+/// Reject a payload whose shape does not match what the command declares in
+/// `ipc::protocol::COMMANDS`, before any OBS request is attempted.
+fn validate_payload(command: ServerCommand, args: &Value) -> Result<()> {
+    match command.required_args() {
+        [] => validate_empty_payload(args, command.name()),
+        required => validate_object_args(args, command.name(), required),
+    }
+}
+
 #[cfg(test)]
 fn validate_command_payload(command: &str, args: &Value) -> Result<()> {
-    let command = parse_server_command(command)?;
-    command.validate_payload(args)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ServerCommand {
-    Ping,
-    GetServerStatus,
-    GetObsStatus,
-    GetSnapshot,
-    SetScene,
-    SetProfile,
-    SetSceneCollection,
-    Mute,
-    Unmute,
-    ToggleMute,
-    SetVolume,
-    ValidateConfig,
-    ReloadConfig,
-    ReconnectObs,
-    ShutdownServer,
-    DumpConfig,
-    ToggleStream,
-    ToggleRecord,
-}
-
-impl ServerCommand {
-    fn validate_payload(&self, args: &Value) -> Result<()> {
-        match self {
-            Self::Ping
-            | Self::GetServerStatus
-            | Self::GetObsStatus
-            | Self::GetSnapshot
-            | Self::ValidateConfig
-            | Self::ReloadConfig
-            | Self::ReconnectObs
-            | Self::ShutdownServer
-            | Self::DumpConfig
-            | Self::ToggleStream
-            | Self::ToggleRecord => validate_empty_payload(args, self.name()),
-            Self::SetScene | Self::SetProfile | Self::SetSceneCollection => {
-                validate_object_args(args, self.name(), &["target"])
-            }
-            Self::Mute | Self::Unmute | Self::ToggleMute => {
-                validate_object_args(args, self.name(), &["target"])
-            }
-            Self::SetVolume => validate_object_args(args, self.name(), &["target", "percent"]),
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Ping => "ping",
-            Self::GetServerStatus => "get_server_status",
-            Self::GetObsStatus => "get_obs_status",
-            Self::GetSnapshot => "get_snapshot",
-            Self::SetScene => "set_scene",
-            Self::SetProfile => "set_profile",
-            Self::SetSceneCollection => "set_scene_collection",
-            Self::Mute => "mute",
-            Self::Unmute => "unmute",
-            Self::ToggleMute => "toggle_mute",
-            Self::SetVolume => "set_volume",
-            Self::ValidateConfig => "validate_config",
-            Self::ReloadConfig => "reload_config",
-            Self::ReconnectObs => "reconnect_obs",
-            Self::ShutdownServer => "shutdown_server",
-            Self::DumpConfig => "dump_config",
-            Self::ToggleStream => "toggle_stream",
-            Self::ToggleRecord => "toggle_record",
-        }
-    }
+    validate_payload(parse_server_command(command)?, args)
 }
 
 fn parse_server_command(name: &str) -> Result<ServerCommand> {
-    match name {
-        "ping" => Ok(ServerCommand::Ping),
-        "get_server_status" => Ok(ServerCommand::GetServerStatus),
-        "get_obs_status" => Ok(ServerCommand::GetObsStatus),
-        "get_snapshot" => Ok(ServerCommand::GetSnapshot),
-        "set_scene" => Ok(ServerCommand::SetScene),
-        "set_profile" => Ok(ServerCommand::SetProfile),
-        "set_scene_collection" => Ok(ServerCommand::SetSceneCollection),
-        "mute" => Ok(ServerCommand::Mute),
-        "unmute" => Ok(ServerCommand::Unmute),
-        "toggle_mute" => Ok(ServerCommand::ToggleMute),
-        "set_volume" => Ok(ServerCommand::SetVolume),
-        "validate_config" => Ok(ServerCommand::ValidateConfig),
-        "reload_config" => Ok(ServerCommand::ReloadConfig),
-        "reconnect_obs" => Ok(ServerCommand::ReconnectObs),
-        "shutdown_server" => Ok(ServerCommand::ShutdownServer),
-        "dump_config" => Ok(ServerCommand::DumpConfig),
-        "toggle_stream" => Ok(ServerCommand::ToggleStream),
-        "toggle_record" => Ok(ServerCommand::ToggleRecord),
-        _ => Err(ObsctlError::CommandParseError(format!(
-            "unknown command: {name}"
-        ))),
-    }
+    ServerCommand::parse(name)
+        .ok_or_else(|| ObsctlError::CommandParseError(format!("unknown command: {name}")))
 }
 
 fn required_string(args: &Value, key: &str) -> crate::domain::result::Result<String> {
@@ -689,7 +606,6 @@ fn audio_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry> {
 
 #[cfg(test)]
 mod tests {
-    use super::ServerCommand;
     use super::{
         MAX_TARGET_TOKEN_LENGTH, parse_server_command, required_string, required_u8_percentage,
     };
@@ -786,35 +702,12 @@ mod tests {
         assert!(validate_command_payload("toggle_stream", &json!({ "extra": true }),).is_err());
     }
 
+    /// Every command name and its argument shape live in
+    /// `ipc::protocol::COMMANDS`, which owns the name round-trip test. The
+    /// executor's own job is to turn a name that is not in that table into a
+    /// parse error rather than a panic.
     #[test]
     fn parse_server_command_rejects_unknown_name() {
         assert!(parse_server_command("does-not-exist").is_err());
-    }
-
-    #[test]
-    fn parse_server_command_covers_known_commands() {
-        let cases = [
-            ("ping", ServerCommand::Ping),
-            ("get_server_status", ServerCommand::GetServerStatus),
-            ("get_obs_status", ServerCommand::GetObsStatus),
-            ("get_snapshot", ServerCommand::GetSnapshot),
-            ("set_scene", ServerCommand::SetScene),
-            ("set_profile", ServerCommand::SetProfile),
-            ("set_scene_collection", ServerCommand::SetSceneCollection),
-            ("mute", ServerCommand::Mute),
-            ("unmute", ServerCommand::Unmute),
-            ("toggle_mute", ServerCommand::ToggleMute),
-            ("set_volume", ServerCommand::SetVolume),
-            ("validate_config", ServerCommand::ValidateConfig),
-            ("reload_config", ServerCommand::ReloadConfig),
-            ("reconnect_obs", ServerCommand::ReconnectObs),
-            ("shutdown_server", ServerCommand::ShutdownServer),
-            ("dump_config", ServerCommand::DumpConfig),
-            ("toggle_stream", ServerCommand::ToggleStream),
-            ("toggle_record", ServerCommand::ToggleRecord),
-        ];
-        for (name, expected) in cases {
-            assert_eq!(parse_server_command(name).unwrap(), expected);
-        }
     }
 }

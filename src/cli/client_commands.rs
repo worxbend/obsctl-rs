@@ -9,7 +9,7 @@ use crate::{
     domain::errors::ObsctlError,
     ipc::{
         protocol::{
-            CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage,
+            CommandPayload, ErrorPayload, PublicErrorCode, ServerCommand, ServerMessage,
             exit_code_for_public_error_code, public_error_code, validate_command_name,
         },
         unix_client::IpcClient,
@@ -92,7 +92,7 @@ impl ProxyCtx {
     }
 
     pub fn ping(&self) -> i32 {
-        self.run_proxy(simple_cmd("ping"))
+        self.run_proxy(CommandPayload::simple(ServerCommand::Ping))
     }
 
     pub fn status(&self) -> i32 {
@@ -100,7 +100,7 @@ impl ProxyCtx {
             Ok(rt) => rt,
             Err(e) => return self.emit_local_error(&e),
         };
-        match rt.block_on(self.send(simple_cmd("get_snapshot"))) {
+        match rt.block_on(self.send(CommandPayload::simple(ServerCommand::GetSnapshot))) {
             Ok(ServerMessage::Response {
                 ok, result, error, ..
             }) => {
@@ -122,35 +122,35 @@ impl ProxyCtx {
     }
 
     pub fn server_status(&self) -> i32 {
-        self.run_proxy(simple_cmd("get_server_status"))
+        self.run_proxy(CommandPayload::simple(ServerCommand::GetServerStatus))
     }
 
     pub fn obs_status(&self) -> i32 {
-        self.run_proxy(simple_cmd("get_obs_status"))
+        self.run_proxy(CommandPayload::simple(ServerCommand::GetObsStatus))
     }
 
     pub fn scene(&self, target: &str) -> i32 {
-        self.run_target_cmd("set_scene", target)
+        self.run_target_cmd(ServerCommand::SetScene, target)
     }
 
     pub fn profile(&self, target: &str) -> i32 {
-        self.run_target_cmd("set_profile", target)
+        self.run_target_cmd(ServerCommand::SetProfile, target)
     }
 
     pub fn scene_collection(&self, target: &str) -> i32 {
-        self.run_target_cmd("set_scene_collection", target)
+        self.run_target_cmd(ServerCommand::SetSceneCollection, target)
     }
 
     pub fn mute(&self, target: &str) -> i32 {
-        self.run_target_cmd("mute", target)
+        self.run_target_cmd(ServerCommand::Mute, target)
     }
 
     pub fn unmute(&self, target: &str) -> i32 {
-        self.run_target_cmd("unmute", target)
+        self.run_target_cmd(ServerCommand::Unmute, target)
     }
 
     pub fn toggle_mute(&self, target: &str) -> i32 {
-        self.run_target_cmd("toggle_mute", target)
+        self.run_target_cmd(ServerCommand::ToggleMute, target)
     }
 
     pub fn set_volume(&self, target: &str, percent: u8) -> i32 {
@@ -165,39 +165,35 @@ impl ProxyCtx {
             Err(error) => return self.emit_local_error(&error),
         };
 
-        let args = serde_json::json!({ "target": target, "percent": percent });
-        self.run_proxy(CommandPayload {
-            name: "set_volume".into(),
-            args,
-        })
+        self.run_proxy(CommandPayload::set_volume(&target, percent))
     }
 
     pub fn reconnect(&self) -> i32 {
-        self.run_proxy(simple_cmd("reconnect_obs"))
+        self.run_proxy(CommandPayload::simple(ServerCommand::ReconnectObs))
     }
 
     pub fn shutdown_server(&self) -> i32 {
-        self.run_proxy(simple_cmd("shutdown_server"))
+        self.run_proxy(CommandPayload::simple(ServerCommand::ShutdownServer))
     }
 
     pub fn dump_config(&self) -> i32 {
-        self.run_proxy(simple_cmd("dump_config"))
+        self.run_proxy(CommandPayload::simple(ServerCommand::DumpConfig))
     }
 
     pub fn reload_config(&self) -> i32 {
-        self.run_proxy(simple_cmd("reload_config"))
+        self.run_proxy(CommandPayload::simple(ServerCommand::ReloadConfig))
     }
 
     pub fn toggle_stream(&self) -> i32 {
-        self.run_proxy(simple_cmd("toggle_stream"))
+        self.run_proxy(CommandPayload::simple(ServerCommand::ToggleStream))
     }
 
     pub fn toggle_record(&self) -> i32 {
-        self.run_proxy(simple_cmd("toggle_record"))
+        self.run_proxy(CommandPayload::simple(ServerCommand::ToggleRecord))
     }
 
     pub fn validate_config(&self) -> i32 {
-        self.run_proxy(simple_cmd("validate_config"))
+        self.run_proxy(CommandPayload::simple(ServerCommand::ValidateConfig))
     }
 
     fn emit_response_error(&self, error: Option<&ErrorPayload>) -> i32 {
@@ -254,26 +250,12 @@ impl ProxyCtx {
         exit_code
     }
 
-    fn run_target_cmd(&self, name: &str, target: &str) -> i32 {
+    fn run_target_cmd(&self, command: ServerCommand, target: &str) -> i32 {
         let target = match sanitize_target_arg(target) {
             Ok(value) => value,
             Err(error) => return self.emit_local_error(&error),
         };
-        self.run_proxy(target_cmd(name, &target))
-    }
-}
-
-fn simple_cmd(name: &str) -> CommandPayload {
-    CommandPayload {
-        name: name.into(),
-        args: serde_json::Value::Null,
-    }
-}
-
-fn target_cmd(name: &str, target: &str) -> CommandPayload {
-    CommandPayload {
-        name: name.into(),
-        args: serde_json::json!({ "target": target }),
+        self.run_proxy(CommandPayload::with_target(command, &target))
     }
 }
 
@@ -406,7 +388,7 @@ mod tests {
             json_output: false,
         };
 
-        assert_eq!(ctx.run_target_cmd("mute", "Bad\nTarget"), 5);
-        assert_eq!(ctx.run_target_cmd("set_scene", "   "), 5);
+        assert_eq!(ctx.run_target_cmd(ServerCommand::Mute, "Bad\nTarget"), 5);
+        assert_eq!(ctx.run_target_cmd(ServerCommand::SetScene, "   "), 5);
     }
 }

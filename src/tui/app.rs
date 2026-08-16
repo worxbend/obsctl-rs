@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use crate::{
     config::{loader, writer},
     domain::{command::Command, parser, result::Result},
-    ipc::protocol::{CommandPayload, LogLevel, ServerMessage},
+    ipc::protocol::{CommandPayload, LogLevel, ServerCommand, ServerMessage},
     support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len},
     tui::{
         completion,
@@ -438,23 +438,38 @@ async fn run_action(
             }
             (false, Some(result))
         }
-        TuiAction::ReloadConfig => (false, Some(send_simple(socket_path, "reload_config").await)),
-        TuiAction::DumpConfig => (false, Some(send_simple(socket_path, "dump_config").await)),
+        TuiAction::ReloadConfig => (
+            false,
+            Some(send_simple(socket_path, ServerCommand::ReloadConfig).await),
+        ),
+        TuiAction::DumpConfig => (
+            false,
+            Some(send_simple(socket_path, ServerCommand::DumpConfig).await),
+        ),
         TuiAction::ValidateConfig => (
             false,
-            Some(send_status(socket_path, "validate_config").await),
+            Some(send_status(socket_path, ServerCommand::ValidateConfig).await),
         ),
         TuiAction::ObsStatus => (
             false,
-            Some(send_status(socket_path, "get_obs_status").await),
+            Some(send_status(socket_path, ServerCommand::GetObsStatus).await),
         ),
         TuiAction::ServerStatus => (
             false,
-            Some(send_status(socket_path, "get_server_status").await),
+            Some(send_status(socket_path, ServerCommand::GetServerStatus).await),
         ),
-        TuiAction::ToggleStream => (false, Some(send_simple(socket_path, "toggle_stream").await)),
-        TuiAction::ToggleRecord => (false, Some(send_simple(socket_path, "toggle_record").await)),
-        TuiAction::ReconnectObs => (false, Some(send_simple(socket_path, "reconnect_obs").await)),
+        TuiAction::ToggleStream => (
+            false,
+            Some(send_simple(socket_path, ServerCommand::ToggleStream).await),
+        ),
+        TuiAction::ToggleRecord => (
+            false,
+            Some(send_simple(socket_path, ServerCommand::ToggleRecord).await),
+        ),
+        TuiAction::ReconnectObs => (
+            false,
+            Some(send_simple(socket_path, ServerCommand::ReconnectObs).await),
+        ),
         TuiAction::FocusScenes => {
             model.focus = FocusPanel::Scenes;
             (false, None)
@@ -532,7 +547,8 @@ async fn run_action(
         TuiAction::Activate => (false, activate_focused(model, socket_path).await),
         TuiAction::ToggleMute => {
             if let Some(name) = model.focused_audio().map(|a| a.name.clone()) {
-                let result = send_simple_with_target(socket_path, "toggle_mute", &name).await;
+                let result =
+                    send_simple_with_target(socket_path, ServerCommand::ToggleMute, &name).await;
                 (false, Some(result))
             } else {
                 (false, None)
@@ -654,14 +670,20 @@ fn preview_theme(model: &mut TuiModel, index: usize) {
 /// Enter/click on the focused row: switch to it, or for audio toggle mute.
 async fn activate_focused(model: &TuiModel, socket_path: &Path) -> Option<String> {
     let (command, target) = match model.focus {
-        FocusPanel::Scenes => ("set_scene", model.focused_scene().map(|s| s.name.clone())?),
-        FocusPanel::Profiles => ("set_profile", model.focused_profile()?.to_string()),
+        FocusPanel::Scenes => (
+            ServerCommand::SetScene,
+            model.focused_scene().map(|s| s.name.clone())?,
+        ),
+        FocusPanel::Profiles => (
+            ServerCommand::SetProfile,
+            model.focused_profile()?.to_string(),
+        ),
         FocusPanel::Collections => (
-            "set_scene_collection",
+            ServerCommand::SetSceneCollection,
             model.focused_scene_collection()?.to_string(),
         ),
         FocusPanel::Audio => (
-            "toggle_mute",
+            ServerCommand::ToggleMute,
             model.focused_audio().map(|a| a.name.clone())?,
         ),
     };
@@ -797,60 +819,74 @@ async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
 }
 
 fn command_to_payload(cmd: Command) -> std::result::Result<CommandPayload, String> {
-    let (name, args) = match cmd {
-        Command::Status => ("get_snapshot", serde_json::Value::Null),
-        Command::ServerStatus => ("get_server_status", serde_json::Value::Null),
-        Command::ObsStatus => ("get_obs_status", serde_json::Value::Null),
-        Command::ValidateConfig => ("validate_config", serde_json::Value::Null),
-        Command::Reconnect | Command::Connect => ("reconnect_obs", serde_json::Value::Null),
-        Command::ShutdownServer => ("shutdown_server", serde_json::Value::Null),
-        Command::DumpConfig => ("dump_config", serde_json::Value::Null),
-        Command::ReloadConfig => ("reload_config", serde_json::Value::Null),
+    let (command, args) = match cmd {
+        Command::Status => (ServerCommand::GetSnapshot, serde_json::Value::Null),
+        Command::ServerStatus => (ServerCommand::GetServerStatus, serde_json::Value::Null),
+        Command::ObsStatus => (ServerCommand::GetObsStatus, serde_json::Value::Null),
+        Command::ValidateConfig => (ServerCommand::ValidateConfig, serde_json::Value::Null),
+        Command::Reconnect | Command::Connect => {
+            (ServerCommand::ReconnectObs, serde_json::Value::Null)
+        }
+        Command::ShutdownServer => (ServerCommand::ShutdownServer, serde_json::Value::Null),
+        Command::DumpConfig => (ServerCommand::DumpConfig, serde_json::Value::Null),
+        Command::ReloadConfig => (ServerCommand::ReloadConfig, serde_json::Value::Null),
         Command::SetScene { target } => {
             let target = sanitize_target_arg(&target)?;
-            ("set_scene", serde_json::json!({ "target": target }))
+            (
+                ServerCommand::SetScene,
+                serde_json::json!({ "target": target }),
+            )
         }
         Command::SetProfile { target } => {
             let target = sanitize_target_arg(&target)?;
-            ("set_profile", serde_json::json!({ "target": target }))
+            (
+                ServerCommand::SetProfile,
+                serde_json::json!({ "target": target }),
+            )
         }
         Command::SetSceneCollection { target } => {
             let target = sanitize_target_arg(&target)?;
             (
-                "set_scene_collection",
+                ServerCommand::SetSceneCollection,
                 serde_json::json!({ "target": target }),
             )
         }
         Command::Mute { target } => {
             let target = sanitize_target_arg(&target)?;
-            ("mute", serde_json::json!({ "target": target }))
+            (ServerCommand::Mute, serde_json::json!({ "target": target }))
         }
         Command::Unmute { target } => {
             let target = sanitize_target_arg(&target)?;
-            ("unmute", serde_json::json!({ "target": target }))
+            (
+                ServerCommand::Unmute,
+                serde_json::json!({ "target": target }),
+            )
         }
         Command::ToggleMute { target } => {
             let target = sanitize_target_arg(&target)?;
-            ("toggle_mute", serde_json::json!({ "target": target }))
+            (
+                ServerCommand::ToggleMute,
+                serde_json::json!({ "target": target }),
+            )
         }
         Command::SetVolume { target, percent } => {
             if percent > 100 {
                 return Err("volume percent must be 0-100".to_string());
             }
             (
-                "set_volume",
+                ServerCommand::SetVolume,
                 serde_json::json!({
                     "target": sanitize_target_arg(&target)?,
                     "percent": percent
                 }),
             )
         }
-        Command::ToggleStream => ("toggle_stream", serde_json::Value::Null),
-        Command::ToggleRecord => ("toggle_record", serde_json::Value::Null),
+        Command::ToggleStream => (ServerCommand::ToggleStream, serde_json::Value::Null),
+        Command::ToggleRecord => (ServerCommand::ToggleRecord, serde_json::Value::Null),
         Command::Help | Command::Quit | Command::Themes => unreachable!("handled before"),
     };
     Ok(CommandPayload {
-        name: name.to_string(),
+        name: command.name().to_string(),
         args,
     })
 }
@@ -883,16 +919,17 @@ fn format_ipc_response(res: Result<ServerMessage>, ok_fallback: &str) -> String 
     }
 }
 
-async fn send_simple_with_target(socket_path: &Path, name: &str, target: &str) -> String {
+async fn send_simple_with_target(
+    socket_path: &Path,
+    command: ServerCommand,
+    target: &str,
+) -> String {
     let target = match sanitize_target_arg(target) {
         Ok(target) => target,
         Err(error) => return format!("error: invalid target: {error}"),
     };
 
-    let payload = CommandPayload {
-        name: name.to_string(),
-        args: serde_json::json!({ "target": target }),
-    };
+    let payload = CommandPayload::with_target(command, &target);
     format_ipc_response(send_command(socket_path, payload).await, "ok")
 }
 
@@ -923,31 +960,22 @@ async fn send_set_volume(socket_path: &Path, target: &str, percent: u8) -> Strin
         return "error: volume percent must be 0-100".to_string();
     }
 
-    let payload = CommandPayload {
-        name: "set_volume".to_string(),
-        args: serde_json::json!({ "target": target, "percent": percent }),
-    };
+    let payload = CommandPayload::set_volume(&target, percent);
     format_ipc_response(
         send_command(socket_path, payload).await,
         &format!("volume → {percent}%"),
     )
 }
 
-async fn send_simple(socket_path: &Path, name: &str) -> String {
-    let payload = CommandPayload {
-        name: name.to_string(),
-        args: serde_json::Value::Null,
-    };
+async fn send_simple(socket_path: &Path, command: ServerCommand) -> String {
+    let payload = CommandPayload::simple(command);
     format_ipc_response(send_command(socket_path, payload).await, "ok")
 }
 
 /// Like [`send_simple`], but for the query commands whose usefulness is in
 /// the payload — a bare "ok" would throw away everything the user asked for.
-async fn send_status(socket_path: &Path, name: &str) -> String {
-    let payload = CommandPayload {
-        name: name.to_string(),
-        args: serde_json::Value::Null,
-    };
+async fn send_status(socket_path: &Path, command: ServerCommand) -> String {
+    let payload = CommandPayload::simple(command);
     match send_command(socket_path, payload).await {
         Ok(ServerMessage::Response {
             ok, result, error, ..
