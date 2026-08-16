@@ -192,12 +192,44 @@ impl ObsSupervisor {
         let (client, obs_version, ws_version, disconnect_rx) = connect(params, event_tx).await?;
         let event_client = client.clone();
         let state = self.state.clone();
+        let state_for_refresh = self.state.clone();
         let config = Arc::clone(&self.config);
         let hub = Arc::clone(&self.hub);
         let event_obs_version = obs_version.clone();
         let event_ws_version = ws_version.clone();
 
         spawn_stats_poller(client.clone(), self.state.clone());
+
+        // Capacity 1, and the event task uses `try_send`: while a refresh is
+        // running, a burst of list-changed events coalesces into exactly one
+        // follow-up rather than queueing a refresh per event. The refresher
+        // exits when the event task drops the sender, so it dies with the
+        // connection it belongs to.
+        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+        let refresh_hub = Arc::clone(&hub);
+        tokio::spawn(async move {
+            while refresh_rx.recv().await.is_some() {
+                if let Err(e) = fetch_and_publish_snapshot_from(
+                    &config,
+                    &state_for_refresh,
+                    &event_client,
+                    &event_obs_version,
+                    &event_ws_version,
+                )
+                .await
+                {
+                    warn!("OBS snapshot refresh after list change failed: {e}");
+                    refresh_hub.publish_log(
+                        LogEvent::new(
+                            LogLevel::Warn,
+                            format!("OBS snapshot refresh after list change failed: {e}"),
+                        )
+                        .with_target("obsctl_rs::server::obs_supervisor"),
+                    );
+                }
+            }
+        });
 
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
@@ -215,24 +247,13 @@ impl ObsSupervisor {
                     hub.publish_obs_event(payload);
                 }
 
-                if needs_full_refresh
-                    && let Err(e) = fetch_and_publish_snapshot_from(
-                        &config,
-                        &state,
-                        &event_client,
-                        &event_obs_version,
-                        &event_ws_version,
-                    )
-                    .await
-                {
-                    warn!("OBS snapshot refresh after scene-list change failed: {e}");
-                    hub.publish_log(
-                        LogEvent::new(
-                            LogLevel::Warn,
-                            format!("OBS snapshot refresh after scene-list change failed: {e}"),
-                        )
-                        .with_target("obsctl_rs::server::obs_supervisor"),
-                    );
+                // Refreshing inline would block this loop for a dozen-plus
+                // obs-websocket round-trips, back-pressuring the bounded event
+                // channel and delaying every mute, volume, and scene change
+                // queued behind it. A full channel means a refresh is already
+                // pending, which is all the signal we need.
+                if needs_full_refresh {
+                    let _ = refresh_tx.try_send(());
                 }
             }
         });
@@ -324,48 +345,18 @@ async fn fetch_and_publish_snapshot_from(
         "inputName",
     )?;
 
-    let mut inputs: Vec<RawInputState> = Vec::new();
-    for name in &input_names {
-        let muted = client
-            .request(requests::get_input_mute(name)?)
-            .await
-            .ok()
-            .and_then(|v| match v.get("inputMuted").and_then(|b| b.as_bool()) {
-                Some(muted) => Some(muted),
-                None => {
-                    warn!("Malformed GetInputMute response for {name}: missing `inputMuted`");
-                    None
-                }
-            });
-
-        let vol = client
-            .request(requests::get_input_volume(name)?)
-            .await
-            .ok()
-            .and_then(
-                |v| match v.get("inputVolumeMul").and_then(|f| f.as_f64()) {
-                    Some(volume_mul) if volume_mul.is_finite() && volume_mul >= 0.0 => Some(volume_mul),
-                    None => {
-                        warn!(
-                            "Malformed GetInputVolume response for {name}: missing `inputVolumeMul`"
-                        );
-                        None
-                    }
-                    Some(_) => {
-                        warn!(
-                            "Malformed GetInputVolume response for {name}: non-finite or negative `inputVolumeMul`"
-                        );
-                        None
-                    }
-                },
-            );
-
-        inputs.push(RawInputState {
-            name: name.clone(),
-            muted,
-            volume_mul: vol,
-        });
-    }
+    // Each input needs two more round-trips. Issued serially this is the
+    // dominant cost of a refresh — with ten inputs it was twenty sequential
+    // waits — and every millisecond of it is time in which the snapshot being
+    // assembled goes further out of date. `join_all` overlaps them instead.
+    let inputs: Vec<RawInputState> = futures_util::future::join_all(
+        input_names
+            .iter()
+            .map(|name| fetch_input_state(client, name)),
+    )
+    .await
+    .into_iter()
+    .collect::<crate::domain::result::Result<Vec<_>>>()?;
 
     let streaming = client
         .request(requests::get_stream_status())
@@ -458,6 +449,56 @@ async fn fetch_and_publish_snapshot_from(
         .apply_full_refresh(&refreshed, &scene_cfgs, &audio_cfgs)
         .await;
     Ok(())
+}
+
+/// Read one input's mute and volume.
+///
+/// A malformed or failed reply for a single field leaves that field `None`
+/// rather than failing the whole refresh: one unreadable input should not cost
+/// the user their scene list. Only a request that cannot be built at all — an
+/// input name that fails validation — is an error.
+async fn fetch_input_state(
+    client: &ObsClient,
+    name: &str,
+) -> crate::domain::result::Result<RawInputState> {
+    let mute_request = requests::get_input_mute(name)?;
+    let volume_request = requests::get_input_volume(name)?;
+
+    let muted = client.request(mute_request).await.ok().and_then(|v| {
+        match v.get("inputMuted").and_then(|b| b.as_bool()) {
+            Some(muted) => Some(muted),
+            None => {
+                warn!("Malformed GetInputMute response for {name}: missing `inputMuted`");
+                None
+            }
+        }
+    });
+
+    let volume_mul = client
+        .request(volume_request)
+        .await
+        .ok()
+        .and_then(
+            |v| match v.get("inputVolumeMul").and_then(|f| f.as_f64()) {
+                Some(volume_mul) if volume_mul.is_finite() && volume_mul >= 0.0 => Some(volume_mul),
+                None => {
+                    warn!("Malformed GetInputVolume response for {name}: missing `inputVolumeMul`");
+                    None
+                }
+                Some(_) => {
+                    warn!(
+                        "Malformed GetInputVolume response for {name}: non-finite or negative `inputVolumeMul`"
+                    );
+                    None
+                }
+            },
+        );
+
+    Ok(RawInputState {
+        name: name.to_string(),
+        muted,
+        volume_mul,
+    })
 }
 
 const STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
