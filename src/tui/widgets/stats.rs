@@ -162,9 +162,9 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 fn fps_line(model: &TuiModel, fps: f64, target: f64, health: Health) -> Line<'static> {
     let theme = model.theme;
     let graph = if model.advanced_ui {
-        anim::sparkline(&model.fps_history, GRAPH_WIDTH)
+        anim::sparkline(model.fps_history.samples(), GRAPH_WIDTH)
     } else {
-        anim::sparkline_ascii(&model.fps_history, GRAPH_WIDTH)
+        anim::sparkline_ascii(model.fps_history.samples(), GRAPH_WIDTH)
     };
     Line::from(vec![
         label(model, "FPS"),
@@ -304,7 +304,7 @@ fn budget_bar(model: &TuiModel, usage: Option<f64>) -> String {
 /// configured for, so the best available reference is the highest rate this
 /// session has actually sustained.
 fn target_fps(model: &TuiModel, current: f64) -> f64 {
-    model.fps_history.iter().copied().fold(current, f64::max)
+    model.fps_history.peak(current)
 }
 
 fn fps_health(current: f64, target: f64) -> Health {
@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn target_fps_uses_the_best_rate_seen_this_session() {
         let mut model = TuiModel::default();
-        model.fps_history = vec![60.0, 59.9, 44.0];
+        model.fps_history = [60.0, 59.9, 44.0].into_iter().collect();
         assert_eq!(target_fps(&model, 44.0), 60.0);
         // A brand new session with no history falls back to the live value.
         assert_eq!(target_fps(&TuiModel::default(), 30.0), 30.0);

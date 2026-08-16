@@ -5,7 +5,9 @@ use time::OffsetDateTime;
 use crate::{
     ipc::protocol::{LogEvent, LogLevel},
     obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState, ServerStatus},
-    tui::{anim::AnimClock, input::MAX_COUNT, keymap::Pending, theme::Theme},
+    tui::{
+        anim::AnimClock, input::MAX_COUNT, keymap::Pending, series::RollingSeries, theme::Theme,
+    },
 };
 
 pub use crate::domain::parser::DEFAULT_PALETTE_PREFIX;
@@ -180,11 +182,11 @@ pub struct TuiModel {
     pub advanced_ui: bool,
     /// Short rolling histories used by the animated status sparklines and by
     /// the braille meters, which need a peak to scale and mark against.
-    pub cpu_history: Vec<f64>,
-    pub memory_history: Vec<f64>,
-    pub bitrate_history: Vec<f64>,
-    pub fps_history: Vec<f64>,
-    pub frame_time_history: Vec<f64>,
+    pub cpu_history: RollingSeries,
+    pub memory_history: RollingSeries,
+    pub bitrate_history: RollingSeries,
+    pub fps_history: RollingSeries,
+    pub frame_time_history: RollingSeries,
     /// Lifetime frame counters as of the moment the current stream started,
     /// used to report per-stream drops in the stats pane. `None` while not
     /// streaming; set on the first stats sample after streaming begins.
@@ -235,11 +237,11 @@ impl Default for TuiModel {
             theme: Theme::default_theme(),
             show_icons: true,
             advanced_ui: true,
-            cpu_history: Vec::new(),
-            memory_history: Vec::new(),
-            bitrate_history: Vec::new(),
-            fps_history: Vec::new(),
-            frame_time_history: Vec::new(),
+            cpu_history: RollingSeries::default(),
+            memory_history: RollingSeries::default(),
+            bitrate_history: RollingSeries::default(),
+            fps_history: RollingSeries::default(),
+            frame_time_history: RollingSeries::default(),
             stream_frame_baseline: None,
             anim: AnimClock::default(),
             scene_flash: None,
@@ -383,7 +385,6 @@ impl TuiModel {
     }
 
     pub fn record_metric_sample(&mut self) {
-        const HISTORY_LIMIT: usize = 32;
         let stats = self.stats().copied();
         if let Some(stats) = stats {
             self.cpu_history.push(stats.cpu_usage_percent);
@@ -395,18 +396,6 @@ impl TuiModel {
         if let Some(bitrate) = self.stream_bitrate_kbps() {
             self.bitrate_history.push(bitrate);
         }
-        for history in [
-            &mut self.cpu_history,
-            &mut self.memory_history,
-            &mut self.bitrate_history,
-            &mut self.fps_history,
-            &mut self.frame_time_history,
-        ] {
-            if history.len() > HISTORY_LIMIT {
-                history.drain(0..history.len() - HISTORY_LIMIT);
-            }
-        }
-
         // Latch the per-stream frame baseline on the first sample of a
         // stream and drop it when the stream ends, so drops are always
         // reported relative to the broadcast currently on air.
@@ -1106,10 +1095,12 @@ mod tests {
         let mut model = model_with_stats(true, stats(60.0, 0, 100));
         set_stats(&mut model, stats(48.5, 0, 200));
 
-        assert_eq!(model.fps_history, vec![60.0, 48.5]);
-        assert_eq!(model.frame_time_history, vec![4.0, 4.0]);
+        assert_eq!(model.fps_history.samples(), [60.0, 48.5]);
+        assert_eq!(model.frame_time_history.samples(), [4.0, 4.0]);
     }
 
+    /// `RollingSeries` owns the trimming, but the model still has to keep
+    /// feeding it — this guards the wiring, not the window arithmetic.
     #[test]
     fn metric_history_is_bounded() {
         let mut model = TuiModel {
@@ -1118,8 +1109,11 @@ mod tests {
             ..Default::default()
         };
         model.record_metric_sample();
-        assert_eq!(model.cpu_history.len(), 32);
-        assert_eq!(model.bitrate_history.len(), 32);
+        assert_eq!(model.cpu_history.samples().len(), RollingSeries::CAPACITY);
+        assert_eq!(
+            model.bitrate_history.samples().len(),
+            RollingSeries::CAPACITY
+        );
     }
 
     #[test]

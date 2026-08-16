@@ -7,6 +7,7 @@ pub mod keymap;
 pub mod layout;
 pub mod model;
 pub mod mouse;
+pub mod series;
 pub mod session;
 pub mod spinner;
 pub mod theme;

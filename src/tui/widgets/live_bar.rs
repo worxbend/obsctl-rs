@@ -174,7 +174,10 @@ fn throughput_spans(model: &TuiModel, theme: Theme) -> Vec<Span<'static>> {
         ),
         separator(model, theme),
         Span::styled(
-            format!("NET {bitrate} {}", graph(&model.bitrate_history, 8)),
+            format!(
+                "NET {bitrate} {}",
+                graph(model.bitrate_history.samples(), 8)
+            ),
             Style::default()
                 .fg(theme.accent_alt)
                 .add_modifier(Modifier::BOLD),
@@ -199,8 +202,8 @@ fn meters_line(model: &TuiModel, theme: Theme) -> Line<'static> {
         )]);
     };
 
-    let cpu_peak = peak(&model.cpu_history, stats.cpu_usage_percent);
-    let memory_peak = peak(&model.memory_history, stats.memory_usage_mb);
+    let cpu_peak = model.cpu_history.peak(stats.cpu_usage_percent);
+    let memory_peak = model.memory_history.peak(stats.memory_usage_mb);
 
     let mut spans = meter(
         model,
@@ -279,10 +282,6 @@ fn ascii_meter(current: f64, scale_max: f64) -> String {
 
 /// Highest value seen this session, never below the live one so the marker
 /// can't sit behind the fill.
-fn peak(history: &[f64], current: f64) -> f64 {
-    history.iter().copied().fold(current, f64::max)
-}
-
 /// Round the peak up to a fixed step so the memory scale stays put between
 /// samples instead of rescaling the bar under the reader.
 fn memory_scale(peak_mb: f64) -> f64 {
@@ -345,15 +344,6 @@ mod tests {
         // A zero/negative reading must not produce a zero divisor.
         assert!(memory_scale(0.0) > 0.0);
         assert!(memory_scale(-5.0) > 0.0);
-    }
-
-    #[test]
-    fn peak_tracks_the_session_high_but_never_trails_the_live_value() {
-        assert_eq!(peak(&[10.0, 40.0, 20.0], 20.0), 40.0);
-        // A fresh spike above every recorded sample wins.
-        assert_eq!(peak(&[10.0, 40.0], 90.0), 90.0);
-        // No history at all falls back to the live value.
-        assert_eq!(peak(&[], 12.0), 12.0);
     }
 
     #[test]
