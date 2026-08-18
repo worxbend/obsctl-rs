@@ -364,262 +364,259 @@ async fn dispatch_message(
     }
 }
 
+/// One OBS event payload, with the field lookups that every arm of the event
+/// switch needs.
+///
+/// OBS sends `{"eventType": "...", "eventData": {...}}`. Every field read has
+/// the same shape: pull the field, check its type (and, for strings, that it is
+/// a safe token), and log exactly which field of which event was malformed
+/// before giving up. Keeping that in one place is what lets the switch below
+/// read as a list of event shapes instead of a wall of error handling.
+struct EventPayload {
+    event_type: String,
+    data: Value,
+}
+
+impl EventPayload {
+    /// Returns `None` — after logging — when the message has no usable
+    /// `eventType`, which is the only field we cannot recover from.
+    fn parse(message: Value) -> Option<Self> {
+        let raw_type = message
+            .get("eventType")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                warn!("Malformed OBS event: missing or invalid eventType");
+                None
+            })?;
+        let event_type = trim_and_validate_token_with_max_len(raw_type, MAX_TARGET_TOKEN_LENGTH)
+            .map_err(|error| {
+                warn!(
+                    event_type = %raw_type,
+                    message = %error,
+                    "Malformed OBS event payload: invalid eventType"
+                );
+            })
+            .ok()?;
+        let data = message.get("eventData").cloned().unwrap_or(Value::Null);
+        Some(Self { event_type, data })
+    }
+
+    fn warn_field(&self, field: &str, message: &str) {
+        warn!(
+            event_type = %self.event_type,
+            field = %field,
+            "{message}"
+        );
+    }
+
+    fn required_str(&self, field: &str) -> Option<String> {
+        let raw = self.data.get(field).and_then(|v| v.as_str()).or_else(|| {
+            self.warn_field(
+                field,
+                "Malformed OBS event payload: missing or invalid string field",
+            );
+            None
+        })?;
+        trim_and_validate_token_with_max_len(raw, MAX_TARGET_TOKEN_LENGTH)
+            .map_err(|error| {
+                warn!(
+                    event_type = %self.event_type,
+                    field = %field,
+                    message = %error,
+                    "Malformed OBS event payload: string field invalid"
+                );
+            })
+            .ok()
+    }
+
+    fn required_bool(&self, field: &str) -> Option<bool> {
+        self.data.get(field).and_then(|v| v.as_bool()).or_else(|| {
+            self.warn_field(
+                field,
+                "Malformed OBS event payload: missing or invalid boolean field",
+            );
+            None
+        })
+    }
+
+    fn required_f64(&self, field: &str) -> Option<f64> {
+        self.data.get(field).and_then(|v| v.as_f64()).or_else(|| {
+            self.warn_field(
+                field,
+                "Malformed OBS event payload: missing or invalid number field",
+            );
+            None
+        })
+    }
+
+    fn required_array(&self, field: &str) -> Option<&Vec<Value>> {
+        self.data.get(field).and_then(|v| v.as_array()).or_else(|| {
+            self.warn_field(
+                field,
+                "Malformed OBS event payload: missing or invalid array field",
+            );
+            None
+        })
+    }
+
+    /// A decibel level: any finite number, since audio dB is normally negative.
+    ///
+    /// The finiteness check is defence in depth rather than input validation —
+    /// `serde_json` already rejects out-of-range numbers while parsing, so a
+    /// NaN or infinity can only reach here from a payload built in-process.
+    fn required_decibels(&self, field: &str) -> Option<f64> {
+        let value = self.required_f64(field)?;
+        if !value.is_finite() {
+            self.warn_field(field, "Malformed OBS event payload: level is not finite");
+            return None;
+        }
+        Some(value)
+    }
+
+    /// A linear volume multiplier: finite and at or above zero, because a
+    /// negative multiplier would invert the waveform rather than attenuate it.
+    fn required_volume_multiplier(&self, field: &str) -> Option<f64> {
+        let value = self.required_decibels(field)?;
+        if value < 0.0 {
+            self.warn_field(
+                field,
+                "Malformed OBS event payload: volume multiplier must not be negative",
+            );
+            return None;
+        }
+        Some(value)
+    }
+}
+
 async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
-    let event_type = match data.get("eventType").and_then(|v| v.as_str()) {
-        Some(event_type) => {
-            match trim_and_validate_token_with_max_len(event_type, MAX_TARGET_TOKEN_LENGTH) {
-                Ok(event_type) => event_type,
-                Err(error) => {
-                    warn!(
-                        event_type = %event_type,
-                        message = %error,
-                        "Malformed OBS event payload: invalid eventType"
-                    );
-                    return;
-                }
-            }
-        }
-        None => {
-            warn!("Malformed OBS event: missing or invalid eventType");
-            return;
-        }
+    let Some(payload) = EventPayload::parse(data) else {
+        return;
     };
-    let event_data = data.get("eventData").cloned().unwrap_or(Value::Null);
-
-    let required_str = |field: &str| -> Option<String> {
-        event_data
-            .get(field)
-            .and_then(|v| {
-                let value = v.as_str()?;
-                match trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH) {
-                    Ok(value) => Some(value),
-                    Err(error) => {
-                        warn!(
-                            event_type = %event_type,
-                            field = %field,
-                            message = %error,
-                            "Malformed OBS event payload: string field invalid"
-                        );
-                        None
-                    }
-                }
-            })
-            .or_else(|| {
-                warn!(
-                    event_type = %event_type,
-                    field = %field,
-                    "Malformed OBS event payload: missing or invalid string field"
-                );
-                None
-            })
+    let Some(event) = translate_event(payload) else {
+        return;
     };
+    let _ = event_tx.send(event).await;
+}
 
-    let required_bool = |field: &str| -> Option<bool> {
-        event_data.get(field).and_then(|v| v.as_bool()).or_else(|| {
-            warn!(
-                event_type = %event_type,
-                field = %field,
-                "Malformed OBS event payload: missing or invalid boolean field"
-            );
-            None
-        })
-    };
-
-    let required_f64 = |field: &str| -> Option<f64> {
-        event_data.get(field).and_then(|v| v.as_f64()).or_else(|| {
-            warn!(
-                event_type = %event_type,
-                field = %field,
-                "Malformed OBS event payload: missing or invalid number field"
-            );
-            None
-        })
-    };
-
-    let required_array = |field: &str| -> Option<&Vec<Value>> {
-        event_data
-            .get(field)
-            .and_then(|v| v.as_array())
-            .or_else(|| {
-                warn!(
-                    event_type = %event_type,
-                    field = %field,
-                    "Malformed OBS event payload: missing or invalid array field"
-                );
-                None
-            })
-    };
-
-    let event = match event_type.as_str() {
+/// Turns a validated payload into the internal event, or `None` when a field
+/// the event cannot do without was malformed (already logged by the lookup).
+fn translate_event(payload: EventPayload) -> Option<ObsEvent> {
+    let event = match payload.event_type.as_str() {
         "CurrentProgramSceneChanged" => ObsEvent::CurrentProgramSceneChanged {
-            scene_name: match required_str("sceneName") {
-                Some(value) => value,
-                None => return,
-            },
+            scene_name: payload.required_str("sceneName")?,
         },
         "SceneCreated" | "SceneRemoved" | "SceneNameChanged" | "SceneListReindexed" => {
             ObsEvent::SceneListChanged
         }
         "InputCreated" => ObsEvent::InputCreated {
-            input_name: match required_str("inputName") {
-                Some(value) => value,
-                None => return,
-            },
+            input_name: payload.required_str("inputName")?,
         },
         "InputRemoved" => ObsEvent::InputRemoved {
-            input_name: match required_str("inputName") {
-                Some(value) => value,
-                None => return,
-            },
+            input_name: payload.required_str("inputName")?,
         },
         "InputMuteStateChanged" => ObsEvent::InputMuteStateChanged {
-            input_name: match required_str("inputName") {
-                Some(value) => value,
-                None => return,
-            },
-            muted: match required_bool("inputMuted") {
-                Some(value) => value,
-                None => return,
-            },
+            input_name: payload.required_str("inputName")?,
+            muted: payload.required_bool("inputMuted")?,
         },
         "InputVolumeChanged" => ObsEvent::InputVolumeChanged {
-            input_name: match required_str("inputName") {
-                Some(value) => value,
-                None => return,
-            },
-            volume_mul: match required_f64("inputVolumeMul")
-                .filter(|value| value.is_finite() && *value >= 0.0)
-            {
-                Some(value) => value,
-                None => {
-                    warn!(
-                        event_type = %event_type,
-                        field = "inputVolumeMul",
-                        "Malformed OBS InputVolumeChanged payload: inputVolumeMul must be finite and non-negative"
-                    );
-                    return;
-                }
-            },
-            volume_db: match required_f64("inputVolumeDb").filter(|value| value.is_finite()) {
-                Some(value) => value,
-                None => {
-                    warn!(
-                        event_type = %event_type,
-                        field = "inputVolumeDb",
-                        "Malformed OBS InputVolumeChanged payload: inputVolumeDb must be finite"
-                    );
-                    return;
-                }
-            },
+            input_name: payload.required_str("inputName")?,
+            volume_mul: payload.required_volume_multiplier("inputVolumeMul")?,
+            volume_db: payload.required_decibels("inputVolumeDb")?,
         },
-        "InputVolumeMeters" => {
-            let inputs = match required_array("inputs") {
-                Some(inputs) => inputs,
-                None => return,
-            };
-            let input_names = match extract_resource_names(&event_data, "inputs", "inputName") {
-                Ok(values) => values,
-                Err(error) => {
-                    warn!(
-                        event_type = %event_type,
-                        message = %error,
-                        "Malformed OBS InputVolumeMeters payload: invalid inputName list"
-                    );
-                    return;
-                }
-            };
-
-            let mut had_invalid_entry = false;
-            let mut parsed_inputs: Vec<(String, f32)> = Vec::new();
-
-            for (name, input) in input_names.into_iter().zip(inputs.iter()) {
-                let levels = match input.get("inputLevelsMul") {
-                    Some(Value::Array(levels)) => levels,
-                    None => {
-                        had_invalid_entry = true;
-                        continue;
-                    }
-                    Some(invalid) => {
-                        warn!(
-                            event_type = %event_type,
-                            input = %name,
-                            data = %invalid,
-                            "Malformed OBS InputVolumeMeters payload: inputLevelsMul must be an array"
-                        );
-                        had_invalid_entry = true;
-                        continue;
-                    }
-                };
-
-                // OBS emits one [magnitude, peak, inputPeak] tuple per
-                // channel. A meter may temporarily have no channels before
-                // its first audio capture callback, which is a valid silent
-                // reading rather than a malformed entry.
-                let mut max_mag = 0.0_f32;
-                for channel in levels {
-                    let raw = match channel.as_array().and_then(|ch| ch.first()) {
-                        Some(v) => v,
-                        None => {
-                            had_invalid_entry = true;
-                            continue;
-                        }
-                    };
-                    let value = match raw.as_f64().map(|value| value as f32) {
-                        Some(value) if value.is_finite() && value >= 0.0 => value,
-                        Some(_) | None => {
-                            had_invalid_entry = true;
-                            continue;
-                        }
-                    };
-                    max_mag = max_mag.max(value);
-                }
-
-                parsed_inputs.push((name, max_mag));
-            }
-
-            if had_invalid_entry {
-                warn!(
-                    event_type = %event_type,
-                    "Malformed OBS InputVolumeMeters payload: discarding event due to invalid entries"
-                );
-                return;
-            }
-            let inputs = parsed_inputs;
-            ObsEvent::InputVolumeMeters { inputs }
-        }
+        "InputVolumeMeters" => ObsEvent::InputVolumeMeters {
+            inputs: parse_volume_meters(&payload)?,
+        },
         "StreamStateChanged" => ObsEvent::StreamStateChanged {
-            active: match required_bool("outputActive") {
-                Some(value) => value,
-                None => return,
-            },
+            active: payload.required_bool("outputActive")?,
         },
         "RecordStateChanged" => ObsEvent::RecordStateChanged {
-            active: match required_bool("outputActive") {
-                Some(value) => value,
-                None => return,
-            },
+            active: payload.required_bool("outputActive")?,
         },
         "CurrentProfileChanged" => ObsEvent::CurrentProfileChanged {
-            profile_name: match required_str("profileName") {
-                Some(value) => value,
-                None => return,
-            },
+            profile_name: payload.required_str("profileName")?,
         },
         "ProfileListChanged" => ObsEvent::ProfileListChanged,
         "CurrentSceneCollectionChanged" => ObsEvent::CurrentSceneCollectionChanged {
-            scene_collection_name: match required_str("sceneCollectionName") {
-                Some(value) => value,
-                None => return,
-            },
+            scene_collection_name: payload.required_str("sceneCollectionName")?,
         },
         "SceneCollectionListChanged" => ObsEvent::SceneCollectionListChanged,
         _ => ObsEvent::Other {
-            event_type,
-            data: event_data,
+            event_type: payload.event_type.clone(),
+            data: payload.data.clone(),
         },
     };
+    Some(event)
+}
 
-    let _ = event_tx.send(event).await;
+/// Reduces the `InputVolumeMeters` payload to one peak level per input.
+///
+/// OBS emits a `[magnitude, peak, inputPeak]` tuple per audio channel, so the
+/// level shown for an input is the loudest magnitude across its channels. A
+/// meter with no channels yet — an input that has not run its first audio
+/// capture callback — is a valid silent reading, not a malformed entry.
+///
+/// Any genuinely invalid entry discards the whole event rather than reporting a
+/// partial set of levels that would look like some inputs went silent.
+fn parse_volume_meters(payload: &EventPayload) -> Option<Vec<(String, f32)>> {
+    let inputs = payload.required_array("inputs")?;
+    let input_names = extract_resource_names(&payload.data, "inputs", "inputName")
+        .map_err(|error| {
+            warn!(
+                event_type = %payload.event_type,
+                message = %error,
+                "Malformed OBS InputVolumeMeters payload: invalid inputName list"
+            );
+        })
+        .ok()?;
+
+    let mut had_invalid_entry = false;
+    let mut levels_by_input: Vec<(String, f32)> = Vec::new();
+
+    for (name, input) in input_names.into_iter().zip(inputs.iter()) {
+        let channels = match input.get("inputLevelsMul") {
+            Some(Value::Array(channels)) => channels,
+            None => {
+                had_invalid_entry = true;
+                continue;
+            }
+            Some(invalid) => {
+                warn!(
+                    event_type = %payload.event_type,
+                    input = %name,
+                    data = %invalid,
+                    "Malformed OBS InputVolumeMeters payload: inputLevelsMul must be an array"
+                );
+                had_invalid_entry = true;
+                continue;
+            }
+        };
+
+        let mut peak = 0.0_f32;
+        for channel in channels {
+            match channel
+                .as_array()
+                .and_then(|values| values.first())
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32)
+            {
+                Some(magnitude) if magnitude.is_finite() && magnitude >= 0.0 => {
+                    peak = peak.max(magnitude);
+                }
+                _ => had_invalid_entry = true,
+            }
+        }
+
+        levels_by_input.push((name, peak));
+    }
+
+    if had_invalid_entry {
+        warn!(
+            event_type = %payload.event_type,
+            "Malformed OBS InputVolumeMeters payload: discarding event due to invalid entries"
+        );
+        return None;
+    }
+    Some(levels_by_input)
 }
 
 /// Probe a WebSocket message without error – used in fake server tests.
@@ -846,6 +843,37 @@ mod tests {
             let (tx, mut rx) = mpsc::channel(8);
             dispatch_event(data, &tx).await;
             assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
+        });
+    }
+
+    #[test]
+    fn obs_event_forwards_volume_changed_with_negative_decibels() {
+        // Decibel levels below zero are the normal case for anything quieter
+        // than unity gain, so only the linear multiplier rejects negatives.
+        let data = serde_json::json!({
+            "eventType": "InputVolumeChanged",
+            "eventData": {
+                "inputName": "Mic",
+                "inputVolumeMul": 0.25,
+                "inputVolumeDb": -12.3
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            let event = timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                event,
+                ObsEvent::InputVolumeChanged {
+                    input_name: "Mic".to_string(),
+                    volume_mul: 0.25,
+                    volume_db: -12.3,
+                }
+            );
         });
     }
 
