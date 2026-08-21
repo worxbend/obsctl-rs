@@ -73,12 +73,53 @@ impl Default for TuiOptions {
     }
 }
 
-pub async fn run(socket_path: &Path, options: TuiOptions) -> Result<i32> {
-    enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
-    if options.mouse {
-        execute!(stdout(), EnableMouseCapture)?;
+/// Owns the terminal's alternate screen, raw mode, and mouse reporting for as
+/// long as the TUI is running, and gives them back when it is dropped.
+///
+/// The teardown used to be three statements after the event loop. Anything
+/// that left `run` earlier — the `?` on building the `Terminal`, the `?` on
+/// the splash, or a panic anywhere in the loop — skipped all three and handed
+/// the user back a terminal still in raw mode on the alternate screen, with
+/// mouse reporting on: no echo, no working Ctrl-C, and their shell prompt
+/// hidden. Recovering meant knowing to type `reset` blind. Unwinding runs a
+/// `Drop`, so putting the teardown here covers every exit.
+struct TerminalGuard {
+    mouse: bool,
+}
+
+impl TerminalGuard {
+    /// Put the terminal into the mode the TUI needs.
+    ///
+    /// The guard is created first and each step applied after, so a failure
+    /// part-way through is still undone by the drop.
+    fn acquire(mouse: bool) -> Result<Self> {
+        let guard = Self { mouse };
+        enable_raw_mode()?;
+        execute!(stdout(), EnterAlternateScreen)?;
+        if mouse {
+            execute!(stdout(), EnableMouseCapture)?;
+        }
+        Ok(guard)
     }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        // Best effort throughout: this runs during unwinding as well as on the
+        // normal path, and there is nowhere to report a failure to. Leaving a
+        // later step undone because an earlier one failed would be worse than
+        // trying them all.
+        if self.mouse {
+            let _ = execute!(stdout(), DisableMouseCapture);
+        }
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen);
+    }
+}
+
+pub async fn run(socket_path: &Path, options: TuiOptions) -> Result<i32> {
+    let _terminal_guard = TerminalGuard::acquire(options.mouse)?;
+
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -94,17 +135,7 @@ pub async fn run(socket_path: &Path, options: TuiOptions) -> Result<i32> {
         .await?;
     }
 
-    let result = run_loop(&mut terminal, socket_path, &options).await;
-
-    if options.mouse {
-        // Best-effort: leaving mouse reporting on would break the terminal
-        // for whatever runs next, so try to undo it even if the loop failed.
-        let _ = execute!(stdout(), DisableMouseCapture);
-    }
-    disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen)?;
-
-    result
+    run_loop(&mut terminal, socket_path, &options).await
 }
 
 /// Show the animated "obsctl" splash for `SPLASH_DURATION`, or until the
