@@ -373,6 +373,11 @@ async fn run_action(
     ctx: &ActionCtx<'_>,
 ) -> (bool, Option<String>) {
     let socket_path = ctx.socket_path;
+
+    if let Some((command, reply)) = daemon_command_for(&action) {
+        return (false, Some(reply.send(socket_path, command).await));
+    }
+
     match action {
         TuiAction::PaletteSubmit => {
             let input = model.command_palette.input.clone();
@@ -390,38 +395,6 @@ async fn run_action(
             }
             (false, Some(result))
         }
-        TuiAction::ReloadConfig => (
-            false,
-            Some(send_simple(socket_path, ServerCommand::ReloadConfig).await),
-        ),
-        TuiAction::DumpConfig => (
-            false,
-            Some(send_simple(socket_path, ServerCommand::DumpConfig).await),
-        ),
-        TuiAction::ValidateConfig => (
-            false,
-            Some(send_status(socket_path, ServerCommand::ValidateConfig).await),
-        ),
-        TuiAction::ObsStatus => (
-            false,
-            Some(send_status(socket_path, ServerCommand::GetObsStatus).await),
-        ),
-        TuiAction::ServerStatus => (
-            false,
-            Some(send_status(socket_path, ServerCommand::GetServerStatus).await),
-        ),
-        TuiAction::ToggleStream => (
-            false,
-            Some(send_simple(socket_path, ServerCommand::ToggleStream).await),
-        ),
-        TuiAction::ToggleRecord => (
-            false,
-            Some(send_simple(socket_path, ServerCommand::ToggleRecord).await),
-        ),
-        TuiAction::ReconnectObs => (
-            false,
-            Some(send_simple(socket_path, ServerCommand::ReconnectObs).await),
-        ),
         TuiAction::ActivateIndex(panel, index) => {
             model.focus = panel;
             model.set_panel_cursor(panel, index);
@@ -934,27 +907,73 @@ fn sanitize_target_arg(value: &str) -> std::result::Result<String, String> {
         .map_err(|error| format!("{error}"))
 }
 
-fn format_ipc_response(res: Result<ServerMessage>, ok_fallback: &str) -> String {
-    match res {
-        Ok(ServerMessage::Response {
-            ok, result, error, ..
-        }) => {
-            if ok {
-                result
-                    .as_ref()
-                    .and_then(|v| v.get("message"))
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| ok_fallback.to_string())
-            } else {
-                error
-                    .map(|e| format!("error [{}]: {}", e.code, e.message))
-                    .unwrap_or_else(|| "error".to_string())
-            }
-        }
-        Ok(_) => "unexpected response".to_string(),
-        Err(e) => format!("error: {e}"),
+/// How to describe a successful reply that carried no human-readable
+/// `message` field.
+#[derive(Clone, Copy)]
+enum ReplyStyle {
+    /// Commands whose worth is that they succeeded — say so and stop.
+    Acknowledge,
+    /// Query commands whose worth is in the payload; a bare "ok" would throw
+    /// away the very thing the user asked for, so render the payload instead.
+    ShowPayload,
+}
+
+impl ReplyStyle {
+    async fn send(self, socket_path: &Path, command: ServerCommand) -> String {
+        let payload = CommandPayload::simple(command);
+        self.format(send_command(socket_path, payload).await, "ok")
     }
+
+    /// Turn a daemon reply into the one status line the TUI has room for.
+    fn format(self, res: Result<ServerMessage>, ok_fallback: &str) -> String {
+        match res {
+            Ok(ServerMessage::Response {
+                ok, result, error, ..
+            }) => {
+                if ok {
+                    self.describe_success(result.as_ref(), ok_fallback)
+                } else {
+                    error
+                        .map(|e| format!("error [{}]: {}", e.code, e.message))
+                        .unwrap_or_else(|| "error".to_string())
+                }
+            }
+            Ok(_) => "unexpected response".to_string(),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+
+    fn describe_success(self, result: Option<&serde_json::Value>, ok_fallback: &str) -> String {
+        result
+            .and_then(|v| v.get("message"))
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .or_else(|| match self {
+                ReplyStyle::Acknowledge => None,
+                ReplyStyle::ShowPayload => result.map(summarize_json),
+            })
+            .unwrap_or_else(|| ok_fallback.to_string())
+    }
+}
+
+/// The commands that are nothing but "send this to the daemon and report what
+/// it said", paired with how to render the reply.
+///
+/// A table rather than one match arm each: the arms were eight copies of the
+/// same two lines, so a new command of this kind is now one row here.
+fn daemon_command_for(action: &TuiAction) -> Option<(ServerCommand, ReplyStyle)> {
+    let pair = match action {
+        TuiAction::ReloadConfig => (ServerCommand::ReloadConfig, ReplyStyle::Acknowledge),
+        TuiAction::DumpConfig => (ServerCommand::DumpConfig, ReplyStyle::Acknowledge),
+        TuiAction::ToggleStream => (ServerCommand::ToggleStream, ReplyStyle::Acknowledge),
+        TuiAction::ToggleRecord => (ServerCommand::ToggleRecord, ReplyStyle::Acknowledge),
+        TuiAction::ReconnectObs => (ServerCommand::ReconnectObs, ReplyStyle::Acknowledge),
+        TuiAction::ValidateConfig => (ServerCommand::ValidateConfig, ReplyStyle::ShowPayload),
+        TuiAction::ObsStatus => (ServerCommand::GetObsStatus, ReplyStyle::ShowPayload),
+        TuiAction::ServerStatus => (ServerCommand::GetServerStatus, ReplyStyle::ShowPayload),
+        _ => return None,
+    };
+    Some(pair)
 }
 
 async fn send_simple_with_target(
@@ -962,13 +981,18 @@ async fn send_simple_with_target(
     command: ServerCommand,
     target: &str,
 ) -> String {
-    let target = match sanitize_target_arg(target) {
+    let target = match checked_target(target) {
         Ok(target) => target,
-        Err(error) => return format!("error: invalid target: {error}"),
+        Err(message) => return message,
     };
 
     let payload = CommandPayload::with_target(command, &target);
-    format_ipc_response(send_command(socket_path, payload).await, "ok")
+    ReplyStyle::Acknowledge.format(send_command(socket_path, payload).await, "ok")
+}
+
+/// Validate a target name, returning the status line to show on rejection.
+fn checked_target(target: &str) -> std::result::Result<String, String> {
+    sanitize_target_arg(target).map_err(|error| format!("error: invalid target: {error}"))
 }
 
 /// Adjust the focused input's volume by `delta` percentage points: update the
@@ -990,51 +1014,19 @@ fn adjust_focused_volume(
 }
 
 async fn send_set_volume(socket_path: &Path, target: &str, percent: u8) -> String {
-    let target = match sanitize_target_arg(target) {
+    let target = match checked_target(target) {
         Ok(target) => target,
-        Err(error) => return format!("error: invalid target: {error}"),
+        Err(message) => return message,
     };
     if percent > 100 {
         return "error: volume percent must be 0-100".to_string();
     }
 
     let payload = CommandPayload::set_volume(&target, percent);
-    format_ipc_response(
+    ReplyStyle::Acknowledge.format(
         send_command(socket_path, payload).await,
         &format!("volume → {percent}%"),
     )
-}
-
-async fn send_simple(socket_path: &Path, command: ServerCommand) -> String {
-    let payload = CommandPayload::simple(command);
-    format_ipc_response(send_command(socket_path, payload).await, "ok")
-}
-
-/// Like [`send_simple`], but for the query commands whose usefulness is in
-/// the payload — a bare "ok" would throw away everything the user asked for.
-async fn send_status(socket_path: &Path, command: ServerCommand) -> String {
-    let payload = CommandPayload::simple(command);
-    match send_command(socket_path, payload).await {
-        Ok(ServerMessage::Response {
-            ok, result, error, ..
-        }) => {
-            if ok {
-                result
-                    .as_ref()
-                    .and_then(|v| v.get("message"))
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string)
-                    .or_else(|| result.as_ref().map(summarize_json))
-                    .unwrap_or_else(|| "ok".to_string())
-            } else {
-                error
-                    .map(|e| format!("error [{}]: {}", e.code, e.message))
-                    .unwrap_or_else(|| "error".to_string())
-            }
-        }
-        Ok(_) => "unexpected response".to_string(),
-        Err(e) => format!("error: {e}"),
-    }
 }
 
 /// One-line rendering of a status payload, truncated on a char boundary so
