@@ -31,7 +31,7 @@ use obsctl_rs::{
     server::{
         client_registry::ClientRegistry,
         command_executor::{CommandExecutor, CommandExecutorConfig},
-        obs_supervisor::ObsSupervisor,
+        obs_supervisor::{ObsSupervisor, ObsSupervisorConfig},
         state_store::StateStore,
     },
 };
@@ -216,15 +216,15 @@ async fn start_test_server_with_obs_supervisor(
         shutdown_tx: shutdown_tx.clone(),
         hub: Arc::clone(&hub),
     });
-    let supervisor = ObsSupervisor::new(
-        Arc::clone(&config),
-        state.clone(),
+    let supervisor = ObsSupervisor::new(ObsSupervisorConfig {
+        config: Arc::clone(&config),
+        state: state.clone(),
         obs_handle,
-        Arc::clone(&reconnecting),
+        reconnecting: Arc::clone(&reconnecting),
         reconnect_rx,
-        shutdown_rx.clone(),
-        Arc::clone(&hub),
-    );
+        shutdown: shutdown_rx.clone(),
+        hub: Arc::clone(&hub),
+    });
 
     let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
     tokio::spawn(executor.run(cmd_rx));

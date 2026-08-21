@@ -35,24 +35,33 @@ pub struct ObsSupervisor {
     hub: Arc<BroadcastHub>,
 }
 
+/// Everything the supervisor needs to be handed at startup.
+///
+/// A struct rather than seven positional parameters, matching
+/// `CommandExecutorConfig` next to it in the daemon's wiring: the daemon
+/// constructs both one after the other, and reading two adjacent call sites
+/// written in two different styles is harder than it needs to be. It also
+/// means each value is named where it is passed.
+pub struct ObsSupervisorConfig {
+    pub config: Arc<Mutex<Config>>,
+    pub state: StateStore,
+    pub obs_handle: Arc<Mutex<Option<ObsClient>>>,
+    pub reconnecting: Arc<AtomicBool>,
+    pub reconnect_rx: mpsc::Receiver<()>,
+    pub shutdown: watch::Receiver<bool>,
+    pub hub: Arc<BroadcastHub>,
+}
+
 impl ObsSupervisor {
-    pub fn new(
-        config: Arc<Mutex<Config>>,
-        state: StateStore,
-        obs_handle: Arc<Mutex<Option<ObsClient>>>,
-        reconnecting: Arc<AtomicBool>,
-        reconnect_rx: mpsc::Receiver<()>,
-        shutdown: watch::Receiver<bool>,
-        hub: Arc<BroadcastHub>,
-    ) -> Self {
+    pub fn new(cfg: ObsSupervisorConfig) -> Self {
         Self {
-            config,
-            state,
-            obs_handle,
-            reconnecting,
-            reconnect_rx,
-            shutdown,
-            hub,
+            config: cfg.config,
+            state: cfg.state,
+            obs_handle: cfg.obs_handle,
+            reconnecting: cfg.reconnecting,
+            reconnect_rx: cfg.reconnect_rx,
+            shutdown: cfg.shutdown,
+            hub: cfg.hub,
         }
     }
 

@@ -20,7 +20,7 @@ use crate::runtime::shutdown;
 use crate::server::{
     client_registry::ClientRegistry,
     command_executor::{CommandExecutor, CommandExecutorConfig},
-    obs_supervisor::ObsSupervisor,
+    obs_supervisor::{ObsSupervisor, ObsSupervisorConfig},
     options::ServerOptions,
     state_store::StateStore,
 };
@@ -92,15 +92,15 @@ pub async fn run(options: ServerOptions) -> i32 {
         hub: Arc::clone(&hub),
     });
 
-    let supervisor = ObsSupervisor::new(
-        Arc::clone(&config_shared),
-        state.clone(),
-        Arc::clone(&obs_handle),
-        Arc::clone(&reconnecting),
+    let supervisor = ObsSupervisor::new(ObsSupervisorConfig {
+        config: Arc::clone(&config_shared),
+        state: state.clone(),
+        obs_handle: Arc::clone(&obs_handle),
+        reconnecting: Arc::clone(&reconnecting),
         reconnect_rx,
-        shutdown_rx.clone(),
-        Arc::clone(&hub),
-    );
+        shutdown: shutdown_rx.clone(),
+        hub: Arc::clone(&hub),
+    });
 
     // Spawn tasks
     let _executor_handle = tokio::spawn(executor.run(cmd_rx));
