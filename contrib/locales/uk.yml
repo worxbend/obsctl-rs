@@ -78,6 +78,11 @@ tui:
     scene: "  сцена: %{scene}"
     profile: "  профіль: %{profile}"
 
+  events:
+    undecodable_state: "Пропущено оновлення стану, яке ця збірка не може прочитати: %{error}"
+    undecodable_log: "Пропущено нечитабельну подію журналу: %{error}"
+    undecodable_event: "Пропущено нечитабельну подію OBS: %{error}"
+
   connection:
     daemon_not_running: "сервер obsctl не запущено"
     could_not_connect: "Не вдалося з'єднатися з демоном obsctl."

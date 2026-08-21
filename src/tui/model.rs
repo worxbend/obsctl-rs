@@ -341,6 +341,20 @@ impl CommandPaletteState {
     }
 }
 
+impl TuiLogEntry {
+    /// A warning raised by the TUI itself rather than forwarded from the
+    /// daemon, so the log pane can show a local problem in the same place the
+    /// user already looks for remote ones.
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self {
+            level: LogLevel::Warn,
+            message: message.into(),
+            target: Some("obsctl_rs::tui".to_string()),
+            timestamp: OffsetDateTime::now_utc(),
+        }
+    }
+}
+
 impl From<LogEvent> for TuiLogEntry {
     fn from(event: LogEvent) -> Self {
         Self {

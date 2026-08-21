@@ -138,7 +138,9 @@ fn log_event_caps_at_200_entries() {
 }
 
 #[test]
-fn malformed_log_event_is_ignored() {
+/// A log event the TUI cannot decode is not forwarded as if it were one, but
+/// it is no longer dropped in silence either: the pane says one was skipped.
+fn malformed_log_event_is_reported_not_forwarded() {
     let mut model = TuiModel::default();
 
     let msg = ServerMessage::Event {
@@ -148,11 +150,19 @@ fn malformed_log_event_is_ignored() {
 
     apply_server_message(&mut model, msg);
 
-    assert!(model.logs.is_empty());
+    assert_eq!(model.logs.len(), 1, "expected exactly the skipped notice");
+    let entry = &model.logs[0];
+    assert_eq!(entry.level, LogLevel::Warn);
+    assert!(
+        !entry.message.contains("missing level and timestamp"),
+        "the undecodable payload must not be passed off as a real log line"
+    );
 }
 
 #[test]
-fn unknown_topic_is_ignored() {
+/// An OBS event payload this build cannot decode changes nothing about the
+/// model, but is surfaced so a TUI that has stopped tracking OBS says so.
+fn undecodable_obs_event_touches_nothing_but_is_reported() {
     let mut model = TuiModel::default();
 
     let msg = ServerMessage::Event {
@@ -164,7 +174,8 @@ fn unknown_topic_is_ignored() {
 
     assert!(!model.connected_to_daemon);
     assert!(model.snapshot.is_none());
-    assert!(model.logs.is_empty());
+    assert_eq!(model.logs.len(), 1);
+    assert_eq!(model.logs[0].level, LogLevel::Warn);
 }
 
 #[test]
@@ -180,6 +191,9 @@ fn malformed_state_payload_does_not_panic() {
     apply_server_message(&mut model, msg);
     // snapshot stays None because deserialization fails
     assert!(model.snapshot.is_none());
+    // ...and the user is told, rather than left looking at a frozen dashboard.
+    assert_eq!(model.logs.len(), 1);
+    assert_eq!(model.logs[0].level, LogLevel::Warn);
 }
 
 #[test]

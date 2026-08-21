@@ -74,6 +74,11 @@ tui:
     scene: "  scene: %{scene}"
     profile: "  profile: %{profile}"
 
+  events:
+    undecodable_state: "Ignored a state update this build cannot read: %{error}"
+    undecodable_log: "Ignored an unreadable log event: %{error}"
+    undecodable_event: "Ignored an unreadable OBS event: %{error}"
+
   connection:
     daemon_not_running: "obsctl server is not running"
     could_not_connect: "Could not connect to obsctl daemon."
