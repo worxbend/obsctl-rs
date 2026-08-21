@@ -44,28 +44,8 @@ pub async fn run(options: ServerOptions) -> i32 {
         }
     };
 
-    if let Err(err) = crate::ipc::socket_path::ensure_private_socket_parent(&socket_path) {
-        error!(
-            "Refusing to use socket path {}: {err}",
-            socket_path.display()
-        );
-        return 3;
-    }
-
-    if let Err(error) = validate_socket_path(&socket_path) {
-        error!("Invalid socket path {}: {error}", socket_path.display());
-        return 3;
-    }
-
-    // Remove stale socket file if present
-    if socket_path.exists() {
-        match try_remove_stale_socket(&socket_path).await {
-            Ok(()) => {}
-            Err(e) => {
-                error!("Socket path occupied by live server: {e}");
-                return 3;
-            }
-        }
+    if let Err(exit_code) = prepare_socket_path(&socket_path).await {
+        return exit_code;
     }
 
     let hub = Arc::new(BroadcastHub::new());
@@ -91,13 +71,9 @@ pub async fn run(options: ServerOptions) -> i32 {
                 return 3;
             }
         };
-    info!("IPC server listening at {}", socket_path.display());
-    hub.publish_log(
-        LogEvent::new(
-            LogLevel::Info,
-            format!("IPC server listening at {}", socket_path.display()),
-        )
-        .with_target("obsctl_rs::server::daemon"),
+    announce(
+        &hub,
+        format!("IPC server listening at {}", socket_path.display()),
     );
 
     // Install OS signal handlers
@@ -132,11 +108,7 @@ pub async fn run(options: ServerOptions) -> i32 {
 
     // Run accept loop until shutdown
     ipc_server.run(cmd_tx, shutdown_rx).await;
-    info!("IPC accept loop stopped");
-    hub.publish_log(
-        LogEvent::new(LogLevel::Info, "IPC accept loop stopped")
-            .with_target("obsctl_rs::server::daemon"),
-    );
+    announce(&hub, "IPC accept loop stopped");
 
     // Wait for supervisor
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), supervisor_handle).await;
@@ -149,18 +121,62 @@ pub async fn run(options: ServerOptions) -> i32 {
         );
     }
 
-    info!("obsctl server shutdown complete");
-    hub.publish_log(
-        LogEvent::new(LogLevel::Info, "obsctl server shutdown complete")
-            .with_target("obsctl_rs::server::daemon"),
-    );
+    announce(&hub, "obsctl server shutdown complete");
     0
+}
+
+/// Report a daemon lifecycle milestone to both places it has to appear: the
+/// process log, and the `logs` topic that connected clients watch.
+///
+/// Each of these used to be written out twice, once per destination, with the
+/// message text repeated — so the operator's terminal and the TUI's log pane
+/// could disagree about what happened after any edit that touched only one.
+fn announce(hub: &BroadcastHub, message: impl Into<String>) {
+    let message = message.into();
+    info!("{message}");
+    hub.publish_log(
+        LogEvent::new(LogLevel::Info, message).with_target("obsctl_rs::server::daemon"),
+    );
+}
+
+/// Make sure the socket path is one this daemon may bind, and that nothing is
+/// already using it.
+///
+/// Split out of `run` because it is a distinct phase with a distinct outcome:
+/// every failure here means "do not start", reported as the process exit code
+/// the caller should return, before any of the daemon's moving parts exist.
+async fn prepare_socket_path(socket_path: &Path) -> Result<(), i32> {
+    const SOCKET_SETUP_FAILURE: i32 = 3;
+
+    if let Err(err) = crate::ipc::socket_path::ensure_private_socket_parent(socket_path) {
+        error!(
+            "Refusing to use socket path {}: {err}",
+            socket_path.display()
+        );
+        return Err(SOCKET_SETUP_FAILURE);
+    }
+
+    if let Err(error) = validate_socket_path(socket_path) {
+        error!("Invalid socket path {}: {error}", socket_path.display());
+        return Err(SOCKET_SETUP_FAILURE);
+    }
+
+    // A socket file left behind by a crashed daemon must be cleared, but one
+    // belonging to a daemon that is still running must not be.
+    if socket_path.exists()
+        && let Err(e) = try_remove_stale_socket(socket_path).await
+    {
+        error!("Socket path occupied by live server: {e}");
+        return Err(SOCKET_SETUP_FAILURE);
+    }
+
+    Ok(())
 }
 
 /// Attempt to connect to an existing socket to verify it is alive.
 /// If it responds, the socket is live and we should not replace it.
 /// If it cannot connect or times out, we remove the stale file.
-async fn try_remove_stale_socket(path: &PathBuf) -> Result<(), String> {
+async fn try_remove_stale_socket(path: &Path) -> Result<(), String> {
     validate_socket_path(path).map_err(|error| {
         if error.to_string().contains("not a private directory") {
             "socket parent is not private".to_string()
@@ -176,10 +192,7 @@ async fn try_remove_stale_socket(path: &PathBuf) -> Result<(), String> {
         return Err("socket parent is not private".to_string());
     }
 
-    validate_socket_file_for_cleanup(path).map_err(|error| match error {
-        SocketFileValidation::Path(error) => error.to_string(),
-        SocketFileValidation::File(error) => error.to_string(),
-    })?;
+    validate_socket_file_for_cleanup(path).map_err(|error| error.to_string())?;
 
     use tokio::net::UnixStream;
 
@@ -196,10 +209,7 @@ async fn try_remove_stale_socket(path: &PathBuf) -> Result<(), String> {
         _ => {
             // Re-check the socket file immediately before deleting to avoid deleting a
             // newly replaced non-socket path under the same name.
-            validate_socket_file_for_cleanup(path).map_err(|error| match error {
-                SocketFileValidation::Path(error) => error.to_string(),
-                SocketFileValidation::File(error) => error.to_string(),
-            })?;
+            validate_socket_file_for_cleanup(path).map_err(|error| error.to_string())?;
 
             match fs::remove_with_type_guard(
                 path,
@@ -214,9 +224,23 @@ async fn try_remove_stale_socket(path: &PathBuf) -> Result<(), String> {
     }
 }
 
+/// Why a path that should hold a live IPC socket cannot be treated as one.
+///
+/// The two cases are kept apart for `cleanup_socket_file`, which tolerates a
+/// `File` error meaning "already gone" but not a `Path` error meaning "this is
+/// not a path we are willing to touch". Callers that only need to report the
+/// problem use the `Display` impl.
 enum SocketFileValidation {
     Path(std::io::Error),
     File(std::io::Error),
+}
+
+impl std::fmt::Display for SocketFileValidation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Path(error) | Self::File(error) => error.fmt(f),
+        }
+    }
 }
 
 fn validate_socket_file_for_cleanup(path: &Path) -> Result<(), SocketFileValidation> {
