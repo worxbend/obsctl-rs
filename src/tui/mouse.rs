@@ -2,7 +2,7 @@
 //! same [`TuiAction`]s the keyboard produces.
 //!
 //! Hit-testing needs to know where the last frame actually drew things, so
-//! [`render`](crate::tui::app) hands back a [`Hitboxes`] snapshot that this
+//! [`render`](crate::tui::render::render) hands back a [`Hitboxes`] snapshot that this
 //! module resolves against. Row lookup mirrors Ratatui's own list scrolling
 //! (see [`first_visible_index`]) — the widgets build a fresh `ListState` each
 //! frame, so the visible window is a pure function of the cursor and the
@@ -68,43 +68,51 @@ pub struct ListOffsets {
     pub settings: usize,
 }
 
-impl ListOffsets {
-    fn panel(&self, panel: FocusPanel) -> usize {
+/// Which offset belongs to which panel, in one place.
+///
+/// The mapping used to be written out wherever it was needed, so a panel
+/// added to the dashboard had to be remembered in several matches at once.
+impl std::ops::Index<FocusPanel> for ListOffsets {
+    type Output = usize;
+
+    fn index(&self, panel: FocusPanel) -> &usize {
         match panel {
-            FocusPanel::Scenes => self.scenes,
-            FocusPanel::Profiles => self.profiles,
-            FocusPanel::Collections => self.collections,
+            FocusPanel::Scenes => &self.scenes,
+            FocusPanel::Profiles => &self.profiles,
+            FocusPanel::Collections => &self.collections,
             // The audio matrix is columns of vertical strips, not a list; it
-            // maps clicks through `audio::strip_index_at` instead.
-            FocusPanel::Audio => 0,
+            // maps clicks through `audio::strip_index_at` instead, so it has
+            // no scroll offset of its own to report.
+            FocusPanel::Audio => &0,
+        }
+    }
+}
+
+/// Which rect belongs to which panel — the same idea as the offsets above,
+/// and the reason neither `panel_at` nor the half-page motions have to spell
+/// the mapping out again.
+impl std::ops::Index<FocusPanel> for Hitboxes {
+    type Output = Rect;
+
+    fn index(&self, panel: FocusPanel) -> &Rect {
+        match panel {
+            FocusPanel::Scenes => &self.scenes,
+            FocusPanel::Audio => &self.audio,
+            FocusPanel::Profiles => &self.profiles,
+            FocusPanel::Collections => &self.collections,
         }
     }
 }
 
 impl Hitboxes {
+    /// The panel `pos` landed in, with the area it was drawn in, or `None`
+    /// for a click outside all four. Panels never overlap, so the first hit
+    /// is the only hit.
     fn panel_at(&self, pos: Position) -> Option<(FocusPanel, Rect)> {
-        for (panel, area) in [
-            (FocusPanel::Scenes, self.scenes),
-            (FocusPanel::Audio, self.audio),
-            (FocusPanel::Profiles, self.profiles),
-            (FocusPanel::Collections, self.collections),
-        ] {
-            if contains(area, pos) {
-                return Some((panel, area));
-            }
-        }
-        None
-    }
-
-    /// Bordered area of `panel`, for callers that need its row count (the
-    /// half-page motions size themselves off the focused pane).
-    pub fn panel(&self, panel: FocusPanel) -> Rect {
-        match panel {
-            FocusPanel::Scenes => self.scenes,
-            FocusPanel::Audio => self.audio,
-            FocusPanel::Profiles => self.profiles,
-            FocusPanel::Collections => self.collections,
-        }
+        FocusPanel::ALL
+            .into_iter()
+            .map(|panel| (panel, self[panel]))
+            .find(|(_, area)| contains(*area, pos))
     }
 }
 
@@ -143,7 +151,7 @@ fn index_at(
         ),
         other => {
             let heights = vec![1u16; model.panel_len(other)];
-            index_at_row(area, &heights, hits.offsets.panel(other), pos.y)
+            index_at_row(area, &heights, hits.offsets[other], pos.y)
         }
     }
 }
@@ -203,8 +211,8 @@ fn settings_mouse(
         return None;
     }
     match event.kind {
-        MouseEventKind::ScrollUp => Some(TuiAction::SettingsNavUp(WHEEL_ROWS)),
-        MouseEventKind::ScrollDown => Some(TuiAction::SettingsNavDown(WHEEL_ROWS)),
+        MouseEventKind::ScrollUp => Some(TuiAction::NavUp(WHEEL_ROWS)),
+        MouseEventKind::ScrollDown => Some(TuiAction::NavDown(WHEEL_ROWS)),
         MouseEventKind::Down(MouseButton::Left) => {
             let heights = vec![1u16; crate::tui::theme::ALL.len()];
             let index = index_at_row(

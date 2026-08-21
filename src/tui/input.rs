@@ -51,7 +51,10 @@ pub enum TuiAction {
     /// Tab / Shift-Tab — cycle panels in reading order.
     FocusPaneNext,
     FocusPanePrev,
-    // List navigation. The `usize` is the typed count prefix (1 by default).
+    // Vertical navigation. The `usize` is the typed count prefix (1 by
+    // default). What these move depends on the screen that is up — the
+    // focused panel's list on the dashboard, the theme cursor in the settings
+    // view — and that choice is made once, in `TuiModel::nav_up` and friends.
     NavUp(usize),
     NavDown(usize),
     NavTop,
@@ -77,10 +80,7 @@ pub enum TuiAction {
     // Settings view
     OpenSettings,
     CloseSettings,
-    SettingsNavUp(usize),
-    SettingsNavDown(usize),
-    SettingsNavTop,
-    SettingsNavBottom,
+    /// Mouse: move the theme cursor straight to `index` and preview it.
     SettingsSelect(usize),
     ApplySettingsTheme,
     // Appearance toggles (`<leader>ui` / `<leader>ua`)
@@ -96,11 +96,15 @@ pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
     if model.command_palette.active {
         return palette_key(model, key);
     }
-    if model.view == View::Settings {
-        return settings_key(model, key);
-    }
+    // A half-typed sequence is resolved before the per-screen bindings, so
+    // every screen shares the one pending state machine in `keymap::resolve`.
+    // The settings view used to carry its own inline copy of the `g` prefix,
+    // which is how `gg` came to be spelled out twice.
     if model.pending.is_active() {
         return pending_key(model, key);
+    }
+    if model.view == View::Settings {
+        return settings_key(model, key);
     }
     main_key(model, key)
 }
@@ -129,23 +133,43 @@ fn palette_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
 }
 
 fn settings_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
-    if model.pending == Pending::G {
-        return match key.code {
-            KeyCode::Char('g') => Some(TuiAction::SettingsNavTop),
-            _ => Some(TuiAction::ClearPending),
-        };
-    }
-
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let count = model.count();
     match key.code {
+        // Ctrl-C leaves the program from here as it does from the dashboard.
+        // It used to be inert in this view, so a user who opened the theme
+        // picker had no way out but Esc.
+        KeyCode::Char('c') if ctrl => Some(TuiAction::Quit),
         KeyCode::Esc | KeyCode::F(2) | KeyCode::Char('q') => Some(TuiAction::CloseSettings),
-        KeyCode::Up | KeyCode::Char('k') => Some(TuiAction::SettingsNavUp(count)),
-        KeyCode::Down | KeyCode::Char('j') => Some(TuiAction::SettingsNavDown(count)),
-        KeyCode::Char('g') => Some(TuiAction::SetPending(Pending::G)),
-        KeyCode::Char('G') | KeyCode::End => Some(TuiAction::SettingsNavBottom),
-        KeyCode::Home => Some(TuiAction::SettingsNavTop),
         KeyCode::Char(d) if d.is_ascii_digit() => count_digit(model, d),
         KeyCode::Enter => Some(TuiAction::ApplySettingsTheme),
+        // Everything else this view moves — `k`/`j`, `gg`, `G`, `Home`/`End`,
+        // `PgUp`/`PgDn`, `Ctrl-U`/`Ctrl-D` — is the same motion vocabulary the
+        // dashboard uses, resolved by the one function below.
+        code => motion_key(code, ctrl, count),
+    }
+}
+
+/// The motions every screen shares, in one place so a key bound here works
+/// wherever there is something to move.
+///
+/// The plain (unmodified) motions are guarded on `!ctrl` because the
+/// dashboard gives `Ctrl-hjkl` and `Ctrl`+arrows to cross-panel focus, and a
+/// modifier must never fall through to the unmodified binding on the same key.
+/// Sideways keys are absent on purpose: `h`/`l` mean "previous/next channel
+/// strip" in the audio matrix and nothing anywhere else, so
+/// [`main_key`] handles them itself.
+fn motion_key(code: KeyCode, ctrl: bool, count: usize) -> Option<TuiAction> {
+    match code {
+        KeyCode::Char('d') if ctrl => Some(TuiAction::NavHalfPageDown),
+        KeyCode::Char('u') if ctrl => Some(TuiAction::NavHalfPageUp),
+        KeyCode::Up | KeyCode::Char('k') if !ctrl => Some(TuiAction::NavUp(count)),
+        KeyCode::Down | KeyCode::Char('j') if !ctrl => Some(TuiAction::NavDown(count)),
+        KeyCode::PageUp => Some(TuiAction::NavHalfPageUp),
+        KeyCode::PageDown => Some(TuiAction::NavHalfPageDown),
+        KeyCode::Char('g') => Some(TuiAction::SetPending(Pending::G)),
+        KeyCode::Char('G') | KeyCode::End => Some(TuiAction::NavBottom),
+        KeyCode::Home => Some(TuiAction::NavTop),
         _ => None,
     }
 }
@@ -171,8 +195,6 @@ fn main_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
         // wins over the plain binding on the same key.
         KeyCode::Char('c') if ctrl => Some(TuiAction::Quit),
         KeyCode::Char('t') if ctrl => Some(TuiAction::OpenSettings),
-        KeyCode::Char('d') if ctrl => Some(TuiAction::NavHalfPageDown),
-        KeyCode::Char('u') if ctrl => Some(TuiAction::NavHalfPageUp),
         KeyCode::Left | KeyCode::Char('h') if ctrl => Some(TuiAction::FocusPaneLeft),
         KeyCode::Right | KeyCode::Char('l') if ctrl => Some(TuiAction::FocusPaneRight),
         KeyCode::Up | KeyCode::Char('k') if ctrl => Some(TuiAction::FocusPaneUp),
@@ -194,10 +216,9 @@ fn main_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
             seed: "",
         }),
 
-        // Pending sequences.
+        // Pending sequences. `g` is a prefix too, but it is one of the shared
+        // motions, so `motion_key` opens it below.
         KeyCode::Char(LEADER) => Some(TuiAction::SetPending(Pending::Leader)),
-        KeyCode::Char('g') => Some(TuiAction::SetPending(Pending::G)),
-        KeyCode::Char('G') => Some(TuiAction::NavBottom),
         KeyCode::Char(d) if d.is_ascii_digit() => count_digit(model, d),
 
         KeyCode::Char('q') => Some(TuiAction::Quit),
@@ -231,16 +252,10 @@ fn main_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
             Some(TuiAction::VolumeDown(count))
         }
 
-        // Motions
-        KeyCode::Up | KeyCode::Char('k') => Some(TuiAction::NavUp(count)),
-        KeyCode::Down | KeyCode::Char('j') => Some(TuiAction::NavDown(count)),
-        KeyCode::PageUp => Some(TuiAction::NavHalfPageUp),
-        KeyCode::PageDown => Some(TuiAction::NavHalfPageDown),
-        KeyCode::Home => Some(TuiAction::NavTop),
-        KeyCode::End => Some(TuiAction::NavBottom),
         KeyCode::Enter => Some(TuiAction::Activate),
 
-        _ => None,
+        // Motions, shared with the settings view.
+        code => motion_key(code, ctrl, count),
     }
 }
 
@@ -523,11 +538,11 @@ mod tests {
 
         assert_eq!(
             handle_key(&model, key(KeyCode::Down)),
-            Some(TuiAction::SettingsNavDown(1))
+            Some(TuiAction::NavDown(1))
         );
         assert_eq!(
             handle_key(&model, key(KeyCode::Up)),
-            Some(TuiAction::SettingsNavUp(1))
+            Some(TuiAction::NavUp(1))
         );
         assert_eq!(
             handle_key(&model, key(KeyCode::Enter)),
@@ -554,18 +569,68 @@ mod tests {
             Some(TuiAction::SetPending(Pending::G))
         );
         model.pending = Pending::G;
-        assert_eq!(handle_key(&model, ch('g')), Some(TuiAction::SettingsNavTop));
+        assert_eq!(handle_key(&model, ch('g')), Some(TuiAction::NavTop));
 
         model.pending = Pending::None;
-        assert_eq!(
-            handle_key(&model, ch('G')),
-            Some(TuiAction::SettingsNavBottom)
-        );
+        assert_eq!(handle_key(&model, ch('G')), Some(TuiAction::NavBottom));
 
         model.pending_count = Some(5);
+        assert_eq!(handle_key(&model, ch('j')), Some(TuiAction::NavDown(5)));
+    }
+
+    /// The settings view used to reach `_ => None` for all of these, so the
+    /// page keys did nothing there and — worse — Ctrl-C could not end the
+    /// program once the theme picker was open.
+    #[test]
+    fn settings_view_answers_the_same_page_and_quit_keys_as_the_dashboard() {
+        let mut model = TuiModel::default();
+        model.view = View::Settings;
+
         assert_eq!(
-            handle_key(&model, ch('j')),
-            Some(TuiAction::SettingsNavDown(5))
+            handle_key(&model, ctrl_key(KeyCode::Char('c'))),
+            Some(TuiAction::Quit)
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::PageDown)),
+            Some(TuiAction::NavHalfPageDown)
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::PageUp)),
+            Some(TuiAction::NavHalfPageUp)
+        );
+        assert_eq!(
+            handle_key(&model, ctrl_key(KeyCode::Char('d'))),
+            Some(TuiAction::NavHalfPageDown)
+        );
+        assert_eq!(
+            handle_key(&model, ctrl_key(KeyCode::Char('u'))),
+            Some(TuiAction::NavHalfPageUp)
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Home)),
+            Some(TuiAction::NavTop)
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::End)),
+            Some(TuiAction::NavBottom)
+        );
+    }
+
+    /// The `g` prefix is resolved by `keymap::resolve` on every screen, so the
+    /// settings view cannot drift away from what `gg` means elsewhere.
+    #[test]
+    fn a_pending_sequence_resolves_the_same_way_in_the_settings_view() {
+        let mut model = TuiModel::default();
+        model.view = View::Settings;
+        model.pending = Pending::G;
+
+        assert_eq!(handle_key(&model, ch('g')), Some(TuiAction::NavTop));
+        // An unmapped second key dismisses the overlay rather than firing
+        // whatever that key means on its own.
+        assert_eq!(handle_key(&model, ch('z')), Some(TuiAction::ClearPending));
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Esc)),
+            Some(TuiAction::ClearPending)
         );
     }
 

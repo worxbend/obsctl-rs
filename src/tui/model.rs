@@ -6,7 +6,11 @@ use crate::{
     ipc::protocol::{LogEvent, LogLevel},
     obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState, ServerStatus},
     tui::{
-        anim::AnimClock, input::MAX_COUNT, keymap::Pending, series::RollingSeries, theme::Theme,
+        anim::AnimClock,
+        input::MAX_COUNT,
+        keymap::Pending,
+        series::RollingSeries,
+        theme::{self, Theme},
     },
 };
 
@@ -303,6 +307,22 @@ pub struct CommandPaletteState {
 }
 
 impl CommandPaletteState {
+    /// Open the palette on a fresh line: the prompt `prefix` followed by
+    /// `seed`, which the `<leader>f…` mappings use to jump straight into a
+    /// half-typed command (`":scene "`).
+    ///
+    /// The counterpart to [`close`](CommandPaletteState::close), and here for
+    /// the same reason: opening was four field assignments at the call site,
+    /// so a field added later could be reset on the way out and forgotten on
+    /// the way in.
+    pub fn open(&mut self, prefix: char, seed: &str) {
+        self.active = true;
+        self.input.clear();
+        self.input.push(prefix);
+        self.input.push_str(seed);
+        self.completion_idx = None;
+    }
+
     /// Dismiss the palette, discarding whatever was typed and any completions
     /// offered for it.
     ///
@@ -428,9 +448,49 @@ impl TuiModel {
 
     /// Abandon any half-typed sequence: closes the which-key overlay and
     /// drops the count prefix.
+    ///
+    /// This is the bookkeeping the event loop does after *every* completed
+    /// action. What the user's own cancel key does is
+    /// [`cancel`](TuiModel::cancel), which is deliberately more than this.
     pub fn clear_pending(&mut self) {
         self.pending = Pending::None;
         self.pending_count = None;
+    }
+
+    /// What Esc (and a right-click) does: abandon a half-typed sequence *and*
+    /// snap the log pane back to the live tail.
+    ///
+    /// The tail snap used to sit inline in the action handler, which made
+    /// "clear pending" mean two different things depending on whether the user
+    /// asked for it or the event loop did it automatically after some other
+    /// key. Naming the user-facing one separately keeps the automatic clear
+    /// from dragging the log pane back down every time anything happens —
+    /// which would make scrolling the log impossible.
+    pub fn cancel(&mut self) {
+        self.clear_pending();
+        self.log_scroll = 0;
+    }
+
+    /// Edit the command line and bring its completion list back into step.
+    ///
+    /// Every edit changes what could be completed, and the recompute used to
+    /// be a separate call the five editing actions each had to remember; one
+    /// forgotten call left a stale completion menu on screen offering
+    /// candidates for a line that is no longer typed. Same mutate-then-
+    /// re-derive shape as [`update_snapshot`](TuiModel::update_snapshot).
+    pub fn edit_palette(&mut self, edit: impl FnOnce(&mut CommandPaletteState)) {
+        edit(&mut self.command_palette);
+        let input = self.command_palette.input.clone();
+        let completions = crate::tui::completion::compute(&input, self);
+        self.command_palette.completions = completions;
+        self.command_palette.completion_idx = None;
+    }
+
+    /// Open the command line, resolving `prefix` against the configured
+    /// `ui.command_palette_prefix` when the binding did not name one.
+    pub fn open_palette(&mut self, prefix: Option<char>, seed: &str) {
+        let prefix = prefix.unwrap_or(self.palette_prefix);
+        self.edit_palette(|palette| palette.open(prefix, seed));
     }
 
     pub fn symbol(&self, rich: &'static str, ascii: &'static str) -> &'static str {
@@ -675,6 +735,90 @@ impl TuiModel {
 
     pub fn move_to_bottom(&mut self) {
         self.set_panel_cursor(self.focus, usize::MAX);
+    }
+
+    /// The four vertical motions (`k`/`j`, `gg`/`G`, `Home`/`End`, the
+    /// half-page keys) mean two different things depending on which screen is
+    /// up: on the dashboard they move the focused panel's list cursor, and in
+    /// the settings view they move the theme cursor and live-preview whatever
+    /// it lands on.
+    ///
+    /// Both meanings are decided here rather than at each of the six actions
+    /// that produce a motion, and rather than in a second set of
+    /// `SettingsNav*` actions that used to shadow these. One place decides, so
+    /// a motion added to the keyboard or the mouse cannot work on one screen
+    /// and silently do nothing on the other.
+    pub fn nav_up(&mut self, rows: usize) {
+        match self.view {
+            View::Settings => self.preview_theme(self.settings_cursor.saturating_sub(rows)),
+            View::Main => self.move_up_by(rows),
+        }
+    }
+
+    pub fn nav_down(&mut self, rows: usize) {
+        match self.view {
+            View::Settings => self.preview_theme(self.settings_cursor.saturating_add(rows)),
+            View::Main => self.move_down_by(rows),
+        }
+    }
+
+    pub fn nav_top(&mut self) {
+        match self.view {
+            View::Settings => self.preview_theme(0),
+            View::Main => self.move_to_top(),
+        }
+    }
+
+    pub fn nav_bottom(&mut self) {
+        match self.view {
+            View::Settings => self.preview_theme(usize::MAX),
+            View::Main => self.move_to_bottom(),
+        }
+    }
+
+    /// Enter the settings view, remembering the theme that was active so a
+    /// close without confirming can put it back.
+    ///
+    /// The theme picker is four fields moving together (`view`,
+    /// `settings_cursor`, `theme`, `theme_preview_origin`) and its invariant —
+    /// `theme_preview_origin` is `Some` exactly while the picker is open — was
+    /// spread over four blocks in the event loop. Each transition is one named
+    /// method here instead, beside the fields it constrains.
+    pub fn open_theme_picker(&mut self) {
+        self.theme_preview_origin = Some(self.theme);
+        self.settings_cursor = self.theme.index();
+        self.view = View::Settings;
+    }
+
+    /// Leave the picker without choosing: restore the theme that was active
+    /// when it opened, discarding whatever was being previewed.
+    pub fn cancel_theme_picker(&mut self) {
+        if let Some(original) = self.theme_preview_origin.take() {
+            self.theme = original;
+        }
+        self.view = View::Main;
+    }
+
+    /// Confirm the previewed theme and leave the picker. Returns the chosen
+    /// theme so the caller can persist it to the config file — that write is
+    /// the one part of this transition that is not model state.
+    pub fn apply_theme_picker(&mut self) -> Theme {
+        let chosen = theme::ALL[self.settings_cursor.min(theme::ALL.len().saturating_sub(1))];
+        self.theme = chosen;
+        self.theme_preview_origin = None;
+        self.view = View::Main;
+        chosen
+    }
+
+    /// Move the settings cursor to `index` (clamped to the list of themes)
+    /// and make that theme active straight away, so the user judges it on the
+    /// whole UI rather than on a swatch. Leaving the picker without
+    /// confirming puts the previous theme back — see
+    /// [`cancel_theme_picker`](TuiModel::cancel_theme_picker).
+    pub fn preview_theme(&mut self, index: usize) {
+        let max = theme::ALL.len().saturating_sub(1);
+        self.settings_cursor = index.min(max);
+        self.theme = theme::ALL[self.settings_cursor];
     }
 
     /// Keep cursors within valid list bounds; call after snapshot updates.
@@ -1213,6 +1357,142 @@ mod tests {
         assert_eq!(model.focused_scene_collection(), Some("Gaming"));
         model.move_up();
         assert_eq!(model.focused_scene_collection(), Some("Podcast"));
+    }
+
+    #[test]
+    fn opening_the_theme_picker_remembers_the_current_theme() {
+        let mut model = TuiModel::default();
+        let original_theme = model.theme;
+
+        model.open_theme_picker();
+
+        assert_eq!(model.view, View::Settings);
+        assert_eq!(model.theme_preview_origin, Some(original_theme));
+        assert_eq!(model.settings_cursor, original_theme.index());
+    }
+
+    /// Previewing then cancelling must leave no trace: the theme goes back and
+    /// the "we are previewing" marker is dropped, or the next cancel would
+    /// restore a theme from a picker session that ended long ago.
+    #[test]
+    fn cancelling_the_theme_picker_restores_the_theme_it_opened_with() {
+        let mut model = TuiModel::default();
+        let original_theme = model.theme;
+
+        model.open_theme_picker();
+        model.nav_down(2);
+        assert_ne!(model.theme, original_theme, "previewing changes the theme");
+
+        model.cancel_theme_picker();
+        assert_eq!(model.theme, original_theme);
+        assert_eq!(model.theme_preview_origin, None);
+        assert_eq!(model.view, View::Main);
+    }
+
+    #[test]
+    fn applying_the_theme_picker_keeps_the_previewed_theme() {
+        let mut model = TuiModel::default();
+        model.open_theme_picker();
+        model.nav_bottom();
+        let previewed = model.theme;
+
+        let chosen = model.apply_theme_picker();
+
+        assert_eq!(chosen, previewed);
+        assert_eq!(model.theme, previewed);
+        assert_eq!(model.theme_preview_origin, None);
+        assert_eq!(model.view, View::Main);
+    }
+
+    /// The same motion means "move the list cursor" on the dashboard and
+    /// "move the theme cursor" in the picker, decided in one place.
+    #[test]
+    fn vertical_motions_follow_the_screen_that_is_up() {
+        let mut model =
+            model_with_scenes((0..10).map(|i| make_scene(&i.to_string(), false)).collect());
+
+        model.nav_down(3);
+        assert_eq!(model.panel_cursor(FocusPanel::Scenes), 3);
+        assert_eq!(model.settings_cursor, 0, "the picker is not open");
+
+        model.view = View::Settings;
+        model.nav_down(2);
+        assert_eq!(model.settings_cursor, 2);
+        assert_eq!(
+            model.panel_cursor(FocusPanel::Scenes),
+            3,
+            "the list cursor stays where it was"
+        );
+
+        model.nav_top();
+        assert_eq!(model.settings_cursor, 0);
+        model.nav_bottom();
+        assert_eq!(model.settings_cursor, theme::ALL.len() - 1);
+    }
+
+    /// Editing the command line re-derives its completions, so no editing key
+    /// can leave a menu describing a line that is no longer typed.
+    #[test]
+    fn editing_the_palette_refreshes_its_completions() {
+        let mut model = TuiModel::default();
+
+        model.open_palette(Some(':'), "sce");
+        assert_eq!(model.command_palette.input, ":sce");
+        assert!(
+            model
+                .command_palette
+                .completions
+                .iter()
+                .any(|c| c == ":scene"),
+            "completions: {:?}",
+            model.command_palette.completions
+        );
+
+        model.edit_palette(CommandPaletteState::clear_to_prefix);
+        assert_eq!(model.command_palette.input, ":");
+        assert!(
+            model.command_palette.completions.len() > 1,
+            "an empty line offers every command"
+        );
+        assert_eq!(model.command_palette.completion_idx, None);
+    }
+
+    /// The configured prompt character is used when a binding does not name
+    /// one of its own.
+    #[test]
+    fn opening_the_palette_falls_back_to_the_configured_prefix() {
+        let mut model = TuiModel {
+            palette_prefix: '/',
+            ..Default::default()
+        };
+        model.open_palette(None, "");
+        assert_eq!(model.command_palette.input, "/");
+        assert!(model.command_palette.active);
+    }
+
+    /// Esc snaps the log pane back to the live tail; the automatic clear the
+    /// event loop does after every action must not, or the pane would jump
+    /// back down on the next keypress and scrollback would be unusable.
+    #[test]
+    fn cancelling_follows_the_log_tail_again_but_clearing_pending_does_not() {
+        let mut model = TuiModel::default();
+        for i in 0..20 {
+            model.push_log(TuiLogEntry {
+                level: LogLevel::Info,
+                message: format!("line {i}"),
+                target: None,
+                timestamp: OffsetDateTime::UNIX_EPOCH,
+            });
+        }
+        model.scroll_logs_up(5, 6);
+        model.pending = Pending::G;
+
+        model.clear_pending();
+        assert_eq!(model.pending, Pending::None);
+        assert_eq!(model.log_scroll, 5, "still reading scrolled-back history");
+
+        model.cancel();
+        assert_eq!(model.log_scroll, 0);
     }
 
     #[test]

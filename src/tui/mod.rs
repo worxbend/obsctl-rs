@@ -1,12 +1,15 @@
+pub mod actions;
 pub mod anim;
 pub mod app;
 pub mod completion;
+pub mod daemon;
 pub mod event_applier;
 pub mod input;
 pub mod keymap;
 pub mod layout;
 pub mod model;
 pub mod mouse;
+pub mod render;
 pub mod series;
 pub mod session;
 pub mod spinner;
