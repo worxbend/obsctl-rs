@@ -15,49 +15,47 @@ pub fn extract_resource_names(
     list_key: &str,
     name_key: &str,
 ) -> Result<Vec<String>, ObsctlError> {
-    let list = value
-        .get(list_key)
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            ObsctlError::ObsRequestFailed(format!("missing or invalid '{list_key}' payload"))
-        })?;
-
-    let mut names = Vec::with_capacity(list.len());
-    let mut dedup = HashSet::new();
-
-    for item in list {
-        let name = item
-            .as_object()
-            .and_then(|obj| obj.get(name_key))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ObsctlError::ObsRequestFailed(format!("missing '{name_key}' in '{list_key}' item"))
-            })?;
-
-        let trimmed = trim_and_validate_token_with_max_len(name, MAX_TARGET_TOKEN_LENGTH).map_err(
-            |error| {
-                ObsctlError::ObsRequestFailed(format!(
-                    "invalid '{name_key}' in '{list_key}' item: {error}"
-                ))
-            },
-        )?;
-
-        if !dedup.insert(trimmed.clone()) {
-            return Err(ObsctlError::ObsRequestFailed(format!(
-                "duplicate '{name_key}' in '{list_key}': '{trimmed}'"
-            )));
-        }
-
-        names.push(trimmed);
-    }
-
-    Ok(names)
+    collect_unique_names(
+        value,
+        list_key,
+        &format!("'{name_key}' in '{list_key}'"),
+        |item| {
+            item.as_object()
+                .and_then(|obj| obj.get(name_key))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ObsctlError::ObsRequestFailed(format!(
+                        "missing '{name_key}' in '{list_key}' item"
+                    ))
+                })
+        },
+    )
 }
 
 /// Extract and validate an array of plain string values (e.g. profile
 /// names). Unlike `extract_resource_names`, entries are raw JSON strings
 /// rather than `{ name_key: "..." }` objects.
 pub fn extract_string_array(value: &Value, list_key: &str) -> Result<Vec<String>, ObsctlError> {
+    collect_unique_names(value, list_key, &format!("entry in '{list_key}'"), |item| {
+        item.as_str().ok_or_else(|| {
+            ObsctlError::ObsRequestFailed(format!("non-string entry in '{list_key}'"))
+        })
+    })
+}
+
+/// The part both extractors have in common: require `list_key` to be an
+/// array, pull one name out of each entry with `read_name`, validate it as a
+/// target token, and reject any name that repeats.
+///
+/// `noun` names an entry in the error messages — `"'sceneName' in 'scenes'"`
+/// or `"entry in 'profiles'"` — so the two callers keep their own wording
+/// without keeping their own copy of the loop.
+fn collect_unique_names<'a>(
+    value: &'a Value,
+    list_key: &str,
+    noun: &str,
+    read_name: impl Fn(&'a Value) -> Result<&'a str, ObsctlError>,
+) -> Result<Vec<String>, ObsctlError> {
     let list = value
         .get(list_key)
         .and_then(|v| v.as_array())
@@ -66,22 +64,17 @@ pub fn extract_string_array(value: &Value, list_key: &str) -> Result<Vec<String>
         })?;
 
     let mut names = Vec::with_capacity(list.len());
-    let mut dedup = HashSet::new();
+    let mut seen = HashSet::new();
 
     for item in list {
-        let name = item.as_str().ok_or_else(|| {
-            ObsctlError::ObsRequestFailed(format!("non-string entry in '{list_key}'"))
-        })?;
+        let name = read_name(item)?;
 
-        let trimmed = trim_and_validate_token_with_max_len(name, MAX_TARGET_TOKEN_LENGTH).map_err(
-            |error| {
-                ObsctlError::ObsRequestFailed(format!("invalid entry in '{list_key}': {error}"))
-            },
-        )?;
+        let trimmed = trim_and_validate_token_with_max_len(name, MAX_TARGET_TOKEN_LENGTH)
+            .map_err(|error| ObsctlError::ObsRequestFailed(format!("invalid {noun}: {error}")))?;
 
-        if !dedup.insert(trimmed.clone()) {
+        if !seen.insert(trimmed.clone()) {
             return Err(ObsctlError::ObsRequestFailed(format!(
-                "duplicate entry in '{list_key}': '{trimmed}'"
+                "duplicate {noun}: '{trimmed}'"
             )));
         }
 

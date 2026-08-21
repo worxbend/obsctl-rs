@@ -459,12 +459,12 @@ impl EventPayload {
         })
     }
 
-    /// A decibel level: any finite number, since audio dB is normally negative.
+    /// A number that is neither NaN nor an infinity.
     ///
-    /// The finiteness check is defence in depth rather than input validation —
-    /// `serde_json` already rejects out-of-range numbers while parsing, so a
-    /// NaN or infinity can only reach here from a payload built in-process.
-    fn required_decibels(&self, field: &str) -> Option<f64> {
+    /// This is defence in depth rather than input validation — `serde_json`
+    /// already rejects out-of-range numbers while parsing, so a NaN or
+    /// infinity can only reach here from a payload built in-process.
+    fn required_finite_f64(&self, field: &str) -> Option<f64> {
         let value = self.required_f64(field)?;
         if !value.is_finite() {
             self.warn_field(field, "Malformed OBS event payload: level is not finite");
@@ -473,10 +473,15 @@ impl EventPayload {
         Some(value)
     }
 
+    /// A decibel level: any finite number, since audio dB is normally negative.
+    fn required_decibels(&self, field: &str) -> Option<f64> {
+        self.required_finite_f64(field)
+    }
+
     /// A linear volume multiplier: finite and at or above zero, because a
     /// negative multiplier would invert the waveform rather than attenuate it.
     fn required_volume_multiplier(&self, field: &str) -> Option<f64> {
-        let value = self.required_decibels(field)?;
+        let value = self.required_finite_f64(field)?;
         if value < 0.0 {
             self.warn_field(
                 field,
