@@ -24,6 +24,38 @@ use crate::{
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// A budget for frames that arrive while waiting for one specific reply.
+///
+/// The server may legitimately interleave pushed events and replies to other
+/// requests, so a frame that is not the one being waited on is skipped rather
+/// than treated as an error. Without a cap that skipping is an unbounded loop,
+/// which is why the count exists at all.
+struct UnmatchedFrames {
+    count: usize,
+    waiting_for: &'static str,
+}
+
+impl UnmatchedFrames {
+    fn waiting_for(waiting_for: &'static str) -> Self {
+        Self {
+            count: 0,
+            waiting_for,
+        }
+    }
+
+    /// Count one skipped frame, failing once the cap is passed.
+    fn record(&mut self) -> Result<()> {
+        self.count += 1;
+        if self.count > MAX_UNMATCHED_IPC_RESPONSES {
+            return Err(ObsctlError::IpcProtocolError(format!(
+                "too many unmatched IPC frames waiting for {}",
+                self.waiting_for
+            )));
+        }
+        Ok(())
+    }
+}
+
 pub fn next_request_id() -> String {
     let n = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("req-{n:06}")
@@ -106,6 +138,25 @@ impl IpcClient {
         Ok(line)
     }
 
+    /// Encode one client message and write it to the socket.
+    ///
+    /// The size check is the client's half of the framing contract: the server
+    /// refuses to read a line longer than `MAX_IPC_LINE_BYTES`, so sending one
+    /// would mean a dropped connection rather than an error the caller can
+    /// report. Both senders below go through here so neither can skip it.
+    async fn send_frame(&mut self, msg: &ClientMessage) -> Result<()> {
+        let encoded = encode(msg)?;
+        if encoded.len() > MAX_IPC_LINE_BYTES {
+            return Err(ObsctlError::IpcProtocolError(
+                "request frame too large".to_string(),
+            ));
+        }
+        self.writer
+            .write_all(encoded.as_bytes())
+            .await
+            .map_err(ObsctlError::Io)
+    }
+
     /// Send a command and wait for the correlated response.
     pub async fn send_command(&mut self, payload: CommandPayload) -> Result<ServerMessage> {
         validate_command_name(&payload.name).map_err(|error| {
@@ -117,18 +168,9 @@ impl IpcClient {
             id: id.clone(),
             command: payload,
         };
-        let encoded = encode(&msg)?;
-        if encoded.len() > MAX_IPC_LINE_BYTES {
-            return Err(ObsctlError::IpcProtocolError(
-                "request frame too large".to_string(),
-            ));
-        }
-        self.writer
-            .write_all(encoded.as_bytes())
-            .await
-            .map_err(ObsctlError::Io)?;
+        self.send_frame(&msg).await?;
 
-        let mut unmatched_responses = 0usize;
+        let mut unmatched = UnmatchedFrames::waiting_for("response");
         loop {
             let frame = self.read_frame("connection closed", "response").await?;
             let msg = decode::<ServerMessage>(&frame).map_err(|e| {
@@ -144,20 +186,10 @@ impl IpcClient {
                     if resp_id == &id {
                         return Ok(msg);
                     }
-                    unmatched_responses += 1;
-                    if unmatched_responses > MAX_UNMATCHED_IPC_RESPONSES {
-                        return Err(ObsctlError::IpcProtocolError(
-                            "too many unmatched IPC frames waiting for response".to_string(),
-                        ));
-                    }
+                    unmatched.record()?;
                 }
                 _ => {
-                    unmatched_responses += 1;
-                    if unmatched_responses > MAX_UNMATCHED_IPC_RESPONSES {
-                        return Err(ObsctlError::IpcProtocolError(
-                            "too many unmatched IPC frames waiting for response".to_string(),
-                        ));
-                    }
+                    unmatched.record()?;
                     continue;
                 }
             }
@@ -180,18 +212,9 @@ impl IpcClient {
             id: id.clone(),
             topics,
         };
-        let encoded = encode(&msg)?;
-        if encoded.len() > MAX_IPC_LINE_BYTES {
-            return Err(ObsctlError::IpcProtocolError(
-                "request frame too large".to_string(),
-            ));
-        }
-        self.writer
-            .write_all(encoded.as_bytes())
-            .await
-            .map_err(ObsctlError::Io)?;
+        self.send_frame(&msg).await?;
 
-        let mut unmatched_responses = 0usize;
+        let mut unmatched = UnmatchedFrames::waiting_for("subscribe response");
         loop {
             let frame = self
                 .read_frame("connection closed before subscribe ack", "response")
@@ -220,22 +243,10 @@ impl IpcClient {
                             return Err(ObsctlError::IpcProtocolError(msg.to_string()));
                         }
                     }
-                    unmatched_responses += 1;
-                    if unmatched_responses > MAX_UNMATCHED_IPC_RESPONSES {
-                        return Err(ObsctlError::IpcProtocolError(
-                            "too many unmatched IPC frames waiting for subscribe response"
-                                .to_string(),
-                        ));
-                    }
+                    unmatched.record()?;
                 }
                 _ => {
-                    unmatched_responses += 1;
-                    if unmatched_responses > MAX_UNMATCHED_IPC_RESPONSES {
-                        return Err(ObsctlError::IpcProtocolError(
-                            "too many unmatched IPC frames waiting for subscribe response"
-                                .to_string(),
-                        ));
-                    }
+                    unmatched.record()?;
                 }
             }
         }
@@ -243,7 +254,7 @@ impl IpcClient {
 
     /// Read the next pushed event from the server, skipping responses.
     pub async fn next_event(&mut self) -> Result<ServerMessage> {
-        let mut unmatched_responses = 0usize;
+        let mut unmatched = UnmatchedFrames::waiting_for("event");
         loop {
             let frame = self.read_frame("connection closed", "event").await?;
             let msg = decode::<ServerMessage>(&frame).map_err(|e| {
@@ -255,12 +266,7 @@ impl IpcClient {
                     validate_ipc_request_id(&id).map_err(|error| {
                         ObsctlError::IpcProtocolError(format!("malformed response id: {error}"))
                     })?;
-                    unmatched_responses += 1;
-                    if unmatched_responses > MAX_UNMATCHED_IPC_RESPONSES {
-                        return Err(ObsctlError::IpcProtocolError(
-                            "too many unmatched IPC frames waiting for event".to_string(),
-                        ));
-                    }
+                    unmatched.record()?;
                 }
             }
         }
