@@ -740,9 +740,7 @@ impl TuiModel {
             && let Some(a) = snapshot.audio_inputs.iter_mut().find(|a| a.name == name)
         {
             let mul = crate::domain::volume::percent_to_mul(percent);
-            a.volume_percent = Some(percent);
-            a.volume_mul = Some(mul);
-            a.volume_db = Some(crate::domain::volume::mul_to_db(mul));
+            a.set_level(mul);
         }
     }
 

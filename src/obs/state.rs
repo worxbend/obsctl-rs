@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+
+use crate::domain::volume::{mul_to_db, mul_to_percent};
 use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,9 +121,49 @@ pub struct AudioState {
     pub shortcut: Option<String>,
     pub kind: Option<String>,
     pub muted: Option<bool>,
+    /// One level in three representations — see [`AudioState::set_level`].
+    /// Public because serde carries them across the IPC boundary; set them
+    /// through the methods rather than individually.
     pub volume_mul: Option<f64>,
     pub volume_db: Option<f64>,
     pub volume_percent: Option<u8>,
+}
+
+impl AudioState {
+    /// Set this input's level from a linear multiplier, deriving the decibel
+    /// and percentage views of it.
+    ///
+    /// The three fields are one quantity written three ways: the multiplier
+    /// OBS works in, the decibels the audio panel prints, and the percentage
+    /// the volume commands use. They were maintained by three separate blocks
+    /// of three assignments each, and `widgets::audio` reads two of them
+    /// independently — so a writer that set the multiplier and forgot the
+    /// decibels would render "60%" beside a stale "-12.0 dB" with nothing
+    /// failing.
+    pub fn set_level(&mut self, volume_mul: f64) {
+        self.set_level_with_db(volume_mul, mul_to_db(volume_mul));
+    }
+
+    /// As [`AudioState::set_level`], but keeping the decibel value OBS
+    /// reported rather than deriving it.
+    ///
+    /// OBS sends both in `InputVolumeChanged`, and its dB is not exactly
+    /// `mul_to_db` of its multiplier — it rounds. Recomputing would change the
+    /// number the daemon publishes for a level OBS already described, which an
+    /// integration test pins (`inputVolumeMul: 0.42` is reported as `-7.5`,
+    /// while `mul_to_db(0.42)` is -7.535…).
+    pub fn set_level_with_db(&mut self, volume_mul: f64, volume_db: f64) {
+        self.volume_mul = Some(volume_mul);
+        self.volume_db = Some(volume_db);
+        self.volume_percent = Some(mul_to_percent(volume_mul));
+    }
+
+    /// Forget the level, for an input OBS has not reported one for.
+    pub fn clear_level(&mut self) {
+        self.volume_mul = None;
+        self.volume_db = None;
+        self.volume_percent = None;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

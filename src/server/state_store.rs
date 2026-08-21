@@ -6,7 +6,6 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use crate::config::model::{AudioInputConfig, SceneConfig};
-use crate::domain::volume::{mul_to_db, mul_to_percent};
 use crate::ipc::{
     protocol::{ServerMessage, Topic},
     session::BroadcastHub,
@@ -330,9 +329,9 @@ fn mutate_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                 .iter_mut()
                 .find(|a| a.name == input_name)
             {
-                a.volume_mul = Some(volume_mul);
-                a.volume_db = Some(volume_db);
-                a.volume_percent = Some(mul_to_percent(volume_mul));
+                // OBS reported both, and its dB is rounded rather than
+                // exactly `mul_to_db` of its multiplier; keep what it sent.
+                a.set_level_with_db(volume_mul, volume_db);
                 true
             } else {
                 false
@@ -472,11 +471,12 @@ pub fn build_snapshot(
                 name: input.name.clone(),
                 kind: None,
                 muted: input.muted,
-                volume_mul: input.volume_mul,
-                volume_db: input.volume_mul.map(mul_to_db),
-                volume_percent: input.volume_mul.map(mul_to_percent),
                 ..AudioState::default()
             };
+            match input.volume_mul {
+                Some(volume_mul) => state.set_level(volume_mul),
+                None => state.clear_level(),
+            }
             apply_audio_config(&mut state, audio_cfgs.iter().find(|c| c.name == input.name));
             state
         })
