@@ -81,6 +81,10 @@ impl CommandRunner for SystemctlRunner {
     }
 }
 
+fn invalid_systemctl_path(program: &str) -> ObsctlError {
+    ObsctlError::ServiceInstallFailed(format!("invalid systemctl path: {program}"))
+}
+
 fn resolve_systemctl_program(program: &str) -> Result<PathBuf> {
     if program.is_empty() {
         return Err(ObsctlError::ServiceInstallFailed(
@@ -91,23 +95,17 @@ fn resolve_systemctl_program(program: &str) -> Result<PathBuf> {
     let candidate = Path::new(program);
     if candidate.is_absolute() {
         if fs::has_path_traversal(candidate) {
-            return Err(ObsctlError::ServiceInstallFailed(format!(
-                "invalid systemctl path: {program}"
-            )));
+            return Err(invalid_systemctl_path(program));
         }
         if candidate.file_name().and_then(|name| name.to_str()) != Some(SYSTEMCTL_PROGRAM_NAME) {
-            return Err(ObsctlError::ServiceInstallFailed(format!(
-                "invalid systemctl path: {program}"
-            )));
+            return Err(invalid_systemctl_path(program));
         }
         validate_systemctl_binary(candidate)
             .map_err(|error| ObsctlError::ServiceInstallFailed(error.to_string()))?;
         return Ok(candidate.to_path_buf());
     }
     if candidate.components().count() > 1 {
-        return Err(ObsctlError::ServiceInstallFailed(format!(
-            "invalid systemctl path: {program}"
-        )));
+        return Err(invalid_systemctl_path(program));
     }
 
     if program != SYSTEMCTL_PROGRAM_NAME {
@@ -150,17 +148,20 @@ fn systemctl_safe_env_vars() -> Vec<(String, String)> {
     envs
 }
 
+/// Refuse to execute a systemctl binary that anyone but its owner could have
+/// replaced.
+///
+/// The permission bits are read from the metadata `ensure_regular_file_with_metadata`
+/// already returned, rather than by stating the path a second time. Two stats
+/// leave a window in which the thing that was checked and the thing that is
+/// described are not the same file.
 #[cfg(unix)]
 fn validate_systemctl_binary(path: &Path) -> std::io::Result<()> {
-    if fs::ensure_path_not_symlink(path).is_err() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "path is symbolic link",
-        ));
-    }
-    fs::ensure_regular_file_with_metadata(path)?;
+    fs::ensure_path_not_symlink(path)?;
+    let metadata = fs::ensure_regular_file_with_metadata(path)?;
+
     use std::os::unix::fs::PermissionsExt;
-    let permissions = path.metadata()?.permissions();
+    let permissions = metadata.permissions();
 
     if permissions.mode() & 0o111 == 0 {
         return Err(std::io::Error::new(
@@ -186,15 +187,7 @@ fn validate_systemctl_binary(path: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn validate_systemctl_binary(path: &Path) -> std::io::Result<()> {
     fs::ensure_path_not_symlink(path)?;
-    let metadata = std::fs::symlink_metadata(path)?;
-
-    if !metadata.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path is not a regular file",
-        ));
-    }
-    Ok(())
+    fs::ensure_regular_file(path)
 }
 
 #[cfg(test)]
