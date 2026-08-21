@@ -1,5 +1,5 @@
 use ratatui::{
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     symbols::border,
     text::{Line, Span},
     widgets::{Block, BorderType, Borders},
@@ -17,6 +17,42 @@ pub const ASCII_BORDER: border::Set = border::Set {
     horizontal_top: "-",
     horizontal_bottom: "-",
 };
+
+/// A plain bordered box in the theme's chrome, for the parts of the UI that
+/// are not selectable list panels — the header, the status pane, the live bar,
+/// the settings view, the connection notice.
+///
+/// Every one of them built the same `Block` by hand and then remembered to
+/// swap in the ASCII border set when the model is in no-icon mode. Forgetting
+/// that last step is invisible in a normal terminal and only shows up as
+/// mojibake for the users who asked for ASCII output, so it happens here
+/// instead of at seven call sites.
+pub fn bordered<'a>(
+    model: &TuiModel,
+    border_type: BorderType,
+    border_color: Color,
+    title: impl Into<Line<'a>>,
+) -> Block<'a> {
+    ascii_aware(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(border_type)
+            .border_style(Style::default().fg(border_color))
+            .title(title),
+        model,
+    )
+}
+
+/// Swap a block's box-drawing border for the ASCII one when the model is in
+/// no-icon mode. Both [`bordered`] and [`panel`] apply this already; call it
+/// directly only for a block built some other way.
+pub fn ascii_aware<'a>(block: Block<'a>, model: &TuiModel) -> Block<'a> {
+    if model.advanced_ui {
+        block
+    } else {
+        block.border_set(ASCII_BORDER)
+    }
+}
 
 /// Shared panel chrome: rounded inactive borders, a heavier focused frame,
 /// animated gradient headings, a count badge, and a dim keyboard hint.
@@ -72,11 +108,7 @@ pub fn panel<'a>(
             theme.border
         }))
         .title(Line::from(title_spans));
-    if model.advanced_ui {
-        block
-    } else {
-        block.border_set(ASCII_BORDER)
-    }
+    ascii_aware(block, model)
 }
 
 pub fn status_dot(active: bool, fancy: bool) -> &'static str {

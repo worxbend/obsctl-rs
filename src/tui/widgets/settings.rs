@@ -74,16 +74,12 @@ fn render_theme_list(f: &mut Frame, area: Rect, model: &TuiModel) {
         })
         .collect();
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
-        .title(format!(" Themes // {:02} palettes ", theme::ALL.len()));
-    let block = if model.advanced_ui {
-        block
-    } else {
-        block.border_set(chrome::ASCII_BORDER)
-    };
+    let block = chrome::bordered(
+        model,
+        BorderType::Rounded,
+        theme.border,
+        format!(" Themes // {:02} palettes ", theme::ALL.len()),
+    );
 
     let highlight_style = Style::default()
         .bg(theme.highlight_bg)
@@ -104,16 +100,12 @@ fn render_theme_list(f: &mut Frame, area: Rect, model: &TuiModel) {
 
 fn render_preview(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border_focus))
-        .title(format!(" Preview: {} ", theme.label));
-    let block = if model.advanced_ui {
-        block
-    } else {
-        block.border_set(chrome::ASCII_BORDER)
-    };
+    let block = chrome::bordered(
+        model,
+        BorderType::Rounded,
+        theme.border_focus,
+        format!(" Preview: {} ", theme.label),
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
 

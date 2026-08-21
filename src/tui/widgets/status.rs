@@ -14,7 +14,7 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{BorderType, Paragraph},
 };
 use rust_i18n::t;
 
@@ -45,11 +45,11 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         anim::blend(theme.border, theme.info, pulse * 0.25)
     };
     let title_icon = model.symbol("◉", "*");
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border))
-        .title(Line::styled(
+    let block = chrome::bordered(
+        model,
+        BorderType::Rounded,
+        border,
+        Line::styled(
             format!(" {title_icon} {} ", t!("tui.status.title")),
             Style::default()
                 .fg(if broadcasting {
@@ -58,12 +58,8 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
                     theme.muted
                 })
                 .add_modifier(Modifier::BOLD),
-        ));
-    let block = if model.advanced_ui {
-        block
-    } else {
-        block.border_set(chrome::ASCII_BORDER)
-    };
+        ),
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {

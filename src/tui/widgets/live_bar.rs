@@ -13,7 +13,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{BorderType, Paragraph},
 };
 use ratatui_braille_bar::BrailleBar;
 
@@ -61,16 +61,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, include_badges: bool)
                 .add_modifier(Modifier::BOLD),
         )
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border))
-        .title(title);
-    let block = if model.advanced_ui {
-        block
-    } else {
-        block.border_set(chrome::ASCII_BORDER)
-    };
+    let block = chrome::bordered(model, BorderType::Rounded, border, title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {

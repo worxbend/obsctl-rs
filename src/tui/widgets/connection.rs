@@ -4,7 +4,7 @@ use ratatui::{
     style::Modifier,
     style::Style,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{BorderType, Paragraph},
 };
 use rust_i18n::t;
 
@@ -77,16 +77,7 @@ pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
     } else {
         theme.danger
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(border_color))
-        .title(title);
-    let block = if model.advanced_ui {
-        block
-    } else {
-        block.border_set(chrome::ASCII_BORDER)
-    };
+    let block = chrome::bordered(model, BorderType::Double, border_color, title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(lines), inner);
@@ -122,16 +113,12 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         )]
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
-        .title(t!("tui.connection.title").into_owned());
-    let block = if model.advanced_ui {
-        block
-    } else {
-        block.border_set(chrome::ASCII_BORDER)
-    };
+    let block = chrome::bordered(
+        model,
+        BorderType::Rounded,
+        theme.border,
+        t!("tui.connection.title").into_owned(),
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(lines), inner);
