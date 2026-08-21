@@ -155,7 +155,29 @@ impl StateStore {
     }
 }
 
+/// Fold one OBS event into the cached snapshot, reporting whether anything
+/// actually changed.
+///
+/// `false` means "identical snapshot" and stops a redundant broadcast: OBS
+/// re-announces state the daemon already holds (a scene switched to the one
+/// already live, a mute set to the value already set), and every client is
+/// woken by a broadcast.
+///
+/// The `updated_at` stamp is applied here, once, rather than in each arm of
+/// [`mutate_snapshot`]. It used to be eight hand-written copies of the same
+/// line, so a new event handler was one forgotten line away from changing the
+/// snapshot while leaving it claiming it had not changed.
 fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
+    let changed = mutate_snapshot(snapshot, event);
+    if changed {
+        snapshot.updated_at = OffsetDateTime::now_utc();
+    }
+    changed
+}
+
+/// Apply `event` to `snapshot`, answering only "did this change anything?".
+/// Callers get the timestamp handling from [`apply_to_snapshot`].
+fn mutate_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
     match event {
         ObsEvent::CurrentProgramSceneChanged { scene_name } => {
             if snapshot.current_scene.as_deref() == Some(&scene_name) {
@@ -165,7 +187,6 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                 s.active = s.name == scene_name;
             }
             snapshot.current_scene = Some(scene_name);
-            snapshot.updated_at = OffsetDateTime::now_utc();
             true
         }
         // The supervisor answers these with a full refresh, which broadcasts
@@ -180,17 +201,12 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                 name: input_name,
                 ..AudioState::default()
             });
-            snapshot.updated_at = OffsetDateTime::now_utc();
             true
         }
         ObsEvent::InputRemoved { input_name } => {
             let before = snapshot.audio_inputs.len();
             snapshot.audio_inputs.retain(|a| a.name != input_name);
-            if snapshot.audio_inputs.len() == before {
-                return false;
-            }
-            snapshot.updated_at = OffsetDateTime::now_utc();
-            true
+            snapshot.audio_inputs.len() != before
         }
         ObsEvent::InputMuteStateChanged { input_name, muted } => {
             if let Some(a) = snapshot
@@ -202,7 +218,6 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                     return false;
                 }
                 a.muted = Some(muted);
-                snapshot.updated_at = OffsetDateTime::now_utc();
                 true
             } else {
                 false
@@ -221,7 +236,6 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                 a.volume_mul = Some(volume_mul);
                 a.volume_db = Some(volume_db);
                 a.volume_percent = Some(mul_to_percent(volume_mul));
-                snapshot.updated_at = OffsetDateTime::now_utc();
                 true
             } else {
                 false
@@ -232,7 +246,6 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                 return false;
             }
             snapshot.streaming = active;
-            snapshot.updated_at = OffsetDateTime::now_utc();
             true
         }
         ObsEvent::RecordStateChanged { active } => {
@@ -240,7 +253,6 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                 return false;
             }
             snapshot.recording = active;
-            snapshot.updated_at = OffsetDateTime::now_utc();
             true
         }
         ObsEvent::CurrentProfileChanged { profile_name } => {
@@ -248,7 +260,6 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                 return false;
             }
             snapshot.current_profile = Some(profile_name);
-            snapshot.updated_at = OffsetDateTime::now_utc();
             true
         }
         ObsEvent::ProfileListChanged => false,
@@ -259,7 +270,6 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                 return false;
             }
             snapshot.current_scene_collection = Some(scene_collection_name);
-            snapshot.updated_at = OffsetDateTime::now_utc();
             true
         }
         ObsEvent::SceneCollectionListChanged => false,
@@ -478,6 +488,42 @@ mod tests {
         assert_eq!(current.current_scene.as_deref(), Some("B"));
         assert!(current.scenes[1].active);
         assert!(!current.scenes[0].active);
+    }
+
+    /// Every event that changes the snapshot must also move `updated_at`, and
+    /// every event that changes nothing must leave it alone. Each match arm
+    /// used to stamp the time itself, so this pins the behaviour now that
+    /// `apply_to_snapshot` does it in one place for all of them.
+    #[tokio::test]
+    async fn changing_events_advance_updated_at_and_no_ops_do_not() {
+        let store = make_store();
+        store
+            .replace(ObsSnapshot {
+                streaming: false,
+                ..ObsSnapshot::default()
+            })
+            .await;
+        let before = store.read().await.updated_at;
+
+        store
+            .apply_event(ObsEvent::StreamStateChanged { active: true })
+            .await;
+        let after_change = store.read().await;
+        assert!(after_change.streaming);
+        assert!(
+            after_change.updated_at > before,
+            "a real change must move the timestamp"
+        );
+
+        // OBS re-announcing the state we already hold is not a change.
+        store
+            .apply_event(ObsEvent::StreamStateChanged { active: true })
+            .await;
+        assert_eq!(
+            store.read().await.updated_at,
+            after_change.updated_at,
+            "a no-op event must leave the timestamp alone"
+        );
     }
 
     #[tokio::test]
