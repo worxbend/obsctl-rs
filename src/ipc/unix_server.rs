@@ -11,8 +11,8 @@ use crate::ipc::{
     codec::{decode, encode},
     protocol::{
         ClientMessage, CommandPayload, ErrorPayload, MAX_IPC_LINE_BYTES, PublicErrorCode,
-        ServerMessage, TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE, Topic, normalize_subscribe_topics,
-        validate_command_name, validate_ipc_request_id,
+        ServerCommand, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE, Topic,
+        normalize_subscribe_topics, validate_command_name, validate_ipc_request_id,
     },
     session::{BroadcastHub, CommandDispatch, SessionSubscriptions},
     socket_path::ensure_socket_file,
@@ -241,130 +241,168 @@ async fn handle_line(
 
     match msg {
         ClientMessage::Command { id, command } => {
-            if let Err(error) = validate_ipc_request_id(&id) {
-                send_encoded(
-                    &err_response(id, PublicErrorCode::IpcProtocolError, &error),
-                    write_tx,
-                )
-                .await;
-                return false;
-            }
-            if let Err(error) = validate_command_name(&command.name) {
-                send_encoded(
-                    &err_response(id, PublicErrorCode::IpcProtocolError, &error),
-                    write_tx,
-                )
-                .await;
-                return false;
-            }
-
-            let write_tx = write_tx.clone();
-            let id_clone = id.clone();
-            let (reply_tx, reply_rx) = oneshot::channel();
-            if command_tx
-                .send(CommandDispatch {
-                    id,
-                    payload: command,
-                    reply: reply_tx,
-                })
-                .await
-                .is_err()
-            {
-                send_encoded(
-                    &err_response(
-                        id_clone,
-                        PublicErrorCode::ServerError,
-                        "command handler unavailable",
-                    ),
-                    &write_tx,
-                )
-                .await;
-                return false;
-            }
-            tokio::spawn(async move {
-                let response = match reply_rx.await {
-                    Ok(r) => sanitize_response_id(r, &id_clone),
-                    Err(_) => err_response(
-                        id_clone,
-                        PublicErrorCode::ServerError,
-                        "command handler dropped",
-                    ),
-                };
-                send_encoded(&response, &write_tx).await;
-            });
+            handle_command(id, command, command_tx, write_tx).await
         }
-
         ClientMessage::Subscribe { id, topics } => {
-            if let Err(error) = validate_ipc_request_id(&id) {
-                send_encoded(
-                    &err_response(id, PublicErrorCode::IpcProtocolError, &error),
-                    write_tx,
-                )
-                .await;
-                return false;
-            }
-
-            let topics = match normalize_subscribe_topics(topics) {
-                Ok(topics) => topics,
-                Err(error) => {
-                    send_encoded(&error.to_protocol_response(id), write_tx).await;
-                    return false;
-                }
-            };
-            let needs_initial_state =
-                topics.iter().any(|t| t == TOPIC_STATE) && !subs.is_state_subscribed();
-            for t in &topics {
-                subs.insert(t.clone());
-            }
-
-            let ack = ServerMessage::Response {
-                id: id.clone(),
-                ok: true,
-                result: Some(serde_json::json!({ "subscribed": topics })),
-                error: None,
-            };
-            send_encoded(&ack, write_tx).await;
-
-            if needs_initial_state {
-                let write_tx = write_tx.clone();
-                let (reply_tx, reply_rx) = oneshot::channel();
-                let dispatch = CommandDispatch {
-                    id: STATE_INIT_REQUEST_ID.to_string(),
-                    payload: CommandPayload {
-                        name: "get_snapshot".to_string(),
-                        args: serde_json::Value::Null,
-                    },
-                    reply: reply_tx,
-                };
-                if command_tx.send(dispatch).await.is_ok() {
-                    tokio::spawn(async move {
-                        // get_snapshot returns a Response; re-wrap the payload as a
-                        // state Event so next_event() on the client side accepts it.
-                        if let Ok(response) = reply_rx.await {
-                            match sanitize_response_id(response, STATE_INIT_REQUEST_ID) {
-                                ServerMessage::Response {
-                                    ok: true,
-                                    result: Some(data),
-                                    ..
-                                } => {
-                                    let state_event = ServerMessage::Event {
-                                        topic: Topic::State,
-                                        data,
-                                    };
-                                    send_encoded(&state_event, &write_tx).await;
-                                }
-                                _ => {
-                                    warn!("Ignoring malformed state-init response");
-                                }
-                            }
-                        }
-                    });
-                }
-            }
+            handle_subscribe(id, topics, subs, command_tx, write_tx).await
         }
+    }
+}
+
+/// Tell the client its request was rejected, and report "do not keep this
+/// session open" to the caller.
+///
+/// Every rejection in this module ends the same way, so the `false` that keeps
+/// the connection from continuing is part of this helper rather than a line
+/// each caller has to remember to write after it.
+async fn reject(
+    id: String,
+    code: PublicErrorCode,
+    message: &str,
+    write_tx: &mpsc::Sender<String>,
+) -> bool {
+    send_encoded(&err_response(id, code, message), write_tx).await;
+    false
+}
+
+/// Hand one command to the executor and answer the client when it replies.
+///
+/// Returns whether the session should continue.
+async fn handle_command(
+    id: String,
+    command: CommandPayload,
+    command_tx: &mpsc::Sender<CommandDispatch>,
+    write_tx: &mpsc::Sender<String>,
+) -> bool {
+    if let Err(error) = validate_ipc_request_id(&id) {
+        return reject(id, PublicErrorCode::IpcProtocolError, &error, write_tx).await;
+    }
+    if let Err(error) = validate_command_name(&command.name) {
+        return reject(id, PublicErrorCode::IpcProtocolError, &error, write_tx).await;
+    }
+
+    let write_tx = write_tx.clone();
+    let id_clone = id.clone();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if command_tx
+        .send(CommandDispatch {
+            id,
+            payload: command,
+            reply: reply_tx,
+        })
+        .await
+        .is_err()
+    {
+        return reject(
+            id_clone,
+            PublicErrorCode::ServerError,
+            "command handler unavailable",
+            &write_tx,
+        )
+        .await;
+    }
+
+    // Waiting for the reply here would stop this session reading anything
+    // else until the command finished, so the wait is spawned and the read
+    // loop goes straight back to the socket.
+    tokio::spawn(async move {
+        let response = match reply_rx.await {
+            Ok(r) => sanitize_response_id(r, &id_clone),
+            Err(_) => err_response(
+                id_clone,
+                PublicErrorCode::ServerError,
+                "command handler dropped",
+            ),
+        };
+        send_encoded(&response, &write_tx).await;
+    });
+
+    true
+}
+
+/// Record what this session wants pushed to it, acknowledge the request, and —
+/// for a first subscription to `state` — send the current snapshot straight
+/// away so the client has something to draw before any change arrives.
+///
+/// Returns whether the session should continue.
+async fn handle_subscribe(
+    id: String,
+    topics: Vec<String>,
+    subs: &mut SessionSubscriptions,
+    command_tx: &mpsc::Sender<CommandDispatch>,
+    write_tx: &mpsc::Sender<String>,
+) -> bool {
+    if let Err(error) = validate_ipc_request_id(&id) {
+        return reject(id, PublicErrorCode::IpcProtocolError, &error, write_tx).await;
+    }
+
+    let topics = match normalize_subscribe_topics(topics) {
+        Ok(topics) => topics,
+        Err(error) => {
+            send_encoded(&error.to_protocol_response(id), write_tx).await;
+            return false;
+        }
+    };
+
+    let needs_initial_state =
+        topics.iter().any(|t| t == TOPIC_STATE) && !subs.is_state_subscribed();
+    for t in &topics {
+        subs.insert(t.clone());
+    }
+
+    let ack = ServerMessage::Response {
+        id,
+        ok: true,
+        result: Some(serde_json::json!({ "subscribed": topics })),
+        error: None,
+    };
+    send_encoded(&ack, write_tx).await;
+
+    if needs_initial_state {
+        send_initial_state(command_tx, write_tx).await;
     }
 
     true
+}
+
+/// Push the current snapshot to a session that has just subscribed to `state`.
+async fn send_initial_state(
+    command_tx: &mpsc::Sender<CommandDispatch>,
+    write_tx: &mpsc::Sender<String>,
+) {
+    let write_tx = write_tx.clone();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let dispatch = CommandDispatch {
+        id: STATE_INIT_REQUEST_ID.to_string(),
+        payload: CommandPayload::simple(ServerCommand::GetSnapshot),
+        reply: reply_tx,
+    };
+    if command_tx.send(dispatch).await.is_err() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        // get_snapshot returns a Response; re-wrap the payload as a
+        // state Event so next_event() on the client side accepts it.
+        if let Ok(response) = reply_rx.await {
+            match sanitize_response_id(response, STATE_INIT_REQUEST_ID) {
+                ServerMessage::Response {
+                    ok: true,
+                    result: Some(data),
+                    ..
+                } => {
+                    let state_event = ServerMessage::Event {
+                        topic: Topic::State,
+                        data,
+                    };
+                    send_encoded(&state_event, &write_tx).await;
+                }
+                _ => {
+                    warn!("Ignoring malformed state-init response");
+                }
+            }
+        }
+    });
 }
 
 fn err_response(id: String, code: PublicErrorCode, message: &str) -> ServerMessage {
