@@ -59,9 +59,9 @@ Crate layout — package `obsctl-rs`, lib crate `obsctl_rs`, binary `obsctl`. `m
 ### Two data paths
 
 **Command (request/response):** CLI/TUI opens a short-lived connection → `ClientMessage::Command`
-with a correlation `id` → `IpcServer` → `CommandDispatch` → `CommandExecutor` (string-keyed match on
-command name, ~`src/server/command_executor.rs:578`) → `obs::requests` → `ServerMessage::Response`
-matched back by `id`.
+with a correlation `id` → `IpcServer` → `CommandDispatch` → `CommandExecutor` (the wire name is
+parsed into a `ServerCommand` via `ipc::protocol::COMMANDS`, then dispatched by an exhaustive
+match) → `obs::requests` → `ServerMessage::Response` matched back by `id`.
 
 **Event (push):** `ObsSupervisor` receives OBS events → `obs_event_adapter` → `StateStore` mutates
 the cached snapshot **and** rebroadcasts → `BroadcastHub` fans out per topic (`state`, `events`,
@@ -89,8 +89,9 @@ slip past them, so keep the rule in mind rather than trusting the test alone.
 code means touching all of: `domain::errors::ObsctlError`, `ipc::protocol::PublicErrorCode`, the CLI
 exit-code mapping in `cli::client_commands`, the `--json` envelope, the README tables (Exit Codes /
 IPC Error Codes / IPC Protocol), and integration tests — in the same change. `ObsctlError` and
-`PublicErrorCode` each have an `OBSCTL_ERROR_VARIANT_COUNT` assertion (`src/domain/errors.rs:125`,
-`src/ipc/protocol.rs:1067`) that fails when a variant is added without updating the mapping tables.
+`PublicErrorCode` each have an `OBSCTL_ERROR_VARIANT_COUNT` assertion (in the test modules of
+`src/domain/errors.rs` and `src/ipc/protocol.rs`) that fails when a variant is added without
+updating the mapping tables.
 
 **Two exit-code mappings, deliberately.** Local failures (init, validate-config, server startup,
 socket setup) use the local `ObsctlError` classification. Proxy commands that got a daemon response
