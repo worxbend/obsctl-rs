@@ -6,6 +6,7 @@ pub mod connection;
 pub mod header;
 pub mod live_bar;
 pub mod logs;
+pub mod name_list;
 pub mod profiles;
 pub mod scene_map;
 pub mod scenes;
