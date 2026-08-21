@@ -20,67 +20,105 @@ pub fn normalize_alias_or_shortcut(value: &str, kind: &str) -> Result<String> {
         .map(|value| value.to_ascii_lowercase())
 }
 
+/// Which spelling of an entry an exact match is tried against, in order: a
+/// shortcut is the most deliberate thing a user can type, an alias next, and
+/// the OBS name last.
+const EXACT_MATCH_ORDER: [fn(&AliasEntry) -> Option<&str>; 3] = [
+    |entry| entry.shortcut.as_deref(),
+    |entry| entry.alias.as_deref(),
+    |entry| Some(entry.name.as_str()),
+];
+
+/// The spellings a case-insensitive match may use, in order.
+///
+/// Shortcuts are deliberately absent. They are single keystrokes whose whole
+/// point is to be distinct, so `m` and `M` are allowed to mean two different
+/// things; folding their case would quietly merge them.
+const CASE_INSENSITIVE_MATCH_ORDER: [fn(&AliasEntry) -> Option<&str>; 2] = [
+    |entry| entry.alias.as_deref(),
+    |entry| Some(entry.name.as_str()),
+];
+
+/// Resolve a scene target, reporting an unknown name as [`ObsctlError::SceneNotFound`].
 pub fn resolve<'a>(target: &str, entries: &'a [AliasEntry]) -> Result<&'a AliasEntry> {
-    let target_normalized = normalized_token(target)?;
-    let target_trimmed = target.trim();
-    let mut candidates: Vec<&AliasEntry> = Vec::new();
-
-    // 1. Exact shortcut
-    for e in entries {
-        if e.shortcut.as_deref() == Some(target_trimmed) {
-            return Ok(e);
-        }
-    }
-
-    // 2. Exact alias
-    for e in entries {
-        if e.alias.as_deref() == Some(target_trimmed) {
-            return Ok(e);
-        }
-    }
-
-    // 3. Exact OBS name
-    for e in entries {
-        if e.name == target_trimmed {
-            return Ok(e);
-        }
-    }
-
-    // 4. Case-insensitive alias
-    for e in entries {
-        if let Some(alias) = e.alias.as_deref()
-            && normalized_token(alias)? == target_normalized
-        {
-            candidates.push(e);
-        }
-    }
-
-    if candidates.len() == 1 {
-        return Ok(candidates[0]);
-    } else if candidates.len() > 1 {
-        return Err(ObsctlError::AliasAmbiguous(target.to_string()));
-    }
-
-    // 5. Case-insensitive OBS name
-    for e in entries {
-        if normalized_token(&e.name)? == target_normalized {
-            candidates.push(e);
-        }
-    }
-
-    match candidates.len() {
-        1 => Ok(candidates[0]),
-        0 => Err(ObsctlError::SceneNotFound(target.to_string())),
-        _ => Err(ObsctlError::AliasAmbiguous(target.to_string())),
-    }
+    resolve_with(target, entries, ObsctlError::SceneNotFound)
 }
 
-/// Resolve an audio input target, returning `AudioInputNotFound` instead of `SceneNotFound`.
+/// Resolve an audio input target, reporting an unknown name as
+/// [`ObsctlError::AudioInputNotFound`].
 pub fn resolve_audio<'a>(target: &str, entries: &'a [AliasEntry]) -> Result<&'a AliasEntry> {
-    resolve(target, entries).map_err(|e| match e {
-        ObsctlError::SceneNotFound(t) => ObsctlError::AudioInputNotFound(t),
-        other => other,
-    })
+    resolve_with(target, entries, ObsctlError::AudioInputNotFound)
+}
+
+/// Work out which entry the user meant by `target`.
+///
+/// Matching runs in two rounds. First an exact, case-sensitive pass over
+/// shortcuts, then aliases, then OBS names: an exact hit is unambiguous by
+/// definition and wins immediately, which is what lets a one-letter shortcut
+/// beat some other entry whose name happens to differ only in case.
+///
+/// Only if nothing matched exactly does a case-insensitive round run, over
+/// aliases and then OBS names. There a second match is a genuine ambiguity and
+/// is reported rather than guessed at.
+///
+/// The caller supplies `not_found` because that is the only thing that differs
+/// between resolving a scene and resolving an audio input; previously this
+/// always reported a missing scene and the audio caller rewrote the error
+/// afterwards.
+fn resolve_with<'a>(
+    target: &str,
+    entries: &'a [AliasEntry],
+    not_found: fn(String) -> ObsctlError,
+) -> Result<&'a AliasEntry> {
+    // Validated up front, before any match is attempted, so that a target
+    // containing control characters is rejected even when some entry would
+    // have matched it exactly.
+    let normalized_target = normalized_token(target)?;
+    let trimmed_target = target.trim();
+
+    for read in EXACT_MATCH_ORDER {
+        if let Some(entry) = entries.iter().find(|e| read(e) == Some(trimmed_target)) {
+            return Ok(entry);
+        }
+    }
+
+    for read in CASE_INSENSITIVE_MATCH_ORDER {
+        if let Some(entry) =
+            unique_case_insensitive_match(entries, read, &normalized_target, target)?
+        {
+            return Ok(entry);
+        }
+    }
+
+    Err(not_found(target.to_string()))
+}
+
+/// The one entry whose `read` spelling equals `normalized_target` ignoring
+/// case, or `None` if there is no such entry.
+///
+/// More than one is an error rather than a pick: two entries the user could
+/// equally have meant is a config mistake, and silently choosing the first
+/// would act on the wrong scene or mute the wrong microphone.
+fn unique_case_insensitive_match<'a>(
+    entries: &'a [AliasEntry],
+    read: fn(&AliasEntry) -> Option<&str>,
+    normalized_target: &str,
+    raw_target: &str,
+) -> Result<Option<&'a AliasEntry>> {
+    let mut matched: Option<&AliasEntry> = None;
+
+    for entry in entries {
+        let Some(value) = read(entry) else { continue };
+        if normalized_token(value)? != normalized_target {
+            continue;
+        }
+        if matched.is_some() {
+            return Err(ObsctlError::AliasAmbiguous(raw_target.to_string()));
+        }
+        matched = Some(entry);
+    }
+
+    Ok(matched)
 }
 
 #[cfg(test)]
@@ -192,6 +230,33 @@ mod tests {
             resolve_audio("Mic", &entries),
             Err(ObsctlError::AudioInputNotFound(_))
         ));
+    }
+
+    /// Shortcuts are single keystrokes chosen to be distinct, so `m` and `M`
+    /// are allowed to mean two different things. Only aliases and OBS names
+    /// are matched ignoring case.
+    #[test]
+    fn shortcut_matching_is_case_sensitive() {
+        let entries = vec![entry("Main Scene", None, Some("m"))];
+        assert!(matches!(
+            resolve("M", &entries),
+            Err(ObsctlError::SceneNotFound(_))
+        ));
+        assert_eq!(resolve("m", &entries).unwrap().name, "Main Scene");
+    }
+
+    /// Two entries differing only in case are a config mistake, and the error
+    /// has to quote what the user actually typed for them to find it.
+    #[test]
+    fn ambiguous_error_reports_the_target_as_typed() {
+        let entries = vec![
+            entry("Scene A", Some("CAM"), None),
+            entry("Scene B", Some("Cam"), None),
+        ];
+        match resolve(" cAm ", &entries).err() {
+            Some(ObsctlError::AliasAmbiguous(target)) => assert_eq!(target, " cAm "),
+            other => panic!("expected AliasAmbiguous, got {other:?}"),
+        }
     }
 
     #[test]
