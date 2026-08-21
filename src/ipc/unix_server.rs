@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     sync::{broadcast::error::RecvError, mpsc, oneshot, watch},
 };
@@ -118,28 +118,67 @@ async fn run_session(
     let mut state_rx = hub.subscribe_state();
     let mut events_rx = hub.subscribe_events();
     let mut logs_rx = hub.subscribe_logs();
-    let mut line_buf = String::new();
+    // Bytes, not a `String`: a frame is only known to be UTF-8 once it is
+    // complete, and it may arrive in pieces.
+    let mut line_buf: Vec<u8> = Vec::new();
 
     loop {
+        // How much more of the current frame may be read. The cap is applied
+        // *while* reading rather than after: `read_line` would happily grow its
+        // buffer to whatever a client sent before anyone got to check the size.
+        // One byte over the limit is enough to recognise an oversized frame.
+        let Some(budget) = (MAX_IPC_LINE_BYTES as u64 + 1).checked_sub(line_buf.len() as u64)
+        else {
+            warn!("IPC frame exceeded max size ({MAX_IPC_LINE_BYTES} bytes), dropping client");
+            break;
+        };
+        if budget == 0 {
+            warn!("IPC frame exceeded max size ({MAX_IPC_LINE_BYTES} bytes), dropping client");
+            break;
+        }
+
+        // Bound this read to the frame's remaining budget. Recreated each
+        // iteration so a resumed frame keeps the bytes already in `line_buf`
+        // and the limit still applies to the frame as a whole.
+        let mut limited = (&mut reader).take(budget);
+
         tokio::select! {
-            n = reader.read_line(&mut line_buf) => {
-                match n {
+            // `read_until` rather than `read_line` because this sits in a
+            // `select!`: when a broadcast branch wins the race this future is
+            // dropped mid-frame. `read_until` keeps whatever it had read in
+            // `line_buf` and can be resumed; `read_line` is documented as not
+            // cancellation safe and discards it, which silently truncated any
+            // frame unlucky enough to be split across a broadcast.
+            read = limited.read_until(b'\n', &mut line_buf) => {
+                match read {
                     Ok(0) => break,
                     Ok(_) => {
-                        if line_buf.len() > MAX_IPC_LINE_BYTES {
-                            warn!(
-                                "IPC frame exceeded max size ({MAX_IPC_LINE_BYTES} bytes), dropping client"
-                            );
+                        if !line_buf.ends_with(b"\n") {
+                            // No delimiter and the read stopped: either the
+                            // budget ran out (oversized) or the peer went away
+                            // mid-frame (truncated). Both end the session.
+                            if line_buf.len() > MAX_IPC_LINE_BYTES {
+                                warn!(
+                                    "IPC frame exceeded max size ({MAX_IPC_LINE_BYTES} bytes), dropping client"
+                                );
+                            } else {
+                                warn!("IPC frame missing newline delimiter, dropping client");
+                            }
                             break;
                         }
-                        if !line_buf.ends_with('\n') {
-                            warn!("IPC frame missing newline delimiter, dropping client");
-                            break;
-                        }
-                        let trimmed = line_buf.trim_end_matches(['\n', '\r']).to_string();
-                        line_buf.clear();
+
+                        let frame = match String::from_utf8(std::mem::take(&mut line_buf)) {
+                            Ok(frame) => frame,
+                            Err(e) => {
+                                debug!("IPC session read error: {e}");
+                                break;
+                            }
+                        };
+                        let trimmed = frame.trim_end_matches(['\n', '\r']);
                         if !trimmed.is_empty()
-                            && !handle_line(trimmed, &mut subs, &command_tx, &write_tx).await
+                            && !handle_line(
+                                trimmed.to_string(), &mut subs, &command_tx, &write_tx,
+                            ).await
                         {
                             break;
                         }
@@ -900,6 +939,145 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(n, 0);
+
+        shutdown_tx.send(true).unwrap();
+        server_handle.await.unwrap();
+    }
+    /// A frame split across two writes, with a broadcast arriving in between,
+    /// must still be understood.
+    ///
+    /// This is the cancellation case. The session's read used to be
+    /// `read_line` inside a `select!`; when the logs branch wins the race
+    /// mid-frame the read future is dropped, and `read_line` is documented as
+    /// discarding what it had already read. The first half of the command was
+    /// therefore lost and the second half parsed as a whole frame — which is
+    /// not valid JSON, so the client was dropped. Publishing a log between the
+    /// two writes is what forces that race deterministically.
+    #[tokio::test]
+    async fn command_split_around_a_broadcast_is_reassembled() {
+        use crate::ipc::protocol::{ClientMessage, CommandPayload, LogEvent, LogLevel};
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt, BufReader as TokioBufReader};
+        use tokio::net::UnixStream;
+        use tokio::sync::watch;
+        use tokio::time::{Duration, timeout};
+
+        let dir = TempDir::new().unwrap();
+        let socket_path = dir.path().join("server.sock");
+        let hub = Arc::new(BroadcastHub::new());
+        let server = IpcServer::bind(&socket_path, Arc::clone(&hub)).unwrap();
+        let (command_tx, mut command_rx) = mpsc::channel::<CommandDispatch>(4);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server_handle = tokio::spawn(server.run(command_tx, shutdown_rx));
+
+        tokio::spawn(async move {
+            while let Some(dispatch) = command_rx.recv().await {
+                let _ = dispatch.reply.send(ServerMessage::Response {
+                    id: dispatch.id,
+                    ok: true,
+                    result: Some(serde_json::json!({ "message": "pong" })),
+                    error: None,
+                });
+            }
+        });
+
+        let stream = UnixStream::connect(&socket_path).await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut lines = TokioBufReader::new(read_half).lines();
+
+        // Subscribe to logs so the broadcast branch of the session's `select!`
+        // is armed and can win the race against the half-read frame.
+        let subscribe = serde_json::to_string(&ClientMessage::Subscribe {
+            id: "sub".to_string(),
+            topics: vec![TOPIC_LOGS.to_string()],
+        })
+        .unwrap();
+        write_half
+            .write_all(format!("{subscribe}\n").as_bytes())
+            .await
+            .unwrap();
+        let ack = timeout(Duration::from_secs(2), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(ack.contains("subscribed"), "unexpected ack: {ack}");
+
+        let frame = format!(
+            "{}\n",
+            serde_json::to_string(&ClientMessage::Command {
+                id: "split-frame".to_string(),
+                command: CommandPayload::simple(ServerCommand::Ping),
+            })
+            .unwrap()
+        );
+        let (head, tail) = frame.split_at(frame.len() / 2);
+
+        write_half.write_all(head.as_bytes()).await.unwrap();
+        write_half.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Cancel the in-flight read.
+        hub.publish_log(LogEvent::new(LogLevel::Info, "interleaved"));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        write_half.write_all(tail.as_bytes()).await.unwrap();
+        write_half.flush().await.unwrap();
+
+        // The log event arrives first; the command reply must still follow.
+        let mut reply = None;
+        for _ in 0..4 {
+            let line = timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .expect("session went quiet after a split frame")
+                .unwrap();
+            match line {
+                Some(line) if line.contains("split-frame") => {
+                    reply = Some(line);
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(
+            reply.is_some(),
+            "the half of the frame read before the broadcast was lost"
+        );
+
+        shutdown_tx.send(true).unwrap();
+        server_handle.await.unwrap();
+    }
+
+    /// An unterminated frame must be cut off at the size cap rather than
+    /// allowed to grow the session's buffer without bound.
+    #[tokio::test]
+    async fn oversized_unterminated_frame_drops_the_client() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+        use tokio::sync::watch;
+        use tokio::time::{Duration, timeout};
+
+        let dir = TempDir::new().unwrap();
+        let socket_path = dir.path().join("server.sock");
+        let hub = Arc::new(BroadcastHub::new());
+        let server = IpcServer::bind(&socket_path, hub).unwrap();
+        let (command_tx, _command_rx) = mpsc::channel::<CommandDispatch>(4);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server_handle = tokio::spawn(server.run(command_tx, shutdown_rx));
+
+        let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+        // No newline anywhere, comfortably past the cap.
+        let flood = vec![b'a'; MAX_IPC_LINE_BYTES * 2];
+        // The peer may be dropped mid-write once the server gives up, which is
+        // the behaviour under test rather than a failure.
+        let _ = stream.write_all(&flood).await;
+
+        let mut buf = [0u8; 1];
+        let n = timeout(Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("server never dropped an oversized frame")
+            .unwrap_or(0);
+        assert_eq!(n, 0, "expected the session to close");
 
         shutdown_tx.send(true).unwrap();
         server_handle.await.unwrap();
