@@ -34,7 +34,10 @@ pub struct NameListPanel {
     pub hint: (&'static str, &'static str),
 }
 
-pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, spec: &NameListPanel) {
+/// Returns the scroll offset Ratatui settled on, so the mouse code can map a
+/// click to a row without re-deriving it. See [`crate::tui::mouse`].
+#[must_use]
+pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, spec: &NameListPanel) -> usize {
     let theme = model.theme;
     let focused = model.focus == spec.panel;
     let names = (spec.names)(model);
@@ -91,4 +94,5 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, spec: &NameListPanel)
         area,
         &mut state,
     );
+    state.offset()
 }

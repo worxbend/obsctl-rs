@@ -43,6 +43,42 @@ pub struct Hitboxes {
     pub logs: Rect,
     pub palette: Rect,
     pub settings_list: Rect,
+    /// Which item each scrollable list drew first, as reported by Ratatui
+    /// after it laid the list out. See [`ListOffsets`].
+    pub offsets: ListOffsets,
+}
+
+/// The scroll offset each list settled on in the frame these hitboxes
+/// describe.
+///
+/// Taken from the `ListState` Ratatui writes back during rendering rather than
+/// recomputed. The mouse code needs to know which item is drawn at the top of
+/// a panel to turn a click row into an index, and it used to answer that with
+/// a hand-port of Ratatui's `get_items_bounds`. Two consequences: the port had
+/// to be kept in step with an unpinned `ratatui = "0.30"` by hand, and it was
+/// derived from the selection rather than read from what was actually drawn,
+/// so the two could disagree with nothing to notice. A minor version that
+/// changed list scrolling would have moved every click in a scrolled panel to
+/// the neighbouring row with the whole suite still green.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListOffsets {
+    pub scenes: usize,
+    pub profiles: usize,
+    pub collections: usize,
+    pub settings: usize,
+}
+
+impl ListOffsets {
+    fn panel(&self, panel: FocusPanel) -> usize {
+        match panel {
+            FocusPanel::Scenes => self.scenes,
+            FocusPanel::Profiles => self.profiles,
+            FocusPanel::Collections => self.collections,
+            // The audio matrix is columns of vertical strips, not a list; it
+            // maps clicks through `audio::strip_index_at` instead.
+            FocusPanel::Audio => 0,
+        }
+    }
 }
 
 impl Hitboxes {
@@ -91,67 +127,39 @@ fn inner(area: Rect) -> Rect {
 /// list of one-row items, so the lookup is a row lookup; the audio matrix
 /// draws vertical channel strips side by side, so there it is a column
 /// lookup against the same layout the widget used to draw them.
-fn index_at(model: &TuiModel, panel: FocusPanel, area: Rect, pos: Position) -> Option<usize> {
-    let cursor = model.panel_cursor(panel);
+fn index_at(
+    model: &TuiModel,
+    hits: &Hitboxes,
+    panel: FocusPanel,
+    area: Rect,
+    pos: Position,
+) -> Option<usize> {
     match panel {
         FocusPanel::Audio => crate::tui::widgets::audio::strip_index_at(
             inner(area),
             model.panel_len(panel),
-            cursor,
+            model.panel_cursor(panel),
             pos,
         ),
         other => {
             let heights = vec![1u16; model.panel_len(other)];
-            index_at_row(area, &heights, cursor, pos.y)
+            index_at_row(area, &heights, hits.offsets.panel(other), pos.y)
         }
     }
-}
-
-/// First item Ratatui would draw for a list of `heights` whose selection is
-/// `selected`, in a viewport `max_height` rows tall.
-///
-/// This reimplements `List`'s `get_items_bounds` for the `offset == 0` case,
-/// which is the only case that arises here: the widgets build a throwaway
-/// `ListState` every frame, so the scroll offset is always derived fresh
-/// from the selection.
-fn first_visible_index(heights: &[u16], selected: usize, max_height: u16) -> usize {
-    if heights.is_empty() || max_height == 0 {
-        return 0;
-    }
-    let max_height = u32::from(max_height);
-    let mut first = 0usize;
-    let mut last = 0usize;
-    let mut height = 0u32;
-
-    for h in heights {
-        if height + u32::from(*h) > max_height {
-            break;
-        }
-        height += u32::from(*h);
-        last += 1;
-    }
-
-    let selected = selected.min(heights.len() - 1);
-    while selected >= last && last < heights.len() {
-        height += u32::from(heights[last]);
-        last += 1;
-        while height > max_height && first < last {
-            height -= u32::from(heights[first]);
-            first += 1;
-        }
-    }
-    first
 }
 
 /// Index of the list item drawn at row `y`, or `None` for a click on the
 /// border or on empty space past the last item.
-fn index_at_row(area: Rect, heights: &[u16], selected: usize, y: u16) -> Option<usize> {
+///
+/// `first` is the item Ratatui actually drew at the top, from the frame that
+/// produced these hitboxes — not a re-derivation of where it ought to have
+/// scrolled to.
+fn index_at_row(area: Rect, heights: &[u16], first: usize, y: u16) -> Option<usize> {
     let inner = inner(area);
     if inner.height == 0 || y < inner.y || y >= inner.y.saturating_add(inner.height) {
         return None;
     }
     let bottom = inner.y.saturating_add(inner.height);
-    let first = first_visible_index(heights, selected, inner.height);
     let mut row = inner.y;
     for (index, height) in heights.iter().enumerate().skip(first) {
         let next = row.saturating_add(*height);
@@ -202,7 +210,7 @@ fn settings_mouse(
             let index = index_at_row(
                 hits.settings_list,
                 &heights,
-                model.settings_cursor,
+                hits.offsets.settings,
                 event.row,
             )?;
             // Clicking the already-previewed theme confirms it, so a
@@ -275,7 +283,7 @@ fn main_mouse(
             cursor.saturating_add(WHEEL_ROWS),
         )),
         MouseEventKind::Down(MouseButton::Left) => {
-            let index = index_at(model, panel, area, pos)?;
+            let index = index_at(model, hits, panel, area, pos)?;
             // First click focuses and selects; clicking the row that is
             // already selected in the already-focused panel activates it.
             if model.focus == panel && index == cursor {
@@ -296,6 +304,7 @@ mod tests {
     fn hits_main() -> Hitboxes {
         Hitboxes {
             view: HitView::Main,
+            offsets: ListOffsets::default(),
             scenes: Rect::new(0, 0, 40, 12),
             audio: Rect::new(40, 0, 40, 12),
             profiles: Rect::new(0, 12, 40, 7),
@@ -416,13 +425,23 @@ mod tests {
         assert_eq!(handle_mouse(&model, &hits_main(), click(77, 4)), None);
     }
 
+    /// A click resolves against the window the last frame actually drew, which
+    /// the hitboxes carry, rather than against a guess recomputed from the
+    /// cursor.
     #[test]
     fn clicks_below_the_fold_resolve_against_the_scrolled_window() {
-        // 40 scenes in a 10-row viewport with the cursor at the end: the
-        // list has scrolled, so the top visible row is not item 0.
         let mut model = model_with_scenes(40);
         model.set_panel_cursor(FocusPanel::Scenes, 39);
-        let action = handle_mouse(&model, &hits_main(), click(5, 1));
+
+        let hits = Hitboxes {
+            offsets: ListOffsets {
+                scenes: 30,
+                ..ListOffsets::default()
+            },
+            ..hits_main()
+        };
+
+        let action = handle_mouse(&model, &hits, click(5, 1));
         assert_eq!(action, Some(TuiAction::SelectIndex(FocusPanel::Scenes, 30)));
     }
 
@@ -548,17 +567,5 @@ mod tests {
             handle_mouse(&model, &hits, click(5, 4)),
             Some(TuiAction::ApplySettingsTheme)
         );
-    }
-
-    #[test]
-    fn first_visible_index_tracks_the_selection_out_of_view() {
-        let heights = vec![1u16; 20];
-        assert_eq!(first_visible_index(&heights, 0, 5), 0);
-        assert_eq!(first_visible_index(&heights, 4, 5), 0);
-        assert_eq!(first_visible_index(&heights, 5, 5), 1);
-        assert_eq!(first_visible_index(&heights, 19, 5), 15);
-        // Degenerate viewports never panic.
-        assert_eq!(first_visible_index(&heights, 3, 0), 0);
-        assert_eq!(first_visible_index(&[], 3, 5), 0);
     }
 }

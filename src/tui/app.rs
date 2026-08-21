@@ -29,7 +29,7 @@ use crate::{
         input::{TuiAction, handle_key},
         layout,
         model::{DEFAULT_PALETTE_PREFIX, FocusPanel, TuiLogEntry, TuiModel, View},
-        mouse::{self, HitView, Hitboxes},
+        mouse::{self, HitView, Hitboxes, ListOffsets},
         session::{TuiEventSession, send_command},
         theme::{self, Theme},
         widgets,
@@ -757,10 +757,14 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) -> Hitboxes {
     widgets::fill_background(f, model.theme);
 
     if model.view == View::Settings {
-        let settings_list = widgets::settings::render(f, f.area(), model);
+        let (settings_list, settings_offset) = widgets::settings::render(f, f.area(), model);
         return Hitboxes {
             view: HitView::Settings,
             settings_list,
+            offsets: ListOffsets {
+                settings: settings_offset,
+                ..ListOffsets::default()
+            },
             ..Hitboxes::default()
         };
     }
@@ -782,10 +786,12 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) -> Hitboxes {
     if let Some(status_area) = areas.status {
         widgets::status::render(f, status_area, model);
     }
-    widgets::scenes::render(f, areas.scenes, model);
+    // The lists report the scroll offset Ratatui gave them, which is what the
+    // mouse code maps a click row through.
+    let scenes_offset = widgets::scenes::render(f, areas.scenes, model);
     widgets::audio::render(f, areas.audio, model);
-    widgets::profiles::render(f, areas.profiles, model);
-    widgets::collections::render(f, areas.collections, model);
+    let profiles_offset = widgets::profiles::render(f, areas.profiles, model);
+    let collections_offset = widgets::collections::render(f, areas.collections, model);
     widgets::logs::render(f, areas.logs, model);
     if let Some(stats_area) = areas.stats {
         widgets::stats::render(f, stats_area, model);
@@ -803,6 +809,12 @@ fn render(f: &mut ratatui::Frame, model: &TuiModel) -> Hitboxes {
         logs: areas.logs,
         palette: areas.palette,
         settings_list: Rect::default(),
+        offsets: ListOffsets {
+            scenes: scenes_offset,
+            profiles: profiles_offset,
+            collections: collections_offset,
+            settings: 0,
+        },
     }
 }
 

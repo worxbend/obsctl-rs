@@ -6,8 +6,9 @@ use obsctl_rs::{
     ipc::protocol::LogLevel,
     obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState},
     tui::{
+        input::TuiAction,
         keymap::Pending,
-        model::{TuiLogEntry, TuiModel},
+        model::{FocusPanel, TuiLogEntry, TuiModel},
         widgets,
     },
 };
@@ -561,7 +562,7 @@ fn scenes_renders_active_scene_marker() {
     let model = model_connected();
     let mut t = term(60, 10);
     t.draw(|f| {
-        widgets::scenes::render(f, Rect::new(0, 0, 60, 10), &model);
+        let _ = widgets::scenes::render(f, Rect::new(0, 0, 60, 10), &model);
     })
     .unwrap();
     let out = buf_string(&t);
@@ -589,7 +590,7 @@ fn selected_scene_is_tinted_rather_than_painted_over() {
 
     let mut t = term(60, 10);
     t.draw(|f| {
-        widgets::scenes::render(f, Rect::new(0, 0, 60, 10), &model);
+        let _ = widgets::scenes::render(f, Rect::new(0, 0, 60, 10), &model);
     })
     .unwrap();
 
@@ -634,8 +635,10 @@ fn unfocused_scene_selection_is_fainter_than_focused() {
 
     let render_bg = |model: &TuiModel| {
         let mut t = term(60, 10);
-        t.draw(|f| widgets::scenes::render(f, Rect::new(0, 0, 60, 10), model))
-            .unwrap();
+        t.draw(|f| {
+            let _ = widgets::scenes::render(f, Rect::new(0, 0, 60, 10), model);
+        })
+        .unwrap();
         t.backend()
             .buffer()
             .clone()
@@ -665,7 +668,7 @@ fn scenes_renders_empty_list_without_panic() {
     });
     let mut t = term(60, 10);
     t.draw(|f| {
-        widgets::scenes::render(f, Rect::new(0, 0, 60, 10), &model);
+        let _ = widgets::scenes::render(f, Rect::new(0, 0, 60, 10), &model);
     })
     .unwrap();
     let out = buf_string(&t);
@@ -685,7 +688,7 @@ fn scenes_renders_long_name_without_panic() {
     let mut t = term(40, 8);
     // This must not panic on narrow terminals.
     t.draw(|f| {
-        widgets::scenes::render(f, Rect::new(0, 0, 40, 8), &model);
+        let _ = widgets::scenes::render(f, Rect::new(0, 0, 40, 8), &model);
     })
     .unwrap();
 }
@@ -695,7 +698,7 @@ fn scenes_renders_alias_and_shortcut() {
     let model = model_connected();
     let mut t = term(80, 10);
     t.draw(|f| {
-        widgets::scenes::render(f, Rect::new(0, 0, 80, 10), &model);
+        let _ = widgets::scenes::render(f, Rect::new(0, 0, 80, 10), &model);
     })
     .unwrap();
     let out = buf_string(&t);
@@ -911,7 +914,7 @@ fn profiles_renders_active_profile_marker() {
     let model = model_connected();
     let mut t = term(60, 10);
     t.draw(|f| {
-        widgets::profiles::render(f, Rect::new(0, 0, 60, 10), &model);
+        let _ = widgets::profiles::render(f, Rect::new(0, 0, 60, 10), &model);
     })
     .unwrap();
     let out = buf_string(&t);
@@ -930,7 +933,7 @@ fn profiles_renders_empty_list_without_panic() {
     });
     let mut t = term(60, 10);
     t.draw(|f| {
-        widgets::profiles::render(f, Rect::new(0, 0, 60, 10), &model);
+        let _ = widgets::profiles::render(f, Rect::new(0, 0, 60, 10), &model);
     })
     .unwrap();
     let out = buf_string(&t);
@@ -944,7 +947,7 @@ fn collections_renders_active_collection_marker() {
     let model = model_connected();
     let mut t = term(60, 10);
     t.draw(|f| {
-        widgets::collections::render(f, Rect::new(0, 0, 60, 10), &model);
+        let _ = widgets::collections::render(f, Rect::new(0, 0, 60, 10), &model);
     })
     .unwrap();
     let out = buf_string(&t);
@@ -963,7 +966,7 @@ fn collections_renders_empty_list_without_panic() {
     });
     let mut t = term(60, 10);
     t.draw(|f| {
-        widgets::collections::render(f, Rect::new(0, 0, 60, 10), &model);
+        let _ = widgets::collections::render(f, Rect::new(0, 0, 60, 10), &model);
     })
     .unwrap();
     let out = buf_string(&t);
@@ -988,10 +991,10 @@ fn full_dashboard_renders_all_panels_with_new_layout() {
         if let Some(status) = areas.status {
             widgets::status::render(f, status, &model);
         }
-        widgets::scenes::render(f, areas.scenes, &model);
+        let _ = widgets::scenes::render(f, areas.scenes, &model);
         widgets::audio::render(f, areas.audio, &model);
-        widgets::profiles::render(f, areas.profiles, &model);
-        widgets::collections::render(f, areas.collections, &model);
+        let _ = widgets::profiles::render(f, areas.profiles, &model);
+        let _ = widgets::collections::render(f, areas.collections, &model);
         widgets::logs::render(f, areas.logs, &model);
         widgets::command_palette::render(f, areas.palette, &model);
     })
@@ -1335,10 +1338,10 @@ fn simplified_ui_renders_the_dashboard_and_splash_as_ascii_only() {
             widgets::header::render(f, Rect::new(0, 0, 88, 4), &model);
             widgets::live_bar::render(f, Rect::new(0, 4, 88, 4), &model, false);
             widgets::status::render(f, Rect::new(88, 0, 32, 8), &model);
-            widgets::scenes::render(f, Rect::new(0, 8, 40, 10), &model);
+            let _ = widgets::scenes::render(f, Rect::new(0, 8, 40, 10), &model);
             widgets::audio::render(f, Rect::new(40, 8, 40, 10), &model);
-            widgets::profiles::render(f, Rect::new(80, 8, 20, 10), &model);
-            widgets::collections::render(f, Rect::new(100, 8, 20, 10), &model);
+            let _ = widgets::profiles::render(f, Rect::new(80, 8, 20, 10), &model);
+            let _ = widgets::collections::render(f, Rect::new(100, 8, 20, 10), &model);
             widgets::logs::render(f, Rect::new(0, 18, 120, 8), &model);
             widgets::command_palette::render(f, Rect::new(0, 26, 120, 4), &model);
         })
@@ -1352,7 +1355,7 @@ fn simplified_ui_renders_the_dashboard_and_splash_as_ascii_only() {
     let mut settings = term(100, 20);
     settings
         .draw(|f| {
-            widgets::settings::render(f, f.area(), &model);
+            let _ = widgets::settings::render(f, f.area(), &model);
         })
         .unwrap();
     assert!(buf_string(&settings).is_ascii());
@@ -1389,7 +1392,7 @@ fn settings_renders_theme_list_and_preview() {
     let model = model_connected();
     let mut t = term(100, 20);
     t.draw(|f| {
-        widgets::settings::render(f, Rect::new(0, 0, 100, 20), &model);
+        let _ = widgets::settings::render(f, Rect::new(0, 0, 100, 20), &model);
     })
     .unwrap();
     let out = buf_string(&t);
@@ -1408,7 +1411,7 @@ fn settings_scrolls_to_the_last_theme() {
 
     let mut t = term(100, 20);
     t.draw(|f| {
-        widgets::settings::render(f, Rect::new(0, 0, 100, 20), &model);
+        let _ = widgets::settings::render(f, Rect::new(0, 0, 100, 20), &model);
     })
     .unwrap();
 
@@ -1422,7 +1425,7 @@ fn settings_survives_minimum_terminal_size() {
     let model = model_connected();
     let mut t = term(20, 6);
     t.draw(|f| {
-        widgets::settings::render(f, Rect::new(0, 0, 20, 6), &model);
+        let _ = widgets::settings::render(f, Rect::new(0, 0, 20, 6), &model);
     })
     .unwrap();
 }
@@ -1534,7 +1537,7 @@ fn all_widgets_survive_minimum_terminal_size() {
     let mut t2 = term(20, 4);
     t2.draw(|f| {
         let area = f.area();
-        widgets::scenes::render(f, area, &model);
+        let _ = widgets::scenes::render(f, area, &model);
     })
     .unwrap();
 
@@ -1742,5 +1745,82 @@ fn dashboard_shows_the_stats_pane_only_while_streaming() {
     assert!(
         live.contains("Stream Health"),
         "stats pane should appear beside logs while streaming; got:\n{live}"
+    );
+}
+
+/// Clicking a row in a scrolled panel must select the item actually drawn
+/// there.
+///
+/// The mouse code used to answer "which item is at the top?" with its own copy
+/// of Ratatui's list-scrolling arithmetic, checked only against hand-written
+/// expectations — so it validated the copy against itself, and a Ratatui
+/// version that scrolled differently would have shifted every click in a
+/// scrolled panel by a row with the suite still green. This renders a real
+/// `List`, takes the offset Ratatui reports, and checks the mapping end to
+/// end against the text on screen.
+#[test]
+fn clicks_map_to_the_rows_ratatui_actually_drew() {
+    use obsctl_rs::tui::mouse::{HitView, Hitboxes, ListOffsets, handle_mouse};
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let area = Rect::new(0, 0, 40, 8);
+    let mut model = model_connected();
+    model.update_snapshot(|snapshot| {
+        snapshot.scenes = (0..40)
+            .map(|i| SceneState {
+                name: format!("Scene {i:02}"),
+                ..Default::default()
+            })
+            .collect();
+    });
+    // Selection near the end, so the list must have scrolled.
+    model.set_panel_cursor(FocusPanel::Scenes, 39);
+
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    let mut offset = 0;
+    terminal
+        .draw(|f| {
+            offset = widgets::scenes::render(f, area, &model);
+        })
+        .unwrap();
+
+    assert!(offset > 0, "a 40-item list in 8 rows must have scrolled");
+
+    let rendered = buf_string(&terminal);
+    let hits = Hitboxes {
+        view: HitView::Main,
+        scenes: area,
+        offsets: ListOffsets {
+            scenes: offset,
+            ..ListOffsets::default()
+        },
+        ..Hitboxes::default()
+    };
+
+    // Row 1 is the first row inside the border.
+    let first_row = 1;
+    let action = handle_mouse(
+        &model,
+        &hits,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: first_row,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+
+    let Some(TuiAction::SelectIndex(FocusPanel::Scenes, index)) = action else {
+        panic!("expected a scene selection, got {action:?}");
+    };
+
+    // The name that click selected must be the one printed on that row.
+    let drawn = rendered
+        .lines()
+        .nth(first_row as usize)
+        .expect("row inside the border");
+    assert!(
+        drawn.contains(&format!("Scene {index:02}")),
+        "click on row {first_row} selected index {index}, but that row reads: {drawn}"
     );
 }

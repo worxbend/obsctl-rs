@@ -14,6 +14,7 @@ const PROFILES: NameListPanel = NameListPanel {
     hint: ("[p]  ↵ switch", "[p]  Enter switch"),
 };
 
-pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
-    name_list::render(f, area, model, &PROFILES);
+#[must_use]
+pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
+    name_list::render(f, area, model, &PROFILES)
 }

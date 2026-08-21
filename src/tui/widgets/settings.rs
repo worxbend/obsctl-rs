@@ -12,9 +12,11 @@ use crate::tui::{anim, model::TuiModel, theme, widgets::chrome};
 /// after btop's theme switcher: arrow keys live-preview a theme across the
 /// whole UI, Enter confirms and persists it, Esc reverts to whatever was
 /// active before opening this view.
-/// Returns the theme list's area so the caller can hit-test mouse clicks
-/// against the rows it just drew.
-pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> Rect {
+/// Draws the settings view and returns the theme list's area together with the
+/// scroll offset Ratatui settled on, for the mouse code to map a click to a
+/// row. See [`crate::tui::mouse`].
+#[must_use]
+pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> (Rect, usize) {
     let theme = model.theme;
 
     let title = if model.advanced_ui {
@@ -51,12 +53,13 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> Rect {
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(inner);
 
-    render_theme_list(f, sections[0], model);
+    let offset = render_theme_list(f, sections[0], model);
     render_preview(f, sections[1], model);
-    sections[0]
+    (sections[0], offset)
 }
 
-fn render_theme_list(f: &mut Frame, area: Rect, model: &TuiModel) {
+#[must_use]
+fn render_theme_list(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
     let theme = model.theme;
     let items: Vec<ListItem> = theme::ALL
         .iter()
@@ -96,6 +99,7 @@ fn render_theme_list(f: &mut Frame, area: Rect, model: &TuiModel) {
         area,
         &mut state,
     );
+    state.offset()
 }
 
 fn render_preview(f: &mut Frame, area: Rect, model: &TuiModel) {

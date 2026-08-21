@@ -15,7 +15,10 @@ use crate::tui::{
 /// How many ticks the just-switched-to scene stays highlighted.
 const FLASH_DURATION_TICKS: u64 = 8;
 
-pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
+/// Returns the scroll offset Ratatui settled on, for the mouse code to map a
+/// click to a row. See [`crate::tui::mouse`].
+#[must_use]
+pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
     let theme = model.theme;
     let focused = model.focus == FocusPanel::Scenes;
 
@@ -108,6 +111,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         area,
         &mut state,
     );
+    state.offset()
 }
 
 /// 1.0 right after `name` becomes active, decaying linearly to 0.0 over
