@@ -140,7 +140,7 @@ impl CommandExecutor {
         }
     }
 
-    async fn cmd_server_status(&self) -> crate::domain::result::Result<Value> {
+    async fn cmd_server_status(&self) -> Result<Value> {
         let snap = self.state.read().await;
         let status = ServerStatus {
             pid: std::process::id(),
@@ -155,7 +155,7 @@ impl CommandExecutor {
         serde_json::to_value(status).map_err(|e| ObsctlError::ObsRequestFailed(e.to_string()))
     }
 
-    async fn cmd_obs_status(&self) -> crate::domain::result::Result<Value> {
+    async fn cmd_obs_status(&self) -> Result<Value> {
         let snap = self.state.read().await;
         Ok(json!({
             "connected": snap.connected,
@@ -166,12 +166,12 @@ impl CommandExecutor {
         }))
     }
 
-    async fn cmd_get_snapshot(&self) -> crate::domain::result::Result<Value> {
+    async fn cmd_get_snapshot(&self) -> Result<Value> {
         let snap = self.state.read().await;
         serde_json::to_value(snap).map_err(|e| ObsctlError::ObsRequestFailed(e.to_string()))
     }
 
-    async fn cmd_set_scene(&self, args: &Value) -> crate::domain::result::Result<Value> {
+    async fn cmd_set_scene(&self, args: &Value) -> Result<Value> {
         let target = required_string(args, "target")?;
         let client = self.require_obs().await?;
         let snap = self.state.read().await;
@@ -189,59 +189,49 @@ impl CommandExecutor {
         Ok(json!({ "message": format!("scene set: {obs_name}") }))
     }
 
-    async fn cmd_set_profile(&self, args: &Value) -> crate::domain::result::Result<Value> {
+    async fn cmd_set_profile(&self, args: &Value) -> Result<Value> {
+        self.cmd_set_named_selection(args, NamedSelection::PROFILE)
+            .await
+    }
+
+    async fn cmd_set_scene_collection(&self, args: &Value) -> Result<Value> {
+        self.cmd_set_named_selection(args, NamedSelection::SCENE_COLLECTION)
+            .await
+    }
+
+    /// Switch OBS to a profile or a scene collection.
+    ///
+    /// Unlike scenes and audio inputs, these two have no aliases or shortcuts,
+    /// so the target must already be one of the names in the snapshot. They
+    /// differ only in which list is searched, which request is sent, which
+    /// not-found error is raised, and what they are called, so those four
+    /// live in `selection`.
+    async fn cmd_set_named_selection(
+        &self,
+        args: &Value,
+        selection: NamedSelection,
+    ) -> Result<Value> {
         let target = required_string(args, "target")?;
         let client = self.require_obs().await?;
 
         let snap = self.state.read().await;
-        let known = snap.profiles.iter().any(|p| p == &target);
+        let known = (selection.known_names)(&snap).iter().any(|n| n == &target);
         drop(snap);
         if !known {
             // Not `ObsRequestFailed`: no request was made, the name is simply
             // not one OBS knows. Scenes and audio inputs report the same class
             // of mistake through their own not-found codes.
-            return Err(ObsctlError::ProfileNotFound(target));
+            return Err((selection.not_found)(target));
         }
 
-        client
-            .request(requests::set_current_profile(&target)?)
-            .await?;
-        info!("Profile set to: {target}");
-        Ok(json!({ "message": format!("profile set: {target}") }))
+        client.request((selection.build_request)(&target)?).await?;
+        info!("{} set to: {target}", selection.label);
+        Ok(json!({ "message": format!("{} set: {target}", selection.lowercase_label) }))
     }
 
-    async fn cmd_set_scene_collection(&self, args: &Value) -> crate::domain::result::Result<Value> {
-        let target = required_string(args, "target")?;
+    async fn cmd_set_mute(&self, args: &Value, muted: bool) -> Result<Value> {
         let client = self.require_obs().await?;
-
-        let snap = self.state.read().await;
-        let known = snap.scene_collections.iter().any(|c| c == &target);
-        drop(snap);
-        if !known {
-            return Err(ObsctlError::SceneCollectionNotFound(target));
-        }
-
-        client
-            .request(requests::set_current_scene_collection(&target)?)
-            .await?;
-        info!("Scene collection set to: {target}");
-        Ok(json!({ "message": format!("scene collection set: {target}") }))
-    }
-
-    async fn cmd_set_mute(
-        &self,
-        args: &Value,
-        muted: bool,
-    ) -> crate::domain::result::Result<Value> {
-        let target = required_string(args, "target")?;
-        let client = self.require_obs().await?;
-        let snap = self.state.read().await;
-
-        let entries = audio_alias_entries(&snap);
-        drop(snap);
-
-        let resolved = resolve_audio(&target, &entries)?;
-        let obs_name = resolved.name.clone();
+        let obs_name = self.resolve_audio_target(args).await?;
 
         client
             .request(requests::set_input_mute(&obs_name, muted)?)
@@ -250,16 +240,9 @@ impl CommandExecutor {
         Ok(json!({ "message": format!("{action}: {obs_name}") }))
     }
 
-    async fn cmd_toggle_mute(&self, args: &Value) -> crate::domain::result::Result<Value> {
-        let target = required_string(args, "target")?;
+    async fn cmd_toggle_mute(&self, args: &Value) -> Result<Value> {
         let client = self.require_obs().await?;
-        let snap = self.state.read().await;
-
-        let entries = audio_alias_entries(&snap);
-        drop(snap);
-
-        let resolved = resolve_audio(&target, &entries)?;
-        let obs_name = resolved.name.clone();
+        let obs_name = self.resolve_audio_target(args).await?;
 
         client
             .request(requests::toggle_input_mute(&obs_name)?)
@@ -267,32 +250,43 @@ impl CommandExecutor {
         Ok(json!({ "message": format!("mute toggled: {obs_name}") }))
     }
 
-    async fn cmd_set_volume(&self, args: &Value) -> crate::domain::result::Result<Value> {
-        let target = required_string(args, "target")?;
+    async fn cmd_set_volume(&self, args: &Value) -> Result<Value> {
         let percent = required_u8_percentage(args, "percent")?;
-
         let client = self.require_obs().await?;
-        let snap = self.state.read().await;
-
-        let entries = audio_alias_entries(&snap);
-        drop(snap);
-
-        let resolved = resolve_audio(&target, &entries)?;
-        let obs_name = resolved.name.clone();
-        let vol_mul = percent_to_mul(percent);
+        let obs_name = self.resolve_audio_target(args).await?;
 
         client
-            .request(requests::set_input_volume(&obs_name, vol_mul)?)
+            .request(requests::set_input_volume(
+                &obs_name,
+                percent_to_mul(percent),
+            )?)
             .await?;
         Ok(json!({ "message": format!("volume set to {percent}%: {obs_name}") }))
     }
 
-    async fn cmd_toggle_stream(&self) -> crate::domain::result::Result<Value> {
+    /// Turn the caller's `target` — which may be an OBS input name, a
+    /// configured alias, or a single-key shortcut — into the name OBS itself
+    /// uses. Every audio command starts this way.
+    ///
+    /// Callers resolve *after* `require_obs`, so that with no OBS connection
+    /// the reply is "OBS unavailable" rather than "no such input" — the
+    /// snapshot an unreachable daemon holds cannot be trusted to say which
+    /// inputs exist.
+    async fn resolve_audio_target(&self, args: &Value) -> Result<String> {
+        let target = required_string(args, "target")?;
+        let snap = self.state.read().await;
+        let entries = audio_alias_entries(&snap);
+        drop(snap);
+
+        Ok(resolve_audio(&target, &entries)?.name.clone())
+    }
+
+    async fn cmd_toggle_stream(&self) -> Result<Value> {
         self.toggle_output(requests::toggle_stream(), "streaming")
             .await
     }
 
-    async fn cmd_toggle_record(&self) -> crate::domain::result::Result<Value> {
+    async fn cmd_toggle_record(&self) -> Result<Value> {
         self.toggle_output(requests::toggle_record(), "recording")
             .await
     }
@@ -306,7 +300,7 @@ impl CommandExecutor {
         &self,
         request: crate::obs::protocol::RequestData,
         output: &str,
-    ) -> crate::domain::result::Result<Value> {
+    ) -> Result<Value> {
         let client = self.require_obs().await?;
         let result = client.request(request).await?;
 
@@ -325,7 +319,7 @@ impl CommandExecutor {
 
     /// Write a config file that lists every scene and input OBS currently has,
     /// merged over whatever the user already configured, then reload it.
-    async fn cmd_dump_config(&self) -> crate::domain::result::Result<Value> {
+    async fn cmd_dump_config(&self) -> Result<Value> {
         // Checked first: without a path there is nowhere to write, and the OBS
         // round-trips below would be work thrown away.
         let path = self.config_path.as_ref().ok_or_else(|| {
@@ -360,9 +354,7 @@ impl CommandExecutor {
     }
 
     /// The scene and input names a dumped config should list.
-    async fn fetch_dumpable_obs_resources(
-        &self,
-    ) -> crate::domain::result::Result<dump_config_mod::ObsResources> {
+    async fn fetch_dumpable_obs_resources(&self) -> Result<dump_config_mod::ObsResources> {
         let client = self.require_obs().await?;
 
         let scene_resp = client.request(requests::get_scene_list()).await?;
@@ -403,14 +395,14 @@ impl CommandExecutor {
         }
     }
 
-    async fn cmd_validate_config(&self) -> crate::domain::result::Result<Value> {
+    async fn cmd_validate_config(&self) -> Result<Value> {
         let config = self.config.lock().await;
         let warnings = crate::config::schema::validate(&config)?;
         let warning_msgs: Vec<String> = warnings.iter().map(|w| w.0.clone()).collect();
         Ok(json!({ "valid": true, "warnings": warning_msgs }))
     }
 
-    async fn cmd_reload_config(&self) -> crate::domain::result::Result<Value> {
+    async fn cmd_reload_config(&self) -> Result<Value> {
         let result = self.reload_config_from_disk().await;
         match &result {
             Ok(warnings) => {
@@ -437,9 +429,7 @@ impl CommandExecutor {
         }))
     }
 
-    async fn reload_config_from_disk(
-        &self,
-    ) -> crate::domain::result::Result<Vec<ValidationWarning>> {
+    async fn reload_config_from_disk(&self) -> Result<Vec<ValidationWarning>> {
         let path = self.config_path.as_ref().ok_or_else(|| {
             ObsctlError::ConfigInvalid("no config path configured for reload".to_string())
         })?;
@@ -462,12 +452,12 @@ impl CommandExecutor {
         Ok(warnings)
     }
 
-    async fn cmd_reconnect_obs(&self) -> crate::domain::result::Result<Value> {
+    async fn cmd_reconnect_obs(&self) -> Result<Value> {
         let _ = self.reconnect_tx.send(()).await;
         Ok(json!({ "message": "reconnect triggered" }))
     }
 
-    async fn cmd_shutdown_server(&self) -> crate::domain::result::Result<Value> {
+    async fn cmd_shutdown_server(&self) -> Result<Value> {
         let config = self.config.lock().await;
         if !config.server.allow_remote_shutdown {
             return Err(ObsctlError::ShutdownDisabled);
@@ -497,7 +487,7 @@ impl CommandExecutor {
         warnings.iter().map(|warning| warning.0.clone()).collect()
     }
 
-    async fn require_obs(&self) -> crate::domain::result::Result<ObsClient> {
+    async fn require_obs(&self) -> Result<ObsClient> {
         self.obs
             .lock()
             .await
@@ -525,7 +515,7 @@ fn parse_server_command(name: &str) -> Result<ServerCommand> {
         .ok_or_else(|| ObsctlError::CommandParseError(format!("unknown command: {name}")))
 }
 
-fn required_string(args: &Value, key: &str) -> crate::domain::result::Result<String> {
+fn required_string(args: &Value, key: &str) -> Result<String> {
     let raw = args
         .get(key)
         .and_then(|v| v.as_str())
@@ -536,7 +526,7 @@ fn required_string(args: &Value, key: &str) -> crate::domain::result::Result<Str
         .map_err(|error| ObsctlError::CommandParseError(format!("{key} {error}")))
 }
 
-fn required_u8_percentage(args: &Value, key: &str) -> crate::domain::result::Result<u8> {
+fn required_u8_percentage(args: &Value, key: &str) -> Result<u8> {
     let value = args
         .get(key)
         .ok_or_else(|| ObsctlError::CommandParseError(format!("missing {key}")))?;
@@ -589,6 +579,36 @@ fn validate_empty_payload(args: &Value, command: &str) -> Result<()> {
     Err(ObsctlError::CommandParseError(format!(
         "command {command} does not accept arguments"
     )))
+}
+
+/// The parts that differ between "set the current profile" and "set the
+/// current scene collection": where the known names live in the snapshot, how
+/// to build the OBS request, which error says the name is unknown, and how to
+/// name the thing in a message.
+struct NamedSelection {
+    known_names: fn(&ObsSnapshot) -> &[String],
+    build_request: fn(&str) -> Result<crate::obs::protocol::RequestData>,
+    not_found: fn(String) -> ObsctlError,
+    label: &'static str,
+    lowercase_label: &'static str,
+}
+
+impl NamedSelection {
+    const PROFILE: Self = Self {
+        known_names: |snap| &snap.profiles,
+        build_request: requests::set_current_profile,
+        not_found: ObsctlError::ProfileNotFound,
+        label: "Profile",
+        lowercase_label: "profile",
+    };
+
+    const SCENE_COLLECTION: Self = Self {
+        known_names: |snap| &snap.scene_collections,
+        build_request: requests::set_current_scene_collection,
+        not_found: ObsctlError::SceneCollectionNotFound,
+        label: "Scene collection",
+        lowercase_label: "scene collection",
+    };
 }
 
 /// Alias/shortcut lookup tables for the two kinds of target a command can
