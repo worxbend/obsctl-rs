@@ -2,11 +2,14 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use super::systemd_user_service::{CommandRunner, unit_file_content};
+use super::systemd_user_service::{CommandRunner, SYSTEMCTL_PROGRAM_NAME, unit_file_content};
 use crate::domain::errors::ObsctlError;
 use crate::domain::result::Result;
 use crate::support::fs;
 use crate::support::validation::validate_no_control_characters;
+
+/// The systemd unit this program installs and controls.
+const UNIT_NAME: &str = "obsctl.service";
 
 pub struct ServiceInstaller<'a> {
     runner: &'a dyn CommandRunner,
@@ -59,28 +62,34 @@ impl<'a> ServiceInstaller<'a> {
     }
 
     pub fn start(&self) -> Result<String> {
-        self.runner
-            .run("systemctl", &["--user", "start", "obsctl.service"])
+        self.unit_command("start")
     }
 
     pub fn stop(&self) -> Result<String> {
-        self.runner
-            .run("systemctl", &["--user", "stop", "obsctl.service"])
+        self.unit_command("stop")
     }
 
     pub fn restart(&self) -> Result<String> {
-        self.runner
-            .run("systemctl", &["--user", "restart", "obsctl.service"])
+        self.unit_command("restart")
     }
 
     pub fn status(&self) -> Result<String> {
+        self.unit_command("status")
+    }
+
+    /// Run `systemctl --user <verb> obsctl.service`.
+    ///
+    /// The four callers above differ only in the verb, and naming the program
+    /// and the unit here rather than at each call site means a typo in either
+    /// cannot reach only some of them.
+    fn unit_command(&self, verb: &str) -> Result<String> {
         self.runner
-            .run("systemctl", &["--user", "status", "obsctl.service"])
+            .run(SYSTEMCTL_PROGRAM_NAME, &["--user", verb, UNIT_NAME])
     }
 
     fn daemon_reload(&self) -> Result<()> {
         self.runner
-            .run("systemctl", &["--user", "daemon-reload"])
+            .run(SYSTEMCTL_PROGRAM_NAME, &["--user", "daemon-reload"])
             .map(|_| ())
     }
 }
@@ -120,28 +129,14 @@ pub fn validate_service_exec_path(exec_path: &Path) -> Result<PathBuf> {
     })?;
 
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = metadata.permissions().mode();
-        if mode & 0o111 == 0 {
-            return Err(ObsctlError::ServiceInstallFailed(format!(
-                "service executable is not executable: {}",
-                exec_text
-            )));
-        }
-        if mode & 0o022 != 0 {
-            return Err(ObsctlError::ServiceInstallFailed(format!(
-                "service executable is writable by group or other: {}",
-                exec_text
-            )));
-        }
-        if mode & 0o7000 != 0 {
-            return Err(ObsctlError::ServiceInstallFailed(format!(
-                "service executable has insecure special mode bits: {}",
-                exec_text
-            )));
-        }
-    }
+    fs::check_executable_permissions(&metadata).map_err(|problem| {
+        let reason = match problem {
+            fs::InsecureExecutable::NotExecutable => "is not executable",
+            fs::InsecureExecutable::GroupOrOtherWritable => "is writable by group or other",
+            fs::InsecureExecutable::SpecialModeBits => "has insecure special mode bits",
+        };
+        ObsctlError::ServiceInstallFailed(format!("service executable {reason}: {exec_text}"))
+    })?;
 
     Ok(exec_path.to_path_buf())
 }

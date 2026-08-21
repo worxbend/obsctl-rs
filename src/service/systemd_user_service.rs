@@ -4,7 +4,7 @@ use crate::domain::errors::ObsctlError;
 use crate::domain::result::Result;
 use crate::support::fs;
 
-const SYSTEMCTL_PROGRAM_NAME: &str = "systemctl";
+pub const SYSTEMCTL_PROGRAM_NAME: &str = "systemctl";
 const SAFE_SYSTEMCTL_PATHS: [&str; 4] = [
     "/usr/bin/systemctl",
     "/bin/systemctl",
@@ -160,28 +160,20 @@ fn validate_systemctl_binary(path: &Path) -> std::io::Result<()> {
     fs::ensure_path_not_symlink(path)?;
     let metadata = fs::ensure_regular_file_with_metadata(path)?;
 
-    use std::os::unix::fs::PermissionsExt;
-    let permissions = metadata.permissions();
-
-    if permissions.mode() & 0o111 == 0 {
-        return Err(std::io::Error::new(
+    fs::check_executable_permissions(&metadata).map_err(|problem| {
+        std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "systemctl path is not executable",
-        ));
-    }
-    if permissions.mode() & 0o022 != 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "systemctl path is writable by group or other",
-        ));
-    }
-    if permissions.mode() & 0o7000 != 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "systemctl path has insecure special mode bits",
-        ));
-    }
-    Ok(())
+            match problem {
+                fs::InsecureExecutable::NotExecutable => "systemctl path is not executable",
+                fs::InsecureExecutable::GroupOrOtherWritable => {
+                    "systemctl path is writable by group or other"
+                }
+                fs::InsecureExecutable::SpecialModeBits => {
+                    "systemctl path has insecure special mode bits"
+                }
+            },
+        )
+    })
 }
 
 #[cfg(not(unix))]

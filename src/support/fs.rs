@@ -233,6 +233,48 @@ where
     Ok(())
 }
 
+/// Why a file is not safe for this program to execute.
+///
+/// The rule is one thing — "only its owner can have changed it, and it can
+/// actually be run" — but it is enforced at two call sites that word their
+/// refusals differently (one installs a service unit, the other picks a
+/// systemctl binary). Naming the three failures here keeps the policy in one
+/// place while leaving each caller its own message.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsecureExecutable {
+    /// No execute bit set for anyone.
+    NotExecutable,
+    /// Writable by group or other, so someone else could swap its contents.
+    GroupOrOtherWritable,
+    /// setuid, setgid, or sticky — nothing this program runs should carry these.
+    SpecialModeBits,
+}
+
+/// Check a file's permission bits against the rule above.
+///
+/// Takes metadata rather than a path on purpose: the caller has already
+/// established what the path is, and re-stating it here would leave a window
+/// in which the file checked and the file described are not the same one.
+#[cfg(unix)]
+pub fn check_executable_permissions(
+    metadata: &std::fs::Metadata,
+) -> Result<(), InsecureExecutable> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = metadata.permissions().mode();
+
+    if mode & 0o111 == 0 {
+        return Err(InsecureExecutable::NotExecutable);
+    }
+    if mode & 0o022 != 0 {
+        return Err(InsecureExecutable::GroupOrOtherWritable);
+    }
+    if mode & 0o7000 != 0 {
+        return Err(InsecureExecutable::SpecialModeBits);
+    }
+    Ok(())
+}
+
 pub fn secure_permissions(path: &Path, mode: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
