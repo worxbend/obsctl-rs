@@ -12,25 +12,52 @@ use super::model::{Config, ConnectionConfig};
 #[derive(Debug)]
 pub struct ValidationWarning(pub String);
 
+/// Check a whole config, in the order the sections appear below.
+///
+/// The distinction between the two ways of reporting a problem is the point of
+/// this module. An `Err` means the config cannot be used and the command
+/// stops. A `ValidationWarning` means it can be used but something in it is
+/// unwise or will be ignored — a plaintext password, an unusable palette
+/// prefix — and the user is told while the daemon carries on. Turning an
+/// existing warning into an error breaks configs that work today, so the
+/// choice per check is deliberate rather than incidental.
+///
+/// Order matters and is preserved: a config wrong in more than one way reports
+/// the first problem in this sequence, and tests pin that.
 pub fn validate(config: &Config) -> Result<Vec<ValidationWarning>> {
     let mut warnings = Vec::new();
 
-    if config.version != 1 {
-        return Err(ObsctlError::ConfigInvalid(format!(
-            "unsupported config version: {}",
-            config.version
+    validate_version(config.version)?;
+    validate_connection_config(&config.connection)?;
+    validate_resource_names(config)?;
+    warnings.extend(validate_ui_config(&config.ui)?);
+    validate_reconnect_config(&config.reconnect)?;
+    validate_socket_path(config)?;
+    warnings.extend(validate_password_config(&config.connection)?);
+    validate_no_duplicate_aliases(config)?;
+
+    Ok(warnings)
+}
+
+fn config_invalid(message: impl Into<String>) -> ObsctlError {
+    ObsctlError::ConfigInvalid(message.into())
+}
+
+fn validate_version(version: u32) -> Result<()> {
+    if version != 1 {
+        return Err(config_invalid(format!(
+            "unsupported config version: {version}"
         )));
     }
+    Ok(())
+}
 
-    validate_connection_config(&config.connection)?;
-
-    validate_resource_names(config)?;
-
-    if config.ui.refresh_interval_ms == 0 {
-        return Err(ObsctlError::ConfigInvalid(
-            "ui.refresh_interval_ms must be positive".to_string(),
-        ));
+fn validate_ui_config(ui: &super::model::UiConfig) -> Result<Vec<ValidationWarning>> {
+    if ui.refresh_interval_ms == 0 {
+        return Err(config_invalid("ui.refresh_interval_ms must be positive"));
     }
+
+    let mut warnings = Vec::new();
 
     // The prefix is stripped before parsing (see `domain::parser`), so only
     // the characters that round-trip through it work. Warn rather than fail:
@@ -38,7 +65,7 @@ pub fn validate(config: &Config) -> Result<Vec<ValidationWarning>> {
     // existing config must not start blocking the daemon.
     if !crate::domain::parser::PALETTE_PREFIXES
         .iter()
-        .any(|c| config.ui.command_palette_prefix == c.to_string())
+        .any(|c| ui.command_palette_prefix == c.to_string())
     {
         let supported: Vec<String> = crate::domain::parser::PALETTE_PREFIXES
             .iter()
@@ -46,13 +73,13 @@ pub fn validate(config: &Config) -> Result<Vec<ValidationWarning>> {
             .collect();
         warnings.push(ValidationWarning(format!(
             "ui.command_palette_prefix '{}' is not supported (supported: {}); falling back to '{}'",
-            config.ui.command_palette_prefix,
+            ui.command_palette_prefix,
             supported.join(", "),
             crate::domain::parser::DEFAULT_PALETTE_PREFIX,
         )));
     }
 
-    if let Some(locale) = &config.ui.locale
+    if let Some(locale) = &ui.locale
         && !crate::localization::SUPPORTED_LOCALES.contains(&locale.to_ascii_lowercase().as_str())
     {
         warnings.push(ValidationWarning(format!(
@@ -61,48 +88,57 @@ pub fn validate(config: &Config) -> Result<Vec<ValidationWarning>> {
         )));
     }
 
-    if config.reconnect.max_delay_ms < config.reconnect.initial_delay_ms {
-        return Err(ObsctlError::ConfigInvalid(
-            "reconnect.max_delay_ms must be >= initial_delay_ms".to_string(),
+    Ok(warnings)
+}
+
+fn validate_reconnect_config(reconnect: &super::model::ReconnectConfig) -> Result<()> {
+    if reconnect.max_delay_ms < reconnect.initial_delay_ms {
+        return Err(config_invalid(
+            "reconnect.max_delay_ms must be >= initial_delay_ms",
         ));
     }
 
-    if config.reconnect.multiplier < 1.0 {
-        return Err(ObsctlError::ConfigInvalid(
-            "reconnect.multiplier must be >= 1.0".to_string(),
-        ));
+    if reconnect.multiplier < 1.0 {
+        return Err(config_invalid("reconnect.multiplier must be >= 1.0"));
     }
 
+    Ok(())
+}
+
+fn validate_socket_path(config: &Config) -> Result<()> {
     resolve_server_socket_path(config.server.socket_path.as_deref())
         .map(|_| ())
-        .map_err(|error| ObsctlError::ConfigInvalid(format!("server.socket_path {error}")))?;
+        .map_err(|error| config_invalid(format!("server.socket_path {error}")))
+}
 
-    let resolved_password = resolve_connection_password(
-        config.connection.password.as_deref(),
-        &config.connection.password_env,
-    )
-    .map_err(|error| {
-        ObsctlError::ConfigInvalid(password_config_error_message(&error).to_string())
-    })?;
+/// Where the OBS password comes from, and whether that choice is a good one.
+///
+/// A password that cannot be resolved at all is an error. A password that
+/// resolves but was written in plaintext, or an env var that is simply not
+/// set, are warnings: both leave a config that still connects.
+fn validate_password_config(connection: &ConnectionConfig) -> Result<Vec<ValidationWarning>> {
+    let resolved_password =
+        resolve_connection_password(connection.password.as_deref(), &connection.password_env)
+            .map_err(|error| config_invalid(password_config_error_message(&error)))?;
 
-    if config.connection.password.is_some() {
+    let mut warnings = Vec::new();
+
+    if connection.password.is_some() {
         warnings.push(ValidationWarning(
             "connection.password contains a plaintext password; use password_env instead"
                 .to_string(),
         ));
     }
 
-    if !config.connection.password_env.is_empty()
-        && config.connection.password.is_none()
+    if !connection.password_env.is_empty()
+        && connection.password.is_none()
         && resolved_password.is_none()
     {
         warnings.push(ValidationWarning(format!(
             "password_env {} is not set; will connect without a password",
-            config.connection.password_env
+            connection.password_env
         )));
     }
-
-    validate_no_duplicate_aliases(config)?;
 
     Ok(warnings)
 }
@@ -111,19 +147,19 @@ pub(crate) fn validate_connection_config(config: &ConnectionConfig) -> Result<()
     validate_connection_host(&config.host)?;
 
     if config.port == 0 {
-        return Err(ObsctlError::ConfigInvalid(
+        return Err(config_invalid(
             "connection.port must be in range 1-65535".to_string(),
         ));
     }
 
     if config.connect_timeout_ms == 0 {
-        return Err(ObsctlError::ConfigInvalid(
+        return Err(config_invalid(
             "connection.connect_timeout_ms must be positive".to_string(),
         ));
     }
 
     if config.request_timeout_ms == 0 {
-        return Err(ObsctlError::ConfigInvalid(
+        return Err(config_invalid(
             "connection.request_timeout_ms must be positive".to_string(),
         ));
     }
@@ -133,26 +169,26 @@ pub(crate) fn validate_connection_config(config: &ConnectionConfig) -> Result<()
 
 pub(crate) fn validate_connection_host(host: &str) -> Result<()> {
     validate_no_control_or_whitespace(host).map_err(|_| {
-        ObsctlError::ConfigInvalid(
+        config_invalid(
             "connection.host must not contain control or whitespace characters".to_string(),
         )
     })?;
 
     if host.contains('/') || host.contains('\\') || host.contains(':') || host.contains('@') {
-        return Err(ObsctlError::ConfigInvalid(
+        return Err(config_invalid(
             "connection.host must not contain path, separator, userinfo, or colon characters"
                 .to_string(),
         ));
     }
 
     if host.is_empty() {
-        return Err(ObsctlError::ConfigInvalid(
+        return Err(config_invalid(
             "connection.host must not be blank".to_string(),
         ));
     }
 
     if host.len() > 253 {
-        return Err(ObsctlError::ConfigInvalid(
+        return Err(config_invalid(
             "connection.host exceeds DNS-typical length limit".to_string(),
         ));
     }
@@ -171,17 +207,13 @@ fn check_unique_aliases_shortcuts<'a>(
         if let Some(a) = alias {
             let normalized = normalize_alias_or_shortcut(a, kind)?;
             if !aliases.insert(normalized) {
-                return Err(ObsctlError::ConfigInvalid(format!(
-                    "duplicate {kind} alias: {a}"
-                )));
+                return Err(config_invalid(format!("duplicate {kind} alias: {a}")));
             }
         }
         if let Some(s) = shortcut {
             let normalized = normalize_alias_or_shortcut(s, kind)?;
             if !shortcuts.insert(normalized) {
-                return Err(ObsctlError::ConfigInvalid(format!(
-                    "duplicate {kind} shortcut: {s}"
-                )));
+                return Err(config_invalid(format!("duplicate {kind} shortcut: {s}")));
             }
         }
     }
@@ -211,12 +243,12 @@ fn validate_no_duplicate_aliases(config: &Config) -> Result<()> {
 fn validate_resource_names(config: &Config) -> Result<()> {
     for scene in &config.scenes {
         trim_and_validate_token_with_max_len(&scene.name, MAX_TARGET_TOKEN_LENGTH)
-            .map_err(|error| ObsctlError::ConfigInvalid(format!("scene name {error}")))?;
+            .map_err(|error| config_invalid(format!("scene name {error}")))?;
     }
 
     for audio in &config.audio.inputs {
         trim_and_validate_token_with_max_len(&audio.name, MAX_TARGET_TOKEN_LENGTH)
-            .map_err(|error| ObsctlError::ConfigInvalid(format!("audio name {error}")))?;
+            .map_err(|error| config_invalid(format!("audio name {error}")))?;
     }
 
     Ok(())
