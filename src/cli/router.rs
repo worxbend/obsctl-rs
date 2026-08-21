@@ -802,7 +802,15 @@ fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> 
         Commands::ReloadConfig => ctx.reload_config(),
         Commands::ToggleStream => ctx.toggle_stream(),
         Commands::ToggleRecord => ctx.toggle_record(),
-        other => fail(t!(
+        // Listed rather than caught by a wildcard: these are the modes the
+        // router handles itself before it gets here, so a newly added
+        // subcommand fails to compile until it is routed somewhere, instead of
+        // silently reaching users as "unsupported command".
+        other @ (Commands::Init
+        | Commands::ValidateConfig
+        | Commands::Server { .. }
+        | Commands::Tui
+        | Commands::Service { .. }) => fail(t!(
             "cli.proxy.unsupported_command",
             command = format!("{other:?}")
         )),

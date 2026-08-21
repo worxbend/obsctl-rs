@@ -97,10 +97,6 @@ impl ProxyCtx {
         }
     }
 
-    pub fn ping(&self) -> i32 {
-        self.run_proxy(CommandPayload::simple(ServerCommand::Ping))
-    }
-
     pub fn status(&self) -> i32 {
         self.run_proxy_with(
             CommandPayload::simple(ServerCommand::GetSnapshot),
@@ -177,10 +173,6 @@ impl ProxyCtx {
 
     pub fn toggle_record(&self) -> i32 {
         self.run_proxy(CommandPayload::simple(ServerCommand::ToggleRecord))
-    }
-
-    pub fn validate_config(&self) -> i32 {
-        self.run_proxy(CommandPayload::simple(ServerCommand::ValidateConfig))
     }
 
     fn emit_response_error(&self, error: Option<&ErrorPayload>) -> i32 {
