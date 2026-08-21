@@ -73,73 +73,44 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
     let arg_prefix = raw_arg_prefix.trim_start();
     let arg_lower = arg_prefix.to_ascii_lowercase();
 
-    match cmd_key.as_str() {
-        "scene" | "set-scene" => {
-            let mut candidates: Vec<String> = model
-                .scenes()
-                .iter()
-                .flat_map(|s| {
-                    let mut names = vec![s.name.clone()];
-                    if let Some(a) = &s.alias {
-                        names.push(a.clone());
-                    }
-                    names
-                })
-                .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
-                .collect();
-            sort_candidates(&mut candidates, arg_prefix);
-            candidates
-                .into_iter()
-                .map(|c| format!("{cmd} {c}"))
-                .collect()
-        }
-        "profile" | "set-profile" => {
-            let mut candidates: Vec<String> = model
-                .profiles()
-                .iter()
-                .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
-                .cloned()
-                .collect();
-            sort_candidates(&mut candidates, arg_prefix);
-            candidates
-                .into_iter()
-                .map(|c| format!("{cmd} {c}"))
-                .collect()
-        }
-        "collection" | "set-collection" | "scene-collection" => {
-            let mut candidates: Vec<String> = model
-                .scene_collections()
-                .iter()
-                .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
-                .cloned()
-                .collect();
-            sort_candidates(&mut candidates, arg_prefix);
-            candidates
-                .into_iter()
-                .map(|c| format!("{cmd} {c}"))
-                .collect()
-        }
-        "mute" | "unmute" | "toggle-mute" | "vol" | "volume" => {
-            let mut candidates: Vec<String> = model
-                .audio_inputs()
-                .iter()
-                .flat_map(|a| {
-                    let mut names = vec![a.name.clone()];
-                    if let Some(alias) = &a.alias {
-                        names.push(alias.clone());
-                    }
-                    names
-                })
-                .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
-                .collect();
-            sort_candidates(&mut candidates, arg_prefix);
-            candidates
-                .into_iter()
-                .map(|c| format!("{cmd} {c}"))
-                .collect()
-        }
-        _ => vec![],
+    // Each arm answers only "what could the user be naming here?"; the
+    // filtering, sorting, and re-attaching of the command word are the same
+    // for all of them and happen once, below.
+    let pool: Vec<String> = match cmd_key.as_str() {
+        "scene" | "set-scene" => model
+            .scenes()
+            .iter()
+            .flat_map(|s| name_and_alias(&s.name, &s.alias))
+            .collect(),
+        "profile" | "set-profile" => model.profiles().to_vec(),
+        "collection" | "set-collection" | "scene-collection" => model.scene_collections().to_vec(),
+        "mute" | "unmute" | "toggle-mute" | "vol" | "volume" => model
+            .audio_inputs()
+            .iter()
+            .flat_map(|a| name_and_alias(&a.name, &a.alias))
+            .collect(),
+        _ => return vec![],
+    };
+
+    let mut candidates: Vec<String> = pool
+        .into_iter()
+        .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
+        .collect();
+    sort_candidates(&mut candidates, arg_prefix);
+    candidates
+        .into_iter()
+        .map(|c| format!("{cmd} {c}"))
+        .collect()
+}
+
+/// Both spellings the user may type for one target: the name OBS uses, and
+/// the alias the config gave it, if any.
+fn name_and_alias(name: &str, alias: &Option<String>) -> Vec<String> {
+    let mut names = vec![name.to_string()];
+    if let Some(alias) = alias {
+        names.push(alias.clone());
     }
+    names
 }
 
 #[cfg(test)]
