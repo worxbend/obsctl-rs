@@ -328,8 +328,9 @@ impl CommandExecutor {
 
         let obs_resources = self.fetch_dumpable_obs_resources().await?;
 
-        let current_config = self.config.lock().await.clone();
-        let merged = dump_config_mod::merge(&current_config, &obs_resources)?;
+        let in_memory = self.config.lock().await.clone();
+        let base = dump_merge_base(path, &in_memory);
+        let merged = dump_config_mod::merge(&base.config, &obs_resources)?;
 
         let backup = dump_config_mod::write_backup(path)?;
         crate::config::writer::write_atomic(&merged, path)?;
@@ -345,6 +346,7 @@ impl CommandExecutor {
         let input_count = merged.audio.inputs.len();
         Ok(json!({
             "message": format!("config dumped: {scene_count} scenes, {input_count} inputs"),
+            "merge_base_error": base.error,
             "reload_failed": reload.error.is_some(),
             "warnings": reload.warnings,
             "reload_error": reload.error,
@@ -496,6 +498,46 @@ impl CommandExecutor {
     }
 }
 
+/// The config a dump merges OBS's current state onto, and why it might not be
+/// the one on disk.
+struct DumpMergeBase {
+    config: Config,
+    /// `None` when the file was read. Otherwise why it was not, so the caller
+    /// can say the dump was built from a possibly-stale in-memory copy.
+    error: Option<String>,
+}
+
+/// Choose the config that a `dump-config` should merge onto.
+///
+/// The file, not the daemon's in-memory copy. The daemon loads the config at
+/// startup and on `reload-config`; a user who hand-edits the file and then runs
+/// `dump-config` — which the README's quick start puts one line apart — would
+/// otherwise have their edits overwritten by a copy that predates them.
+///
+/// A file that cannot be read or does not parse falls back to the in-memory
+/// copy rather than failing. The dump's job is to record what OBS has, and
+/// refusing to do it because the file on disk is currently broken would take
+/// away the command most likely to produce a working one. The caller reports
+/// the fallback.
+fn dump_merge_base(path: &std::path::Path, in_memory: &Config) -> DumpMergeBase {
+    match crate::config::loader::load_with_warnings(path) {
+        Ok((config, _)) => DumpMergeBase {
+            config,
+            error: None,
+        },
+        Err(error) => {
+            warn!(
+                "Dumping onto the in-memory config; {} is unusable: {error}",
+                path.display()
+            );
+            DumpMergeBase {
+                config: in_memory.clone(),
+                error: Some(error.to_string()),
+            }
+        }
+    }
+}
+
 /// Reject a payload whose shape does not match what the command declares in
 /// `ipc::protocol::COMMANDS`, before any OBS request is attempted.
 fn validate_payload(command: ServerCommand, args: &Value) -> Result<()> {
@@ -643,6 +685,66 @@ mod tests {
     };
     use super::{validate_command_payload, validate_empty_payload, validate_object_args};
     use serde_json::json;
+
+    /// `dump-config` must merge onto the file, not onto the copy the daemon
+    /// loaded at startup — otherwise a hand-edit made since then is silently
+    /// overwritten by the dump.
+    #[test]
+    fn dump_merge_base_prefers_the_file_over_the_in_memory_copy() {
+        use crate::config::model::{Config, SceneConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+
+        // What the user just wrote by hand.
+        let on_disk = Config {
+            scenes: vec![SceneConfig {
+                name: "Main".to_string(),
+                alias: Some("edited-by-hand".to_string()),
+                ..SceneConfig::default()
+            }],
+            ..Config::default()
+        };
+        crate::config::writer::write_atomic(&on_disk, &path).unwrap();
+
+        // What the daemon still holds from startup.
+        let in_memory = Config::default();
+
+        let base = super::dump_merge_base(&path, &in_memory);
+        assert!(base.error.is_none(), "the file was readable");
+        assert_eq!(
+            base.config.scenes.first().and_then(|s| s.alias.as_deref()),
+            Some("edited-by-hand"),
+            "the dump must build on what is on disk"
+        );
+    }
+
+    /// A config file that is missing or unparseable does not fail the dump:
+    /// recording what OBS has is exactly what someone with a broken config
+    /// needs. The caller is told which copy was used.
+    #[test]
+    fn dump_merge_base_falls_back_to_memory_when_the_file_is_unusable() {
+        use crate::config::model::{Config, SceneConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-valid.yml");
+        std::fs::write(&path, "this: [is not: valid yaml").unwrap();
+
+        let in_memory = Config {
+            scenes: vec![SceneConfig {
+                name: "FromMemory".to_string(),
+                ..SceneConfig::default()
+            }],
+            ..Config::default()
+        };
+
+        let base = super::dump_merge_base(&path, &in_memory);
+        assert!(base.error.is_some(), "the fallback must be reported");
+        assert_eq!(
+            base.config.scenes.first().map(|s| s.name.as_str()),
+            Some("FromMemory")
+        );
+    }
 
     #[test]
     fn required_string_rejects_control_characters_and_empty_values() {
