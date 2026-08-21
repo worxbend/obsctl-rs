@@ -409,6 +409,14 @@ mod tests {
 
     #[test]
     fn resolve_server_socket_path_returns_default_for_absent_value() {
+        // Both calls read `XDG_RUNTIME_DIR`, and sibling tests in this module
+        // set and unset it around their own bodies. Without the lock the two
+        // reads can straddle one of those changes and disagree — which is a
+        // flake in the test, not a fault in the code under test.
+        let _lock = crate::support::validation::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let resolved = super::resolve_server_socket_path(None).unwrap();
         assert_eq!(resolved, super::default_socket_path());
     }
