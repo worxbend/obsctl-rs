@@ -23,8 +23,6 @@ pub fn parse(input: &str) -> Result<Command> {
         .split_first()
         .ok_or_else(|| ObsctlError::CommandParseError("empty command".to_string()))?;
     let cmd_key = normalize_command_name(cmd_name)?;
-    let maybe_target = args.first();
-
     match cmd_key.as_str() {
         "help" => expect_args(args, 0, "help", Command::Help),
         "quit" | "exit" => expect_args(args, 0, "quit", Command::Quit),
@@ -41,70 +39,20 @@ pub fn parse(input: &str) -> Result<Command> {
         "stream" => expect_args(args, 0, "stream", Command::ToggleStream),
         "rec" | "record" => expect_args(args, 0, "rec", Command::ToggleRecord),
         "scene" | "set-scene" => {
-            if args.len() != 1 {
-                return Err(ObsctlError::CommandParseError(format!(
-                    "scene expects 1 argument, got {}",
-                    args.len()
-                )));
-            }
-            Ok(Command::SetScene {
-                target: sanitize_target(maybe_target)?,
-            })
+            expect_target(args, "scene", |target| Command::SetScene { target })
         }
         "profile" | "set-profile" => {
-            if args.len() != 1 {
-                return Err(ObsctlError::CommandParseError(format!(
-                    "profile expects 1 argument, got {}",
-                    args.len()
-                )));
-            }
-            Ok(Command::SetProfile {
-                target: sanitize_target(maybe_target)?,
-            })
+            expect_target(args, "profile", |target| Command::SetProfile { target })
         }
         "collection" | "set-collection" | "scene-collection" => {
-            if args.len() != 1 {
-                return Err(ObsctlError::CommandParseError(format!(
-                    "collection expects 1 argument, got {}",
-                    args.len()
-                )));
-            }
-            Ok(Command::SetSceneCollection {
-                target: sanitize_target(maybe_target)?,
+            expect_target(args, "collection", |target| Command::SetSceneCollection {
+                target,
             })
         }
-        "mute" => {
-            if args.len() != 1 {
-                return Err(ObsctlError::CommandParseError(format!(
-                    "mute expects 1 argument, got {}",
-                    args.len()
-                )));
-            }
-            Ok(Command::Mute {
-                target: sanitize_target(maybe_target)?,
-            })
-        }
-        "unmute" => {
-            if args.len() != 1 {
-                return Err(ObsctlError::CommandParseError(format!(
-                    "unmute expects 1 argument, got {}",
-                    args.len()
-                )));
-            }
-            Ok(Command::Unmute {
-                target: sanitize_target(maybe_target)?,
-            })
-        }
+        "mute" => expect_target(args, "mute", |target| Command::Mute { target }),
+        "unmute" => expect_target(args, "unmute", |target| Command::Unmute { target }),
         "toggle-mute" => {
-            if args.len() != 1 {
-                return Err(ObsctlError::CommandParseError(format!(
-                    "toggle-mute expects 1 argument, got {}",
-                    args.len()
-                )));
-            }
-            Ok(Command::ToggleMute {
-                target: sanitize_target(maybe_target)?,
-            })
+            expect_target(args, "toggle-mute", |target| Command::ToggleMute { target })
         }
         "vol" | "volume" => {
             if args.len() != 2 {
@@ -120,7 +68,7 @@ pub fn parse(input: &str) -> Result<Command> {
             }
             let percent = required_u8_percentage(&args[1])?;
             Ok(Command::SetVolume {
-                target: sanitize_target(maybe_target)?,
+                target: sanitize_target(args.first())?,
                 percent,
             })
         }
@@ -138,6 +86,19 @@ fn expect_args(args: &[String], expected: usize, name: &str, cmd: Command) -> Re
         )));
     }
     Ok(cmd)
+}
+
+/// The six commands that take exactly one target name. They differ only in
+/// what they are called and which `Command` they build, so the arity check and
+/// the target validation happen here rather than six times over.
+fn expect_target(args: &[String], name: &str, build: fn(String) -> Command) -> Result<Command> {
+    if args.len() != 1 {
+        return Err(ObsctlError::CommandParseError(format!(
+            "{name} expects 1 argument, got {}",
+            args.len()
+        )));
+    }
+    Ok(build(sanitize_target(args.first())?))
 }
 
 fn sanitize_target(value: Option<&String>) -> Result<String> {
