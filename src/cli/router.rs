@@ -7,10 +7,11 @@ use rust_i18n::t;
 use crate::{
     cli::{
         args::{Cli, Commands, ServiceAction},
-        client_commands::ProxyCtx,
+        client_commands::{self, ProxyCtx},
     },
     config::{loader, model, paths, schema, writer},
-    ipc::socket_path::resolve_server_socket_path,
+    domain::errors::ObsctlError,
+    ipc::{protocol::CommandPayload, socket_path::resolve_server_socket_path},
     runtime::logger,
     server::{daemon, options::ServerOptions},
     service::{
@@ -22,48 +23,141 @@ use crate::{
     },
 };
 
-/// Resolve `ui.locale` from the config that would be used (best-effort — a
-/// missing/invalid config file just means "no override, use defaults") and
-/// set it as the active locale before any user-facing output is printed.
-fn init_localization(config_path: Option<&std::path::Path>) {
-    let config_locale = config_path
-        .and_then(|cp| loader::load_or_default(cp).ok())
-        .and_then(|c| c.ui.locale);
-    crate::localization::init(config_path, config_locale.as_deref());
+/// Resolve the config file this launch will use.
+///
+/// Precedence, highest first:
+///
+/// 1. `--config` on the command line (already checked by clap's
+///    `non_blank_path`: absolute, no traversal, no control characters);
+/// 2. the `OBSCTL_CONFIG` environment variable (checked inside
+///    [`paths::config_path`], which quietly falls back to the platform default
+///    when the value is relative, a symlink, over-long, or not valid UTF-8);
+/// 3. the platform default location, e.g. `~/.config/obsctl/config.yml`.
+///
+/// Because `paths::config_path()` already ends in `default_config_path()` on
+/// every one of its rejection paths, the answer is `None` only when the
+/// platform offers no config directory at all. That is why nothing downstream
+/// re-applies any part of this chain: four callees used to end in their own
+/// `.or_else(paths::config_path).or_else(paths::default_config_path)` that
+/// could never change the value. Please do not put them back.
+fn resolve_config_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    explicit.or_else(paths::config_path)
+}
+
+/// Everything resolved once when the process starts, then handed to whichever
+/// command runs.
+///
+/// Launching the TUI used to parse the config file three separate times — once
+/// to find `ui.locale`, once to find the socket path, and once to find the
+/// theme — each with its own idea of what to do when the file was bad (ignore
+/// it, fail the command, silently use defaults). Reading it once and passing
+/// the result around means one precedence rule, one read, and one decision
+/// about failure.
+struct Startup {
+    /// The config file in effect, or `None` when there is no config directory.
+    config_path: Option<PathBuf>,
+    /// Outcome of the single attempt to read that file.
+    ///
+    /// Kept as a `Result` rather than being resolved here because the commands
+    /// genuinely disagree about whether an unusable config is fatal: `init`
+    /// exists to *write* a config file and has to run without one, while the
+    /// TUI and the proxy commands need the socket path it names. The `String`
+    /// is the message the failing command prints.
+    runtime: Result<StartupRuntime, String>,
+}
+
+/// The parts of a loaded config the commands actually use.
+#[derive(Debug)]
+struct StartupRuntime {
+    config: model::Config,
+    socket_path: PathBuf,
+    refresh_interval_ms: u64,
+}
+
+impl Startup {
+    fn resolve(config_path: Option<PathBuf>) -> Self {
+        let runtime = match config_path.as_deref() {
+            Some(path) => loader::load_or_default_with_runtime(path)
+                .map(
+                    |(config, socket_path, refresh_interval_ms)| StartupRuntime {
+                        config,
+                        socket_path,
+                        refresh_interval_ms,
+                    },
+                )
+                .map_err(|error| format!("failed to load config: {error}")),
+            // No config file could be resolved at all, so the built-in
+            // defaults plus the default socket location are the whole
+            // configuration.
+            None => resolve_server_socket_path(None)
+                .map_err(|error| error.to_string())
+                .map(|socket_path| {
+                    let config = model::Config::default();
+                    let refresh_interval_ms = config.ui.refresh_interval_ms;
+                    StartupRuntime {
+                        config,
+                        socket_path,
+                        refresh_interval_ms,
+                    }
+                }),
+        };
+
+        Self {
+            config_path,
+            runtime,
+        }
+    }
+
+    /// The configured UI language, when the config could be read.
+    ///
+    /// A config that failed to load simply means "no override": which language
+    /// the messages are in must never be the reason a command cannot run, and
+    /// the command that actually needs the config reports the failure itself.
+    fn config_locale(&self) -> Option<&str> {
+        self.runtime.as_ref().ok()?.config.ui.locale.as_deref()
+    }
+
+    /// The loaded config, or the message explaining why there is none.
+    fn runtime(&self) -> Result<&StartupRuntime, &String> {
+        self.runtime.as_ref()
+    }
 }
 
 pub fn run(cli: Cli) -> i32 {
-    let config_path = cli.config.clone().or_else(paths::config_path);
-
-    init_localization(config_path.as_deref());
-
+    // Logging is installed before anything else, and in particular before
+    // localization. `localization::init` warns through `tracing` when the
+    // requested locale is unknown ("unsupported locale, falling back to en").
+    // A `tracing` event emitted while no subscriber is installed is discarded,
+    // so with the old order that warning could never reach the user: someone
+    // setting `OBSCTL_LOCALE=fr` was silently given English with no
+    // explanation. Installing the subscriber first is what makes the
+    // diagnostic reachable.
     let level = effective_log_level(&cli);
+    init_logging(cli.command.as_ref(), &level);
+
+    let startup = Startup::resolve(resolve_config_path(cli.config.clone()));
+    crate::localization::init(startup.config_path.as_deref(), startup.config_locale());
 
     match cli.command {
-        None | Some(Commands::Tui) => {
-            logger::init_cli(&level);
-            run_tui(config_path)
-        }
-        Some(Commands::Init) => {
-            logger::init_cli(&level);
-            run_init(config_path, cli.force)
-        }
-        Some(Commands::ValidateConfig) => {
-            logger::init_cli(&level);
-            run_validate_config(config_path)
-        }
-        Some(Commands::Server { headless }) => {
-            logger::init_server(&level, logger::default_log_path());
-            run_server(config_path, headless)
-        }
-        Some(Commands::Service { action }) => {
-            logger::init_cli(&level);
-            run_service(action)
-        }
-        Some(cmd) => {
-            logger::init_cli(&level);
-            run_proxy(config_path, cmd, cli.json)
-        }
+        None | Some(Commands::Tui) => run_tui(&startup),
+        Some(Commands::Init) => run_init(startup.config_path.as_deref(), cli.force),
+        Some(Commands::ValidateConfig) => run_validate_config(startup.config_path.as_deref()),
+        Some(Commands::Server { headless }) => run_server(startup.config_path, headless),
+        Some(Commands::Service { action }) => run_service(action),
+        Some(cmd) => run_proxy(&startup, cmd, cli.json),
+    }
+}
+
+/// Install the process-wide `tracing` subscriber for the mode being launched.
+///
+/// The daemon logs to a file as well as stderr, because its output has to
+/// outlive the terminal it was started from and is also replayed to connected
+/// clients over the `logs` IPC topic. Every other mode is a short-lived
+/// foreground command, so stderr alone is enough.
+fn init_logging(command: Option<&Commands>, level: &str) {
+    match command {
+        Some(Commands::Server { .. }) => logger::init_server(level, logger::default_log_path()),
+        _ => logger::init_cli(level),
     }
 }
 
@@ -89,46 +183,22 @@ fn effective_log_level(cli: &Cli) -> String {
     .to_string()
 }
 
-fn resolve_socket_config(config_path: Option<&PathBuf>) -> Result<(PathBuf, u64), String> {
-    if let Some(cp) = config_path {
-        let (_, socket_path, refresh_interval_ms) = loader::load_or_default_with_runtime(cp)
-            .map_err(|e| format!("failed to load config: {e}"))?;
-
-        return Ok((socket_path, refresh_interval_ms));
-    }
-
-    if let Some(default_cp) = paths::config_path() {
-        match loader::load_or_default_with_runtime(&default_cp) {
-            Ok((_, socket_path, refresh_interval_ms)) => {
-                return Ok((socket_path, refresh_interval_ms));
-            }
-            Err(error) => {
-                return Err(format!("failed to load default config: {error}"));
-            }
-        }
-    }
-
-    let default_refresh_interval_ms = model::Config::default().ui.refresh_interval_ms;
-    Ok((
-        resolve_server_socket_path(None).map_err(|e| e.to_string())?,
-        default_refresh_interval_ms,
-    ))
-}
-
 // ── Local commands ────────────────────────────────────────────────────────────
 
-fn run_init(config_path: Option<PathBuf>, force: bool) -> i32 {
-    let path = match config_path.or_else(paths::default_config_path) {
-        Some(p) => p,
-        None => return fail(t!("cli.init.no_config_dir")),
+fn run_init(config_path: Option<&std::path::Path>, force: bool) -> i32 {
+    let Some(path) = config_path else {
+        return fail(t!("cli.init.no_config_dir"));
     };
 
     if path.exists() && !force {
         eprintln!("{}", t!("cli.init.already_exists", path = path.display()));
-        return 1;
+        // No `ObsctlError` variant names "the file is already there", and
+        // adding one would change the public error table, so this reports the
+        // unclassified local failure code by name rather than as a literal.
+        return GENERIC_LOCAL_FAILURE_EXIT_CODE;
     }
 
-    match writer::write_default(&path) {
+    match writer::write_default(path) {
         Ok(()) => {
             println!("{}", t!("cli.init.success", path = path.display()));
             0
@@ -137,23 +207,33 @@ fn run_init(config_path: Option<PathBuf>, force: bool) -> i32 {
     }
 }
 
-fn run_validate_config(config_path: Option<PathBuf>) -> i32 {
-    let path = match config_path.or_else(paths::config_path) {
-        Some(p) => p,
-        None => {
+fn run_validate_config(config_path: Option<&std::path::Path>) -> i32 {
+    let Some(path) = config_path else {
+        {
+            // The wording is this command's own localized line; only the exit
+            // code comes from the error value. `ObsctlError::exit_code()` is
+            // the documented local classification (README "Exit Codes"), so
+            // "no usable config means 2" is decided in exactly one place
+            // instead of being re-typed as a literal here.
             eprintln!(
                 "{}",
                 t!("common.error", message = t!("cli.validate.no_config_path"))
             );
-            return 2;
+            return ObsctlError::ConfigNotFound(t!("cli.validate.no_config_path").to_string())
+                .exit_code();
         }
     };
 
-    let (_config, warnings) = match crate::config::loader::load_with_warnings(&path) {
+    let (_config, warnings) = match crate::config::loader::load_with_warnings(path) {
         Ok(result) => result,
-        Err(e) => {
-            eprintln!("{}", t!("common.error", message = e));
-            return 2;
+        Err(error) => {
+            // Previously this returned a hard-coded 2 for every load failure,
+            // including the ones the loader reports as `ObsctlError::Io`
+            // (an unreadable file, a permissions problem) which the local table
+            // classifies as a generic failure, 1. Asking the error for its own
+            // code makes the two agree.
+            eprintln!("{}", t!("common.error", message = error));
+            return error.exit_code();
         }
     };
 
@@ -172,24 +252,20 @@ fn run_validate_config(config_path: Option<PathBuf>) -> i32 {
 }
 
 fn run_server(config_path: Option<PathBuf>, headless: bool) -> i32 {
-    // Resolve the config path the daemon would use, so setup writes to the right place.
-    let effective_path = config_path
-        .clone()
-        .or_else(paths::config_path)
-        .or_else(paths::default_config_path);
-
-    if let Some(ref path) = effective_path
+    // The path the daemon will use was already settled by `resolve_config_path`,
+    // so first-time setup writes to the same file the daemon then reads.
+    if let Some(ref path) = config_path
         && !path.exists()
         && !headless
-        && let Err(e) = first_time_setup(path)
+        && let Err(error) = first_time_setup(path)
     {
-        eprintln!("{}", t!("cli.setup.failed", error = e));
-        return 1;
+        eprintln!("{}", t!("cli.setup.failed", error = error.to_string()));
+        return ObsctlError::Io(error).exit_code();
     }
 
     let rt = match tokio_runtime("server") {
-        Some(rt) => rt,
-        None => return 1,
+        Ok(rt) => rt,
+        Err(error) => return error.exit_code(),
     };
 
     let options = ServerOptions {
@@ -278,24 +354,22 @@ fn prompt_line(
     })
 }
 
-fn run_tui(config_path: Option<PathBuf>) -> i32 {
-    let (socket_path, refresh_ms) = match resolve_socket_config(config_path.as_ref()) {
-        Ok(values) => values,
-        Err(e) => return fail(e),
+fn run_tui(startup: &Startup) -> i32 {
+    let runtime = match startup.runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => return fail(error),
     };
-    let effective_config_path = config_path
-        .or_else(paths::config_path)
-        .or_else(paths::default_config_path);
-    let mut options = resolve_tui_appearance(effective_config_path.as_ref());
-    options.refresh_ms = refresh_ms;
-    options.config_path = effective_config_path;
+
+    let mut options = tui_appearance(&runtime.config);
+    options.refresh_ms = runtime.refresh_interval_ms;
+    options.config_path = startup.config_path.clone();
 
     let rt = match tokio_runtime("TUI") {
-        Some(rt) => rt,
-        None => return 1,
+        Ok(rt) => rt,
+        Err(error) => return error.exit_code(),
     };
 
-    match rt.block_on(crate::tui::app::run(&socket_path, options)) {
+    match rt.block_on(crate::tui::app::run(&runtime.socket_path, options)) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{}", t!("cli.tui.error", error = e));
@@ -304,19 +378,21 @@ fn run_tui(config_path: Option<PathBuf>) -> i32 {
     }
 }
 
-/// Best-effort resolution of the configured TUI appearance and input options
-/// (built-in theme id or a `custom` palette, icons, mouse, palette prefix);
-/// falls back to defaults on any load error so a bad/missing config never
-/// blocks launching the TUI (the error path is already reported by
-/// `resolve_socket_config`). `refresh_ms` and `config_path` are filled in by
-/// the caller, which resolves them separately.
-fn resolve_tui_appearance(config_path: Option<&PathBuf>) -> crate::tui::app::TuiOptions {
-    let config = config_path
-        .and_then(|cp| loader::load_or_default(cp).ok())
-        .unwrap_or_default();
+/// Translate the `ui` section of an already-loaded config into the TUI's
+/// appearance and input options: built-in theme id or a `custom` palette,
+/// icons, mouse, command-palette prefix.
+///
+/// This used to read the config file itself and silently substitute defaults
+/// when the read failed — the third read of the same file in one launch, and a
+/// swallowed error that could disagree with what the rest of the launch had
+/// decided. It is now a plain transformation with no I/O: the caller has
+/// already read the file once and reported any problem. `refresh_ms` and
+/// `config_path` are filled in by the caller, which has them to hand.
+fn tui_appearance(config: &model::Config) -> crate::tui::app::TuiOptions {
     let custom = config
         .ui
         .custom_theme
+        .clone()
         .map(|c| crate::tui::theme::CustomThemeSpec {
             bg: c.bg,
             accent: c.accent,
@@ -348,13 +424,18 @@ fn resolve_tui_appearance(config_path: Option<&PathBuf>) -> crate::tui::app::Tui
     }
 }
 
-fn tokio_runtime(context: &str) -> Option<tokio::runtime::Runtime> {
-    match tokio::runtime::Builder::new_multi_thread()
+/// Build the async runtime the TUI and the daemon both need.
+///
+/// The failure message names which of the two was being started, so it is
+/// built here where `context` is in hand rather than at the call site. What
+/// travels back to the caller is an `ObsctlError`, so the exit code comes from
+/// the documented local classification instead of a literal `1` repeated at
+/// each call site.
+fn tokio_runtime(context: &str) -> Result<tokio::runtime::Runtime, ObsctlError> {
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-    {
-        Ok(rt) => Some(rt),
-        Err(e) => {
+        .map_err(|error| {
             eprintln!(
                 "{}",
                 t!(
@@ -362,13 +443,12 @@ fn tokio_runtime(context: &str) -> Option<tokio::runtime::Runtime> {
                     message = t!(
                         "cli.runtime.async_start_failed",
                         context = context,
-                        error = e
+                        error = error.to_string()
                     )
                 )
             );
-            None
-        }
-    }
+            ObsctlError::Io(error)
+        })
 }
 
 // ── Service commands ──────────────────────────────────────────────────────────
@@ -404,13 +484,21 @@ fn service_action(installer: &ServiceInstaller<'_>, action: ServiceAction) -> i3
     }
 }
 
+/// Exit code for a local failure the error table has no specific class for.
+///
+/// It is the same `1` that `ObsctlError::exit_code()` assigns to its
+/// unclassified variants (`Io`, `ServiceInstallFailed`, ...). Named once here
+/// so the handful of local paths that mean "generic failure" cannot drift apart
+/// from each other or from the README's Exit Codes table.
+const GENERIC_LOCAL_FAILURE_EXIT_CODE: i32 = 1;
+
 /// Print `message` as an error and hand back the generic failure exit code.
 ///
 /// Used by the local (non-proxy) commands, which all report failure the same
 /// way; proxy commands go through `PublicErrorCode::exit_code` instead.
 fn fail(message: impl std::fmt::Display) -> i32 {
     eprintln!("{}", t!("common.error", message = message));
-    1
+    GENERIC_LOCAL_FAILURE_EXIT_CODE
 }
 
 fn run_service(action: ServiceAction) -> i32 {
@@ -470,78 +558,290 @@ fn resolve_service_exec_path() -> Result<std::path::PathBuf, String> {
     installer::validate_service_exec_path(&exec).map_err(|e| e.to_string())
 }
 
+// ── Proxy commands ────────────────────────────────────────────────────────────
+
+/// What a CLI subcommand turns into on the IPC wire.
+///
+/// Three outcomes are possible and the compiler makes the caller handle all
+/// three, which is why this is an enum rather than an `Option`: a command to
+/// send, arguments that failed validation before anything was sent, and the
+/// modes the router runs itself and never proxies.
+enum ProxyRequest {
+    /// The payload to send, plus how to render a successful result.
+    Send(CommandPayload, fn(&serde_json::Value)),
+    /// The arguments did not survive validation, so nothing is sent.
+    Invalid(ObsctlError),
+    /// Handled locally by `run`; it never reaches the daemon.
+    NotProxied,
+}
+
+/// Map a CLI subcommand onto the daemon command it stands for.
+///
+/// This replaces a layer of sixteen one-line `ProxyCtx` methods that this same
+/// match used to call — each of which only re-stated the name mapping the match
+/// already performs. Adding a proxy command now means three edits (the clap
+/// `Commands` variant, an arm here, and the `ipc::protocol::ServerCommand`
+/// variant) instead of four.
+///
+/// Argument validation happens here, before a connection is opened, so a bad
+/// target or an out-of-range percentage never becomes a request.
+fn proxy_payload(cmd: &Commands) -> ProxyRequest {
+    use crate::ipc::protocol::ServerCommand;
+
+    /// Validate a target name, then build a payload that carries it.
+    fn with_target(command: ServerCommand, target: &str) -> ProxyRequest {
+        match client_commands::sanitize_target_arg(target) {
+            Ok(target) => ProxyRequest::Send(
+                CommandPayload::with_target(command, &target),
+                client_commands::print_result_message,
+            ),
+            Err(error) => ProxyRequest::Invalid(error),
+        }
+    }
+
+    /// Build a payload with no arguments.
+    fn simple(command: ServerCommand) -> ProxyRequest {
+        ProxyRequest::Send(
+            CommandPayload::simple(command),
+            client_commands::print_result_message,
+        )
+    }
+
+    match cmd {
+        // `status` is the one command whose result is a structure rather than a
+        // sentence, so it gets its own renderer.
+        Commands::Status => ProxyRequest::Send(
+            CommandPayload::simple(ServerCommand::GetSnapshot),
+            client_commands::print_status_json,
+        ),
+        Commands::ObsStatus => simple(ServerCommand::GetObsStatus),
+        Commands::ServerStatus => simple(ServerCommand::GetServerStatus),
+        Commands::Reconnect => simple(ServerCommand::ReconnectObs),
+        Commands::ShutdownServer => simple(ServerCommand::ShutdownServer),
+        Commands::DumpConfig => simple(ServerCommand::DumpConfig),
+        Commands::ReloadConfig => simple(ServerCommand::ReloadConfig),
+        Commands::ToggleStream => simple(ServerCommand::ToggleStream),
+        Commands::ToggleRecord => simple(ServerCommand::ToggleRecord),
+        Commands::Scene { target } => with_target(ServerCommand::SetScene, target),
+        Commands::Profile { target } => with_target(ServerCommand::SetProfile, target),
+        Commands::Collection { target } => with_target(ServerCommand::SetSceneCollection, target),
+        Commands::Mute { target } => with_target(ServerCommand::Mute, target),
+        Commands::Unmute { target } => with_target(ServerCommand::Unmute, target),
+        Commands::ToggleMute { target } => with_target(ServerCommand::ToggleMute, target),
+        Commands::Vol { target, percent } => {
+            // clap already limits this argument to 0..=100, but
+            // `CommandPayload::set_volume` is reachable from tests and from any
+            // future caller, so the range is checked here as well rather than
+            // being trusted to the parser.
+            if *percent > 100 {
+                return ProxyRequest::Invalid(ObsctlError::CommandParseError(
+                    "percent must be 0-100".to_string(),
+                ));
+            }
+            match client_commands::sanitize_target_arg(target) {
+                Ok(target) => ProxyRequest::Send(
+                    CommandPayload::set_volume(&target, *percent),
+                    client_commands::print_result_message,
+                ),
+                Err(error) => ProxyRequest::Invalid(error),
+            }
+        }
+        // Listed rather than caught by a wildcard: these are the modes the
+        // router handles itself before it gets here, so a newly added
+        // subcommand fails to compile until it is routed somewhere, instead of
+        // silently reaching users as "unsupported command".
+        Commands::Init
+        | Commands::ValidateConfig
+        | Commands::Server { .. }
+        | Commands::Tui
+        | Commands::Service { .. } => ProxyRequest::NotProxied,
+    }
+}
+
+fn run_proxy(startup: &Startup, cmd: Commands, json_output: bool) -> i32 {
+    // The config is checked before the subcommand is examined, which is the
+    // order this function has always used: if the config cannot be loaded, the
+    // user hears about that first, whatever they were trying to run.
+    let socket_path = match startup.runtime() {
+        Ok(runtime) => runtime.socket_path.clone(),
+        Err(error) => return fail(error),
+    };
+    let ctx = ProxyCtx {
+        socket_path,
+        json_output,
+    };
+
+    match proxy_payload(&cmd) {
+        ProxyRequest::Send(payload, render) => ctx.run_proxy_with(payload, render),
+        ProxyRequest::Invalid(error) => ctx.emit_local_error(&error),
+        ProxyRequest::NotProxied => fail(t!(
+            "cli.proxy.unsupported_command",
+            command = format!("{cmd:?}")
+        )),
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::support::fs;
     use std::io::Write;
 
+    use crate::support::validation::test_env;
+
     fn with_rust_log_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = std::env::var_os("RUST_LOG");
-        if let Some(value) = value {
-            unsafe { std::env::set_var("RUST_LOG", value) };
-        } else {
-            unsafe { std::env::remove_var("RUST_LOG") };
-        }
-
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var("RUST_LOG", previous) },
-            None => unsafe { std::env::remove_var("RUST_LOG") },
-        }
-
-        result
+        test_env::with_env_var("RUST_LOG", value, f)
     }
 
     fn with_obsctl_config_env<R>(value: Option<&std::path::Path>, f: impl FnOnce() -> R) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = std::env::var_os("OBSCTL_CONFIG");
-        if let Some(value) = value {
-            unsafe { std::env::set_var("OBSCTL_CONFIG", value) };
-        } else {
-            unsafe { std::env::remove_var("OBSCTL_CONFIG") };
-        }
-
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var("OBSCTL_CONFIG", previous) },
-            None => unsafe { std::env::remove_var("OBSCTL_CONFIG") },
-        }
-
-        result
+        test_env::with_env_var_os("OBSCTL_CONFIG", value.map(|p| p.as_os_str().to_owned()), f)
     }
 
     #[cfg(unix)]
     fn with_rust_log_env_os<R>(value: Option<std::ffi::OsString>, f: impl FnOnce() -> R) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        test_env::with_env_var_os("RUST_LOG", value, f)
+    }
 
-        let previous = std::env::var_os("RUST_LOG");
-        if let Some(value) = value {
-            unsafe { std::env::set_var("RUST_LOG", value) };
-        } else {
-            unsafe { std::env::remove_var("RUST_LOG") };
+    /// A `tracing` writer that keeps everything written to it in memory.
+    ///
+    /// `tracing` events are dropped when no subscriber is installed, so the
+    /// only way to show that a warning is actually reachable is to install a
+    /// subscriber and read back what it recorded. Cloning shares one buffer:
+    /// the subscriber gets one handle and the test keeps another to inspect.
+    #[derive(Clone, Default)]
+    struct SharedBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl SharedBuffer {
+        fn contents(&self) -> String {
+            let bytes = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    impl std::io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
         }
 
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var("RUST_LOG", previous) },
-            None => unsafe { std::env::remove_var("RUST_LOG") },
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
+    }
 
-        result
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuffer {
+        type Writer = SharedBuffer;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn unsupported_locale_warning_reaches_an_installed_subscriber() {
+        let buffer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+
+        // `with_default` installs the subscriber for this thread only, so the
+        // test does not fight the process-wide subscriber `run()` installs.
+        tracing::subscriber::with_default(subscriber, || {
+            assert_eq!(
+                crate::localization::resolve_locale(Some("fr".to_string()), None),
+                "en"
+            );
+        });
+
+        assert!(
+            buffer.contents().contains("unsupported locale"),
+            "resolve_locale must report the fallback through tracing; got: {}",
+            buffer.contents()
+        );
+    }
+
+    #[test]
+    fn init_logging_installs_a_subscriber_before_localization_runs() {
+        // `run()` calls `init_logging` and only then `init_localization`. Both
+        // install process-wide state that can only be set once, so this test
+        // checks the property that ordering exists to guarantee: after logging
+        // init, a `tracing` warning has somewhere to go. `try_init` inside
+        // `logger::init_cli` is a no-op if another test already installed a
+        // subscriber, which is why the assertion is about a subscriber being
+        // present rather than about this call being the one that set it.
+        init_logging(Some(&Commands::Tui), "warn");
+        assert!(
+            tracing::dispatcher::has_been_set(),
+            "a global tracing subscriber must exist before localization warns"
+        );
+    }
+
+    /// A `ProxyCtx` that can report a failure but could never connect: these
+    /// tests assert that bad arguments are refused without a daemon.
+    fn offline_proxy_ctx() -> ProxyCtx {
+        ProxyCtx {
+            socket_path: std::path::PathBuf::from("/tmp/obsctl-test.sock"),
+            json_output: false,
+        }
+    }
+
+    #[test]
+    fn proxy_payload_rejects_percent_out_of_range_without_server() {
+        for percent in [101u8, 255] {
+            let request = proxy_payload(&Commands::Vol {
+                target: "Mic".to_string(),
+                percent,
+            });
+            match request {
+                ProxyRequest::Invalid(error) => {
+                    assert_eq!(offline_proxy_ctx().emit_local_error(&error), 5);
+                }
+                _ => panic!("percent {percent} must not become a request"),
+            }
+        }
+    }
+
+    #[test]
+    fn proxy_payload_rejects_invalid_target_without_server() {
+        let bad_targets = [
+            Commands::Mute {
+                target: "Bad\nTarget".to_string(),
+            },
+            Commands::Scene {
+                target: "   ".to_string(),
+            },
+        ];
+
+        for command in bad_targets {
+            match proxy_payload(&command) {
+                ProxyRequest::Invalid(error) => {
+                    assert_eq!(offline_proxy_ctx().emit_local_error(&error), 5);
+                }
+                _ => panic!("{command:?} must not become a request"),
+            }
+        }
+    }
+
+    #[test]
+    fn proxy_payload_leaves_locally_handled_modes_unproxied() {
+        for command in [
+            Commands::Init,
+            Commands::ValidateConfig,
+            Commands::Tui,
+            Commands::Server { headless: true },
+        ] {
+            assert!(
+                matches!(proxy_payload(&command), ProxyRequest::NotProxied),
+                "{command:?} is run by the router, not sent to the daemon"
+            );
+        }
     }
 
     #[test]
@@ -698,17 +998,22 @@ mod tests {
         assert_eq!(validated, file);
     }
 
+    /// Build a `Startup` from a config file written for the test.
+    fn startup_for(path: &std::path::Path) -> Startup {
+        Startup::resolve(Some(path.to_path_buf()))
+    }
+
     #[test]
-    fn resolve_socket_config_rejects_zero_refresh_interval() {
+    fn startup_rejects_zero_refresh_interval() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yml");
         std::fs::write(&path, "version: 1\nui:\n  refresh_interval_ms: 0\n").unwrap();
-        let err = resolve_socket_config(Some(&path)).unwrap_err();
+        let err = startup_for(&path).runtime.unwrap_err();
         assert!(err.contains("refresh_interval_ms"));
     }
 
     #[test]
-    fn resolve_socket_config_rejects_invalid_host() {
+    fn startup_rejects_invalid_host() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yml");
         std::fs::write(
@@ -717,39 +1022,62 @@ mod tests {
         )
         .unwrap();
 
-        let err = resolve_socket_config(Some(&path)).unwrap_err();
+        let err = startup_for(&path).runtime.unwrap_err();
         assert!(err.contains("config invalid"));
         assert!(err.contains("connection.host"));
     }
 
     #[test]
-    fn resolve_socket_config_rejects_invalid_socket_path() {
+    fn startup_rejects_invalid_socket_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yml");
         std::fs::write(&path, "version: 1\nserver:\n  socket_path: relative.sock\n").unwrap();
 
-        let err = resolve_socket_config(Some(&path)).unwrap_err();
+        let err = startup_for(&path).runtime.unwrap_err();
         assert!(err.contains("server.socket_path"));
     }
 
     #[test]
-    fn resolve_socket_config_without_path_uses_defaults() {
-        with_obsctl_config_env(None, || {
-            let (socket_path, refresh_interval_ms) = resolve_socket_config(None).unwrap();
-            assert!(socket_path.is_absolute());
+    fn startup_without_any_config_path_uses_defaults() {
+        let startup = Startup::resolve(None);
+        let runtime = startup.runtime().unwrap();
+        assert!(runtime.socket_path.is_absolute());
+        assert_eq!(
+            runtime
+                .socket_path
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("obsctl.sock")
+        );
+        assert_eq!(
+            runtime.refresh_interval_ms,
+            model::Config::default().ui.refresh_interval_ms
+        );
+    }
+
+    /// `--config` wins over `OBSCTL_CONFIG`, which wins over the platform
+    /// default. This is the precedence rule `resolve_config_path` documents;
+    /// it is asserted here because it used to be spread over four callees that
+    /// each re-applied a piece of it.
+    #[test]
+    fn config_path_precedence_prefers_the_explicit_flag_then_the_env_var() {
+        let dir = tempfile::tempdir().unwrap();
+        let from_env = dir.path().join("from-env.yml");
+        let from_flag = dir.path().join("from-flag.yml");
+
+        with_obsctl_config_env(Some(from_env.as_path()), || {
             assert_eq!(
-                socket_path.file_name().and_then(|name| name.to_str()),
-                Some("obsctl.sock")
+                resolve_config_path(Some(from_flag.clone())),
+                Some(from_flag.clone())
             );
-            assert_eq!(
-                refresh_interval_ms,
-                model::Config::default().ui.refresh_interval_ms
-            );
+            assert_eq!(resolve_config_path(None), Some(from_env.clone()));
         });
     }
 
+    /// With no `--config`, the config named by `OBSCTL_CONFIG` is the one read,
+    /// and the socket path and refresh interval come from it.
     #[test]
-    fn resolve_socket_config_without_path_prefers_default_config() {
+    fn startup_without_explicit_path_reads_the_env_config() {
         let dir = tempfile::tempdir().unwrap();
         let socket_dir = dir.path().join("sockets");
         std::fs::create_dir(&socket_dir).unwrap();
@@ -766,53 +1094,33 @@ mod tests {
         .unwrap();
 
         with_obsctl_config_env(Some(config_path.as_path()), || {
-            let (resolved_socket_path, refresh_interval_ms) = resolve_socket_config(None).unwrap();
-            assert_eq!(resolved_socket_path, socket_path);
-            assert_eq!(refresh_interval_ms, 321);
+            let startup = Startup::resolve(resolve_config_path(None));
+            assert_eq!(startup.config_path.as_deref(), Some(config_path.as_path()));
+            let runtime = startup.runtime().unwrap();
+            assert_eq!(runtime.socket_path, socket_path);
+            assert_eq!(runtime.refresh_interval_ms, 321);
         });
     }
-}
 
-// ── Proxy commands ────────────────────────────────────────────────────────────
+    /// A config that cannot be read must not decide the language: the command
+    /// that needs the config is the one that reports the failure.
+    #[test]
+    fn startup_locale_is_absent_when_the_config_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: [\n").unwrap();
 
-fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> i32 {
-    let (socket_path, _) = match resolve_socket_config(config_path.as_ref()) {
-        Ok(values) => values,
-        Err(e) => return fail(e),
-    };
-    let ctx = ProxyCtx {
-        socket_path,
-        json_output,
-    };
+        let startup = startup_for(&path);
+        assert!(startup.runtime().is_err());
+        assert_eq!(startup.config_locale(), None);
+    }
 
-    match cmd {
-        Commands::Status => ctx.status(),
-        Commands::ObsStatus => ctx.obs_status(),
-        Commands::ServerStatus => ctx.server_status(),
-        Commands::Reconnect => ctx.reconnect(),
-        Commands::ShutdownServer => ctx.shutdown_server(),
-        Commands::Scene { target } => ctx.scene(&target),
-        Commands::Profile { target } => ctx.profile(&target),
-        Commands::Collection { target } => ctx.scene_collection(&target),
-        Commands::Mute { target } => ctx.mute(&target),
-        Commands::Unmute { target } => ctx.unmute(&target),
-        Commands::ToggleMute { target } => ctx.toggle_mute(&target),
-        Commands::Vol { target, percent } => ctx.set_volume(&target, percent),
-        Commands::DumpConfig => ctx.dump_config(),
-        Commands::ReloadConfig => ctx.reload_config(),
-        Commands::ToggleStream => ctx.toggle_stream(),
-        Commands::ToggleRecord => ctx.toggle_record(),
-        // Listed rather than caught by a wildcard: these are the modes the
-        // router handles itself before it gets here, so a newly added
-        // subcommand fails to compile until it is routed somewhere, instead of
-        // silently reaching users as "unsupported command".
-        other @ (Commands::Init
-        | Commands::ValidateConfig
-        | Commands::Server { .. }
-        | Commands::Tui
-        | Commands::Service { .. }) => fail(t!(
-            "cli.proxy.unsupported_command",
-            command = format!("{other:?}")
-        )),
+    #[test]
+    fn startup_exposes_the_configured_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(&path, "version: 1\nui:\n  locale: uk\n").unwrap();
+
+        assert_eq!(startup_for(&path).config_locale(), Some("uk"));
     }
 }

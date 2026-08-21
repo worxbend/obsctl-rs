@@ -187,26 +187,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn with_env_var<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = std::env::var_os(name);
-        if let Some(value) = value {
-            unsafe { std::env::set_var(name, value) };
-        } else {
-            unsafe { std::env::remove_var(name) };
-        }
-
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var(name, previous) },
-            None => unsafe { std::env::remove_var(name) },
-        }
-        result
-    }
+    use crate::support::validation::test_env::with_env_var;
 
     fn with_path_env<R>(value: &str, f: impl FnOnce() -> R) -> R {
         with_env_var("PATH", Some(value), f)

@@ -129,8 +129,20 @@ pub(crate) fn parse_log_level(value: &str) -> Result<String, String> {
     }
 }
 
+fn non_blank_path(value: &str) -> Result<PathBuf, String> {
+    let trimmed =
+        trim_and_validate_path_token(value).map_err(|error| format!("config path {error}"))?;
+    let path = PathBuf::from(&trimmed);
+    if !path.is_absolute() {
+        return Err("config path must be an absolute path".to_string());
+    }
+    if fs::has_path_traversal(std::path::Path::new(&trimmed)) {
+        return Err("config path must not include traversal components".to_string());
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -187,17 +199,4 @@ mod tests {
         let value = "trace".repeat(100);
         assert!(parse_log_level(&value).is_err());
     }
-}
-
-fn non_blank_path(value: &str) -> Result<PathBuf, String> {
-    let trimmed =
-        trim_and_validate_path_token(value).map_err(|error| format!("config path {error}"))?;
-    let path = PathBuf::from(&trimmed);
-    if !path.is_absolute() {
-        return Err("config path must be an absolute path".to_string());
-    }
-    if fs::has_path_traversal(std::path::Path::new(&trimmed)) {
-        return Err("config path must not include traversal components".to_string());
-    }
-    Ok(path)
 }
