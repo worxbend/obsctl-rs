@@ -27,143 +27,160 @@ pub struct ObsResources {
 pub fn merge(config: &Config, obs: &ObsResources) -> Result<Config> {
     let mut new_config = config.clone();
 
-    new_config.scenes = merge_scenes(&config.scenes, &obs.scenes)?;
-    new_config.audio.inputs = merge_inputs(&config.audio.inputs, &obs.inputs)?;
+    new_config.scenes = merge_entries(&config.scenes, &obs.scenes)?;
+    new_config.audio.inputs = merge_entries(&config.audio.inputs, &obs.inputs)?;
 
     Ok(new_config)
 }
 
-fn merge_scenes(existing: &[SceneConfig], obs_names: &[String]) -> Result<Vec<SceneConfig>> {
-    let obs_set: HashSet<String> = obs_names
-        .iter()
-        .map(|s| normalized("scene", s))
-        .collect::<Result<_>>()?;
+/// The parts of a merge that differ between a scene entry and an audio-input
+/// entry.
+///
+/// Everything else — the collision checks, the stale marking, the appending of
+/// newly discovered names, the duplicate check at the end — is the same work
+/// on both, so it is written once in [`merge_entries`] and these are the only
+/// knobs it turns.
+trait MergeableEntry: Clone {
+    /// Names this kind in error messages and alias normalization.
+    const KIND: &'static str;
+    /// What OBS calls this kind, for the collision message.
+    const OBS_NOUN: &'static str;
 
-    // Validate alias/shortcut collisions with OBS names.
-    for sc in existing {
-        let scene_name = normalized("scene", &sc.name)?;
-        if let Some(alias) = &sc.alias {
-            let normalized_alias = normalize_alias_or_shortcut(alias, "scene")?;
-            if obs_set.contains(&normalized_alias) && normalized_alias != scene_name {
-                return Err(ObsctlError::ConfigInvalid(format!(
-                    "scene alias '{}' collides with OBS scene name",
-                    alias
-                )));
-            }
-        }
-        if let Some(shortcut) = &sc.shortcut {
-            let normalized_shortcut = normalize_alias_or_shortcut(shortcut, "scene")?;
-            if obs_set.contains(&normalized_shortcut) && normalized_shortcut != scene_name {
-                return Err(ObsctlError::ConfigInvalid(format!(
-                    "scene shortcut '{}' collides with OBS scene name",
-                    shortcut
-                )));
-            }
+    fn name(&self) -> &str;
+    fn alias(&self) -> Option<&str>;
+    fn shortcut(&self) -> Option<&str>;
+    /// A copy of this entry with its stale flag set, keeping everything the
+    /// user configured — alias, shortcut, group.
+    fn with_stale(&self, stale: bool) -> Self;
+    /// A fresh entry for a name OBS has but the config does not, with no alias.
+    fn newly_discovered(name: &str) -> Self;
+}
+
+impl MergeableEntry for SceneConfig {
+    const KIND: &'static str = "scene";
+    const OBS_NOUN: &'static str = "OBS scene name";
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn alias(&self) -> Option<&str> {
+        self.alias.as_deref()
+    }
+
+    fn shortcut(&self) -> Option<&str> {
+        self.shortcut.as_deref()
+    }
+
+    fn with_stale(&self, stale: bool) -> Self {
+        Self {
+            stale,
+            ..self.clone()
         }
     }
 
-    let mut merged: Vec<SceneConfig> = existing
+    fn newly_discovered(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            ..Self::default()
+        }
+    }
+}
+
+impl MergeableEntry for AudioInputConfig {
+    const KIND: &'static str = "audio";
+    const OBS_NOUN: &'static str = "OBS input name";
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn alias(&self) -> Option<&str> {
+        self.alias.as_deref()
+    }
+
+    fn shortcut(&self) -> Option<&str> {
+        self.shortcut.as_deref()
+    }
+
+    fn with_stale(&self, stale: bool) -> Self {
+        Self {
+            stale,
+            ..self.clone()
+        }
+    }
+
+    fn newly_discovered(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            ..Self::default()
+        }
+    }
+}
+
+/// Reconcile what the user configured with what OBS currently has.
+///
+/// Entries OBS still knows keep everything the user set and lose any stale
+/// mark; entries OBS no longer has are marked stale rather than deleted, so a
+/// scene that is temporarily missing does not cost the user its alias; names
+/// OBS has that the config does not are appended.
+fn merge_entries<T: MergeableEntry>(existing: &[T], obs_names: &[String]) -> Result<Vec<T>> {
+    let obs_set: HashSet<String> = obs_names
         .iter()
-        .map(|sc| {
-            let normalized_name = normalized("scene", &sc.name)?;
-            let present = obs_set.contains(&normalized_name);
-            Ok(SceneConfig {
-                stale: !present,
-                ..sc.clone()
-            })
-        })
+        .map(|name| normalized(T::KIND, name))
         .collect::<Result<_>>()?;
 
-    // Append newly discovered scenes.
+    for entry in existing {
+        reject_collision_with_obs_name(entry, &obs_set)?;
+    }
+
+    let mut merged: Vec<T> = existing
+        .iter()
+        .map(|entry| Ok(entry.with_stale(!obs_set.contains(&normalized(T::KIND, entry.name())?))))
+        .collect::<Result<_>>()?;
+
     let existing_names: HashSet<String> = existing
         .iter()
-        .map(|s| normalized("scene", &s.name))
+        .map(|entry| normalized(T::KIND, entry.name()))
         .collect::<Result<_>>()?;
     for name in obs_names {
-        let normalized_name = normalized("scene", name)?;
-        if !existing_names.contains(&normalized_name) {
-            merged.push(SceneConfig {
-                name: name.clone(),
-                ..SceneConfig::default()
-            });
+        if !existing_names.contains(&normalized(T::KIND, name)?) {
+            merged.push(T::newly_discovered(name));
         }
     }
 
     validate_no_duplicates(
-        "scene",
-        merged
-            .iter()
-            .map(|sc| (sc.alias.as_deref(), sc.shortcut.as_deref())),
+        T::KIND,
+        merged.iter().map(|entry| (entry.alias(), entry.shortcut())),
     )?;
     Ok(merged)
 }
 
-fn merge_inputs(
-    existing: &[AudioInputConfig],
-    obs_names: &[String],
-) -> Result<Vec<AudioInputConfig>> {
-    let obs_set: HashSet<String> = obs_names
-        .iter()
-        .map(|s| normalized("audio", s))
-        .collect::<Result<_>>()?;
+/// Refuse an alias or shortcut that is already the real name of a *different*
+/// OBS resource.
+///
+/// Allowed to match the entry's own name — writing `alias: main` on the scene
+/// called `Main` is redundant but harmless. Pointing it at some other scene is
+/// not: the alias would silently shadow that scene.
+fn reject_collision_with_obs_name<T: MergeableEntry>(
+    entry: &T,
+    obs_set: &HashSet<String>,
+) -> Result<()> {
+    let entry_name = normalized(T::KIND, entry.name())?;
 
-    // Validate alias/shortcut collisions with OBS names.
-    for ai in existing {
-        let audio_name = normalized("audio", &ai.name)?;
-        if let Some(alias) = &ai.alias {
-            let normalized_alias = normalize_alias_or_shortcut(alias, "audio")?;
-            if obs_set.contains(&normalized_alias) && normalized_alias != audio_name {
-                return Err(ObsctlError::ConfigInvalid(format!(
-                    "audio alias '{}' collides with OBS input name",
-                    alias
-                )));
-            }
-        }
-        if let Some(shortcut) = &ai.shortcut {
-            let normalized_shortcut = normalize_alias_or_shortcut(shortcut, "audio")?;
-            if obs_set.contains(&normalized_shortcut) && normalized_shortcut != audio_name {
-                return Err(ObsctlError::ConfigInvalid(format!(
-                    "audio shortcut '{}' collides with OBS input name",
-                    shortcut
-                )));
-            }
+    for (label, value) in [("alias", entry.alias()), ("shortcut", entry.shortcut())] {
+        let Some(value) = value else { continue };
+        let normalized_value = normalize_alias_or_shortcut(value, T::KIND)?;
+        if obs_set.contains(&normalized_value) && normalized_value != entry_name {
+            return Err(ObsctlError::ConfigInvalid(format!(
+                "{} {label} '{value}' collides with {}",
+                T::KIND,
+                T::OBS_NOUN
+            )));
         }
     }
 
-    let mut merged: Vec<AudioInputConfig> = existing
-        .iter()
-        .map(|ai| {
-            let normalized_name = normalized("audio", &ai.name)?;
-            let present = obs_set.contains(&normalized_name);
-            Ok(AudioInputConfig {
-                stale: !present,
-                ..ai.clone()
-            })
-        })
-        .collect::<Result<_>>()?;
-
-    // Append newly discovered inputs.
-    let existing_names: HashSet<String> = existing
-        .iter()
-        .map(|s| normalized("audio", &s.name))
-        .collect::<Result<_>>()?;
-    for name in obs_names {
-        let normalized_name = normalized("audio", name)?;
-        if !existing_names.contains(&normalized_name) {
-            merged.push(AudioInputConfig {
-                name: name.clone(),
-                ..AudioInputConfig::default()
-            });
-        }
-    }
-
-    validate_no_duplicates(
-        "audio",
-        merged
-            .iter()
-            .map(|ai| (ai.alias.as_deref(), ai.shortcut.as_deref())),
-    )?;
-    Ok(merged)
+    Ok(())
 }
 
 fn validate_no_duplicates<'a>(
@@ -361,8 +378,8 @@ mod tests {
     }
 
     /// The audio path has the same alias/shortcut collision rule as the scene
-    /// path above. Pinned separately because the two are independent copies of
-    /// the check, so "scenes are covered" does not imply inputs are.
+    /// path above. Pinned separately because the two used to be independent
+    /// copies of the check, so "scenes are covered" did not imply inputs were.
     #[test]
     fn rejects_audio_alias_collision_with_obs_input_name() {
         let mut config = base_config();
