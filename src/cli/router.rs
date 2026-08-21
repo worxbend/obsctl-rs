@@ -120,13 +120,7 @@ fn resolve_socket_config(config_path: Option<&PathBuf>) -> Result<(PathBuf, u64)
 fn run_init(config_path: Option<PathBuf>, force: bool) -> i32 {
     let path = match config_path.or_else(paths::default_config_path) {
         Some(p) => p,
-        None => {
-            eprintln!(
-                "{}",
-                t!("common.error", message = t!("cli.init.no_config_dir"))
-            );
-            return 1;
-        }
+        None => return fail(t!("cli.init.no_config_dir")),
     };
 
     if path.exists() && !force {
@@ -139,10 +133,7 @@ fn run_init(config_path: Option<PathBuf>, force: bool) -> i32 {
             println!("{}", t!("cli.init.success", path = path.display()));
             0
         }
-        Err(e) => {
-            eprintln!("{}", t!("common.error", message = e));
-            1
-        }
+        Err(e) => fail(e),
     }
 }
 
@@ -290,10 +281,7 @@ fn prompt_line(
 fn run_tui(config_path: Option<PathBuf>) -> i32 {
     let (socket_path, refresh_ms) = match resolve_socket_config(config_path.as_ref()) {
         Ok(values) => values,
-        Err(e) => {
-            eprintln!("{}", t!("common.error", message = e));
-            return 1;
-        }
+        Err(e) => return fail(e),
     };
     let effective_config_path = config_path
         .or_else(paths::config_path)
@@ -385,17 +373,51 @@ fn tokio_runtime(context: &str) -> Option<tokio::runtime::Runtime> {
 
 // ── Service commands ──────────────────────────────────────────────────────────
 
+/// Run one of the three systemctl verbs that behave alike: do it, then print
+/// either the matching success line or the error.
+///
+/// Takes the `ServiceAction` the caller already has rather than a `"start"` /
+/// `"stop"` / `"restart"` string. The string version needed a catch-all arm
+/// that panicked on any other word; with the enum, the compiler rejects an
+/// unhandled variant instead and there is no panic to reach.
+fn service_action(installer: &ServiceInstaller<'_>, action: ServiceAction) -> i32 {
+    let (result, done_key) = match action {
+        ServiceAction::Start => (installer.start(), "cli.service.action_started"),
+        ServiceAction::Stop => (installer.stop(), "cli.service.action_stopped"),
+        ServiceAction::Restart => (installer.restart(), "cli.service.action_restarted"),
+        // The caller routes the other variants to their own handlers; they
+        // have nothing in common with these three beyond taking a unit name.
+        ServiceAction::Install | ServiceAction::Uninstall | ServiceAction::Status => {
+            return fail(t!(
+                "cli.proxy.unsupported_command",
+                command = format!("{action:?}")
+            ));
+        }
+    };
+
+    match result {
+        Ok(_) => {
+            println!("{}", t!(done_key));
+            0
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// Print `message` as an error and hand back the generic failure exit code.
+///
+/// Used by the local (non-proxy) commands, which all report failure the same
+/// way; proxy commands go through `PublicErrorCode::exit_code` instead.
+fn fail(message: impl std::fmt::Display) -> i32 {
+    eprintln!("{}", t!("common.error", message = message));
+    1
+}
+
 fn run_service(action: ServiceAction) -> i32 {
     let runner = SystemctlRunner;
     let unit_path = match systemd_user_service::unit_file_path() {
         Some(p) => p,
-        None => {
-            eprintln!(
-                "{}",
-                t!("common.error", message = t!("cli.service.no_unit_dir"))
-            );
-            return 1;
-        }
+        None => return fail(t!("cli.service.no_unit_dir")),
     };
     let installer = ServiceInstaller::new(&runner, unit_path.clone());
 
@@ -403,14 +425,10 @@ fn run_service(action: ServiceAction) -> i32 {
         ServiceAction::Install => {
             let exec = match resolve_service_exec_path() {
                 Ok(exec) => exec,
-                Err(message) => {
-                    eprintln!("{}", t!("common.error", message = message));
-                    return 1;
-                }
+                Err(message) => return fail(message),
             };
             if let Err(e) = installer.install(&exec) {
-                eprintln!("{}", t!("common.error", message = e));
-                return 1;
+                return fail(e);
             }
             println!(
                 "{}",
@@ -427,8 +445,7 @@ fn run_service(action: ServiceAction) -> i32 {
         }
         ServiceAction::Uninstall => {
             if let Err(e) = installer.uninstall() {
-                eprintln!("{}", t!("common.error", message = e));
-                return 1;
+                return fail(e);
             }
             println!("{}", t!("cli.service.uninstalled"));
             0
@@ -443,9 +460,7 @@ fn run_service(action: ServiceAction) -> i32 {
                 eprintln!("{e}");
                 1
             }),
-        ServiceAction::Start => service_action(&installer, "start"),
-        ServiceAction::Stop => service_action(&installer, "stop"),
-        ServiceAction::Restart => service_action(&installer, "restart"),
+        start_stop_restart => service_action(&installer, start_stop_restart),
     }
 }
 
@@ -758,35 +773,12 @@ mod tests {
     }
 }
 
-fn service_action(installer: &ServiceInstaller<'_>, verb: &str) -> i32 {
-    let (result, done_key) = match verb {
-        "start" => (installer.start(), "cli.service.action_started"),
-        "stop" => (installer.stop(), "cli.service.action_stopped"),
-        "restart" => (installer.restart(), "cli.service.action_restarted"),
-        _ => unreachable!("unsupported verb"),
-    };
-
-    match result {
-        Ok(_) => {
-            println!("{}", t!(done_key));
-            0
-        }
-        Err(e) => {
-            eprintln!("{}", t!("common.error", message = e));
-            1
-        }
-    }
-}
-
 // ── Proxy commands ────────────────────────────────────────────────────────────
 
 fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> i32 {
     let (socket_path, _) = match resolve_socket_config(config_path.as_ref()) {
         Ok(values) => values,
-        Err(e) => {
-            eprintln!("{}", t!("common.error", message = e));
-            return 1;
-        }
+        Err(e) => return fail(e),
     };
     let ctx = ProxyCtx {
         socket_path,
@@ -810,18 +802,9 @@ fn run_proxy(config_path: Option<PathBuf>, cmd: Commands, json_output: bool) -> 
         Commands::ReloadConfig => ctx.reload_config(),
         Commands::ToggleStream => ctx.toggle_stream(),
         Commands::ToggleRecord => ctx.toggle_record(),
-        other => {
-            eprintln!(
-                "{}",
-                t!(
-                    "common.error",
-                    message = t!(
-                        "cli.proxy.unsupported_command",
-                        command = format!("{other:?}")
-                    )
-                )
-            );
-            1
-        }
+        other => fail(t!(
+            "cli.proxy.unsupported_command",
+            command = format!("{other:?}")
+        )),
     }
 }
