@@ -21,7 +21,7 @@ use crate::obs::{
 use crate::runtime::reconnect_policy::ReconnectPolicy;
 use crate::server::obs_event_adapter::normalize_obs_event;
 use crate::server::state_store::{
-    Listing, ObsVersions, OutputFlags, RawInputState, RefreshedObsState, StateStore,
+    Listing, ObsVersions, OutputFlags, PolledMetrics, RawInputState, RefreshedObsState, StateStore,
 };
 use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
@@ -649,7 +649,12 @@ fn spawn_stats_poller(client: ObsClient, state: StateStore) {
             let record_duration_ms = record_resp.as_ref().and_then(output_duration_if_active);
 
             state
-                .update_stats(stats, bitrate_kbps, stream_duration_ms, record_duration_ms)
+                .update_stats(PolledMetrics::new(
+                    stats,
+                    bitrate_kbps,
+                    stream_duration_ms,
+                    record_duration_ms,
+                ))
                 .await;
         }
     });

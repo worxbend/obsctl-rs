@@ -90,11 +90,9 @@ impl StateStore {
         let mut snapshot = build_snapshot(refreshed, scene_cfgs, audio_cfgs);
 
         let mut guard = self.inner.write().await;
-        // Metrics belong to the stats poller, not to this fetch.
-        snapshot.stats = guard.stats;
-        snapshot.stream_bitrate_kbps = guard.stream_bitrate_kbps;
-        snapshot.stream_duration_ms = guard.stream_duration_ms;
-        snapshot.record_duration_ms = guard.record_duration_ms;
+        // Metrics belong to the stats poller, not to this fetch; carry the
+        // ones already in the snapshot across rather than blanking them.
+        PolledMetrics::read_from(&guard).write_into(&mut snapshot);
         *guard = snapshot;
         Self::broadcast(&self.hub, &guard);
         drop(guard);
@@ -148,18 +146,9 @@ impl StateStore {
     /// Update the polled performance/bitrate/duration metrics and broadcast.
     /// Called periodically by the stats poller; leaves everything else
     /// (scenes, audio, streaming/recording flags) untouched.
-    pub async fn update_stats(
-        &self,
-        stats: ObsStats,
-        stream_bitrate_kbps: Option<f64>,
-        stream_duration_ms: Option<u64>,
-        record_duration_ms: Option<u64>,
-    ) {
+    pub async fn update_stats(&self, metrics: PolledMetrics) {
         let mut guard = self.inner.write().await;
-        guard.stats = Some(stats);
-        guard.stream_bitrate_kbps = stream_bitrate_kbps;
-        guard.stream_duration_ms = stream_duration_ms;
-        guard.record_duration_ms = record_duration_ms;
+        metrics.write_into(&mut guard);
         guard.updated_at = OffsetDateTime::now_utc();
         Self::broadcast(&self.hub, &guard);
     }
@@ -181,6 +170,61 @@ impl StateStore {
         }
         guard.updated_at = OffsetDateTime::now_utc();
         Self::broadcast(&self.hub, &guard);
+    }
+}
+
+/// The snapshot fields the stats poller owns, as one value.
+///
+/// They are written by `spawn_stats_poller` on its own schedule and must
+/// survive a full refresh, which knows nothing about them. Before this type
+/// they were four fields listed by hand in `update_stats` and again in
+/// `apply_full_refresh`; that has already gone wrong once (9a22423 added the
+/// carry-over because a refresh was blanking them mid-stream), and the two
+/// `Option<u64>` durations sat adjacent in a positional argument list where
+/// swapping them would have compiled.
+///
+/// `read_from` is written as an exhaustive struct literal on purpose: adding a
+/// field to this type without teaching it how to be read is a compile error
+/// there rather than a metric that silently stops surviving refreshes.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PolledMetrics {
+    pub stats: Option<ObsStats>,
+    pub stream_bitrate_kbps: Option<f64>,
+    pub stream_duration_ms: Option<u64>,
+    pub record_duration_ms: Option<u64>,
+}
+
+impl PolledMetrics {
+    /// A fresh reading. `stats` is not optional here: the poller only reports
+    /// when it has one, so there is no way to pass `None` by accident.
+    pub fn new(
+        stats: ObsStats,
+        stream_bitrate_kbps: Option<f64>,
+        stream_duration_ms: Option<u64>,
+        record_duration_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            stats: Some(stats),
+            stream_bitrate_kbps,
+            stream_duration_ms,
+            record_duration_ms,
+        }
+    }
+
+    fn read_from(snapshot: &ObsSnapshot) -> Self {
+        Self {
+            stats: snapshot.stats,
+            stream_bitrate_kbps: snapshot.stream_bitrate_kbps,
+            stream_duration_ms: snapshot.stream_duration_ms,
+            record_duration_ms: snapshot.record_duration_ms,
+        }
+    }
+
+    fn write_into(self, snapshot: &mut ObsSnapshot) {
+        snapshot.stats = self.stats;
+        snapshot.stream_bitrate_kbps = self.stream_bitrate_kbps;
+        snapshot.stream_duration_ms = self.stream_duration_ms;
+        snapshot.record_duration_ms = self.record_duration_ms;
     }
 }
 
@@ -655,7 +699,12 @@ mod tests {
     async fn full_refresh_keeps_poller_owned_metrics() {
         let store = make_store();
         store
-            .update_stats(ObsStats::default(), Some(4500.0), Some(12_000), Some(3_000))
+            .update_stats(PolledMetrics::new(
+                ObsStats::default(),
+                Some(4500.0),
+                Some(12_000),
+                Some(3_000),
+            ))
             .await;
 
         let superseded = store
@@ -895,7 +944,12 @@ mod tests {
             ..ObsStats::default()
         };
         store
-            .update_stats(stats, Some(4500.0), Some(12_000), Some(3_000))
+            .update_stats(PolledMetrics::new(
+                stats,
+                Some(4500.0),
+                Some(12_000),
+                Some(3_000),
+            ))
             .await;
 
         let current = store.read().await;
