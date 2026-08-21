@@ -412,19 +412,15 @@ async fn run_action(
     match action {
         TuiAction::PaletteSubmit => {
             let input = model.command_palette.input.clone();
-            model.command_palette.active = false;
-            model.command_palette.input.clear();
-            model.command_palette.completions.clear();
-            model.command_palette.completion_idx = None;
-            let result = dispatch_palette_command(socket_path, &input).await;
-            if result == "quit" {
-                return (true, None);
+            model.command_palette.close();
+            match dispatch_palette_command(socket_path, &input).await {
+                PaletteOutcome::Quit => (true, None),
+                PaletteOutcome::OpenSettings => {
+                    open_settings(model);
+                    (false, None)
+                }
+                PaletteOutcome::Status(message) => (false, Some(message)),
             }
-            if result == "themes" {
-                open_settings(model);
-                return (false, None);
-            }
-            (false, Some(result))
         }
         TuiAction::ActivateIndex(panel, index) => {
             model.focus = panel;
@@ -502,10 +498,7 @@ fn apply_local_action(
             Some((false, None))
         }
         TuiAction::ClosePalette => {
-            model.command_palette.active = false;
-            model.command_palette.input.clear();
-            model.command_palette.completions.clear();
-            model.command_palette.completion_idx = None;
+            model.command_palette.close();
             Some((false, None))
         }
         TuiAction::PaletteChar(c) => {
@@ -819,43 +812,53 @@ fn refresh_completions(model: &mut TuiModel) {
     model.command_palette.completion_idx = None;
 }
 
-async fn dispatch_palette_command(socket_path: &Path, input: &str) -> String {
-    match parser::parse(input) {
-        Err(e) => format!("error: {e}"),
-        Ok(Command::Quit) => "quit".to_string(),
-        Ok(Command::Themes) => "themes".to_string(),
-        Ok(Command::Help) => {
-            "Commands: :scene :profile :collection :mute :unmute :toggle-mute :vol :stream :rec \
-             :status :obs-status :server-status :reload-config :dump-config :validate-config \
-             :themes :reconnect :quit  —  <space> opens the which-key menu"
-                .to_string()
-        }
-        Ok(cmd) => {
-            let payload = match command_to_payload(cmd) {
+/// The `:help` one-liner, built from the same list the completion menu uses so
+/// the two cannot come to disagree about what exists.
+fn help_line() -> String {
+    let commands: Vec<String> = parser::CANONICAL_PALETTE_COMMANDS
+        .iter()
+        .map(|name| format!(":{name}"))
+        .collect();
+    format!(
+        "Commands: {}  —  <space> opens the which-key menu",
+        commands.join(" ")
+    )
+}
+
+/// What the event loop should do about a command typed into the palette.
+///
+/// Two of these used to be signalled by returning the literal strings "quit"
+/// and "themes" for the caller to compare against — in the same return value
+/// that otherwise carries the daemon's own reply text. A daemon message of
+/// exactly "quit" therefore ended the user's session. Distinct variants make
+/// the instruction and the text impossible to confuse.
+enum PaletteOutcome {
+    /// Leave the TUI.
+    Quit,
+    /// Switch to the settings view.
+    OpenSettings,
+    /// Show this on the status line.
+    Status(String),
+}
+
+async fn dispatch_palette_command(socket_path: &Path, input: &str) -> PaletteOutcome {
+    let command = match parser::parse(input) {
+        Ok(command) => command,
+        Err(e) => return PaletteOutcome::Status(format!("error: {e}")),
+    };
+
+    match command {
+        Command::Quit => PaletteOutcome::Quit,
+        Command::Themes => PaletteOutcome::OpenSettings,
+        Command::Help => PaletteOutcome::Status(help_line()),
+        command => {
+            let payload = match command_to_payload(command) {
                 Ok(payload) => payload,
-                Err(error) => return format!("error: {error}"),
+                Err(error) => return PaletteOutcome::Status(format!("error: {error}")),
             };
-            match send_command(socket_path, payload).await {
-                Ok(ServerMessage::Response {
-                    ok, result, error, ..
-                }) => {
-                    if ok {
-                        result
-                            .as_ref()
-                            .and_then(|v| v.get("message"))
-                            .and_then(|m| m.as_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| "ok".to_string())
-                    } else {
-                        error
-                            .as_ref()
-                            .map(|e| format!("error [{}]: {}", e.code, e.message))
-                            .unwrap_or_else(|| "error: unknown".to_string())
-                    }
-                }
-                Ok(_) => "unexpected response".to_string(),
-                Err(e) => format!("error: {e}"),
-            }
+            PaletteOutcome::Status(
+                ReplyStyle::Acknowledge.format(send_command(socket_path, payload).await, "ok"),
+            )
         }
     }
 }

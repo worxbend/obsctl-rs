@@ -1,30 +1,5 @@
 use super::model::TuiModel;
-use crate::domain::parser::PALETTE_PREFIXES;
-
-/// Bare command names. The prefix the user actually typed (`:` or `/`) is
-/// split off before matching and put back on every candidate, so completions
-/// always round-trip into the command line unchanged.
-const ALL_COMMANDS: &[&str] = &[
-    "help",
-    "themes",
-    "scene",
-    "profile",
-    "collection",
-    "mute",
-    "unmute",
-    "toggle-mute",
-    "vol",
-    "stream",
-    "rec",
-    "status",
-    "obs-status",
-    "server-status",
-    "reload-config",
-    "dump-config",
-    "validate-config",
-    "reconnect",
-    "quit",
-];
+use crate::domain::parser::{CANONICAL_PALETTE_COMMANDS, PALETTE_PREFIXES};
 
 /// Split a leading palette prefix off `input`, if it has one.
 fn split_prefix(input: &str) -> (&str, &str) {
@@ -52,7 +27,7 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
 
     if !body.contains(' ') {
         let lower = body.to_ascii_lowercase();
-        let mut matches: Vec<String> = ALL_COMMANDS
+        let mut matches: Vec<String> = CANONICAL_PALETTE_COMMANDS
             .iter()
             .filter(|cmd| cmd.starts_with(lower.as_str()))
             .map(|cmd| format!("{prefix}{cmd}"))

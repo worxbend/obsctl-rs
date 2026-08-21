@@ -294,6 +294,20 @@ pub struct CommandPaletteState {
 }
 
 impl CommandPaletteState {
+    /// Dismiss the palette, discarding whatever was typed and any completions
+    /// offered for it.
+    ///
+    /// One method rather than four field assignments at each of the two call
+    /// sites, so a field added later cannot be reset in one place and not the
+    /// other — which would leave a stale completion list to reappear the next
+    /// time the palette opens.
+    pub fn close(&mut self) {
+        self.active = false;
+        self.input.clear();
+        self.completions.clear();
+        self.completion_idx = None;
+    }
+
     /// Ctrl-U — wipe the line back to its prompt prefix.
     pub fn clear_to_prefix(&mut self) {
         self.input = self.input.chars().take(1).collect();

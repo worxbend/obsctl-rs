@@ -12,6 +12,42 @@ pub const PALETTE_PREFIXES: [char; 2] = ['/', ':'];
 /// says otherwise. `:` mirrors vim's command prompt.
 pub const DEFAULT_PALETTE_PREFIX: char = ':';
 
+/// Every command the palette offers, in the canonical spelling.
+///
+/// One list, published here next to [`parse`], because three copies of this
+/// vocabulary had already drifted apart: the completion list, the `:help`
+/// text, and the match below. `connect` and `shutdown-server` are real
+/// commands that neither of the other two mentioned, so users had no way to
+/// discover them.
+///
+/// Aliases (`set-scene`, `theme`, `settings`, `volume`, `record`, `exit`) are
+/// deliberately absent. They stay accepted by [`parse`]; listing them as well
+/// would double the length of every completion menu without offering anything
+/// new.
+pub const CANONICAL_PALETTE_COMMANDS: &[&str] = &[
+    "help",
+    "themes",
+    "scene",
+    "profile",
+    "collection",
+    "mute",
+    "unmute",
+    "toggle-mute",
+    "vol",
+    "stream",
+    "rec",
+    "status",
+    "obs-status",
+    "server-status",
+    "reload-config",
+    "dump-config",
+    "validate-config",
+    "reconnect",
+    "connect",
+    "shutdown-server",
+    "quit",
+];
+
 pub fn parse(input: &str) -> Result<Command> {
     let input = input.trim().trim_start_matches(PALETTE_PREFIXES);
     if input.is_empty() {
@@ -161,6 +197,36 @@ fn tokenize(input: &str) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every name the palette offers must be one `parse` accepts. The two used
+    /// to be separate lists that had already diverged.
+    #[test]
+    fn every_canonical_command_parses() {
+        for name in CANONICAL_PALETTE_COMMANDS {
+            // The six commands that need a target get a plausible one; the
+            // rest take no arguments.
+            let input = match *name {
+                "scene" | "profile" | "collection" | "mute" | "unmute" | "toggle-mute" => {
+                    format!("{name} Main")
+                }
+                "vol" => format!("{name} Mic 50"),
+                _ => (*name).to_string(),
+            };
+            assert!(
+                parse(&input).is_ok(),
+                "`{input}` is offered by the palette but rejected by the parser"
+            );
+        }
+    }
+
+    /// No duplicates, so a completion menu cannot list the same command twice.
+    #[test]
+    fn canonical_commands_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for name in CANONICAL_PALETTE_COMMANDS {
+            assert!(seen.insert(*name), "duplicate palette command: {name}");
+        }
+    }
     use super::*;
     use crate::domain::command::Command;
 
