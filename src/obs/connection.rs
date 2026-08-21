@@ -65,14 +65,30 @@ pub async fn connect(
     .map_err(|e| ObsctlError::ConnectionFailed(e.to_string()))?;
 
     let (sink, stream) = futures_util::StreamExt::split(ws_stream);
-    handshake(
-        sink,
-        stream,
-        params.password.as_deref(),
-        event_tx,
-        params.request_timeout_ms,
+
+    // The handshake gets the same budget as the socket did, because a client
+    // is not connected to OBS until it has been identified. Without this, an
+    // OBS that accepts the TCP connection and then never sends Hello — a hung
+    // process, a network that black-holes traffic after connect, a proxy in
+    // the middle — leaves the read waiting forever, and the daemon that owns
+    // the OBS connection can be neither reconnected nor shut down. Expiry is
+    // reported as an ordinary connection failure so the supervisor's usual
+    // reconnect and backoff handle it like any other failed attempt. The two
+    // phases are budgeted separately, so a whole attempt can take up to twice
+    // `connect_timeout_ms` — a slow-but-healthy OBS should not lose its
+    // handshake budget to a slow socket.
+    tokio::time::timeout(
+        std::time::Duration::from_millis(params.connect_timeout_ms),
+        handshake(
+            sink,
+            stream,
+            params.password.as_deref(),
+            event_tx,
+            params.request_timeout_ms,
+        ),
     )
     .await
+    .map_err(|_| ObsctlError::ConnectionFailed(format!("handshake timeout to {}", params.url)))?
 }
 
 #[cfg(test)]

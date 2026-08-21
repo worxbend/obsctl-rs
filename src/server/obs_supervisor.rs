@@ -79,14 +79,20 @@ impl ObsSupervisor {
 
         loop {
             match self.connect_once(&mut reconnect_cfg, &mut policy).await {
-                Ok(session) => match self.serve(session).await {
+                ConnectOutcome::Connected(session) => match self.serve(session).await {
                     DisconnectReason::Shutdown => return,
                     // The connection was thrown away on purpose, not lost, so
                     // there is nothing to back off from: go straight round.
                     DisconnectReason::ReconnectRequested => continue,
                     DisconnectReason::ObsDisconnected => {}
                 },
-                Err(error) => self.record_connect_failure(&error).await,
+                ConnectOutcome::Failed(error) => self.record_connect_failure(&error).await,
+                // The attempt was abandoned rather than failed, so there is
+                // nothing to report and nothing to retry.
+                ConnectOutcome::ShutdownRequested => {
+                    self.reconnecting.store(false, Ordering::Relaxed);
+                    return;
+                }
             }
 
             if self.wait_before_retry(&mut policy).await.is_break() {
@@ -105,7 +111,7 @@ impl ObsSupervisor {
         &mut self,
         reconnect_cfg: &mut ReconnectConfig,
         policy: &mut ReconnectPolicy,
-    ) -> Result<ConnectedSession> {
+    ) -> ConnectOutcome {
         let (params, latest_reconnect_cfg) = {
             let cfg = self.config.lock().await;
             (
@@ -121,8 +127,8 @@ impl ObsSupervisor {
         // reports once the supervisor has given up for good.
         self.reconnecting.store(true, Ordering::Relaxed);
         let attempt = match params {
-            Ok(params) => self.attempt_connect(&params).await,
-            Err(error) => Err(error),
+            Ok(params) => self.attempt_connect_or_shutdown(&params).await,
+            Err(error) => Some(Err(error)),
         };
 
         // Done whether the attempt succeeded or not: a reload that fixes the
@@ -133,7 +139,11 @@ impl ObsSupervisor {
             *policy = ReconnectPolicy::new(reconnect_cfg.clone());
         }
 
-        let session = attempt?;
+        let session = match attempt {
+            Some(Ok(session)) => session,
+            Some(Err(error)) => return ConnectOutcome::Failed(error),
+            None => return ConnectOutcome::ShutdownRequested,
+        };
         let studio = &session.versions.studio;
         let websocket = &session.versions.websocket;
         info!("OBS connected: studio={studio} ws={websocket}");
@@ -143,7 +153,34 @@ impl ObsSupervisor {
         );
         policy.reset();
         self.reconnecting.store(false, Ordering::Relaxed);
-        Ok(session)
+        ConnectOutcome::Connected(session)
+    }
+
+    /// Try to connect, but give up the moment the daemon is asked to stop.
+    ///
+    /// `None` means the attempt was abandoned because shutdown was signalled;
+    /// dropping the connect future is what cancels it. Without this race a
+    /// connection attempt is uninterruptible for as long as it takes, and an
+    /// attempt can take a while: `connect_timeout_ms` for the socket and the
+    /// same again for the obs-websocket handshake. SIGTERM, SIGINT and the IPC
+    /// `shutdown_server` command all arrive through this same watch channel,
+    /// so all three used to be ignored until the attempt finished on its own.
+    ///
+    /// The receiver is cloned rather than borrowed so the attempt can keep
+    /// using `&self` while the wait needs `&mut`; a clone starts out having
+    /// seen exactly what the original has seen, so a shutdown that is already
+    /// pending still wins the race.
+    async fn attempt_connect_or_shutdown(
+        &self,
+        params: &ObsConnectionParams,
+    ) -> Option<Result<ConnectedSession>> {
+        let mut shutdown = self.shutdown.clone();
+        tokio::select! {
+            attempt = self.attempt_connect(params) => Some(attempt),
+            // Also fires if every sender is gone, which means the daemon that
+            // owns this supervisor is already on its way out.
+            _ = shutdown.wait_for(|requested| *requested) => None,
+        }
     }
 
     /// Record an attempt that never produced a connection, so that clients see
@@ -452,6 +489,17 @@ const RECONNECT_DISABLED: &str =
     "OBS reconnect disabled in config; supervisor stopped (restart the server to retry)";
 const RECONNECT_EXHAUSTED: &str =
     "OBS reconnect attempts exhausted; supervisor stopped (restart the server to retry)";
+
+/// How one pass through the connect step ended.
+///
+/// A shutdown that interrupts an attempt is deliberately not an error: nothing
+/// went wrong with OBS, so there is no failure to report to clients and no
+/// backoff to sit out — the supervisor simply stops.
+enum ConnectOutcome {
+    Connected(ConnectedSession),
+    Failed(ObsctlError),
+    ShutdownRequested,
+}
 
 enum DisconnectReason {
     Shutdown,

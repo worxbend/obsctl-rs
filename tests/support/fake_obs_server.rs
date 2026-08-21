@@ -11,7 +11,7 @@ use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -32,6 +32,9 @@ pub struct PreparedResponse {
     pub no_reply: bool,
     /// Delay before sending the response, used to simulate a late OBS reply.
     pub delay: Option<std::time::Duration>,
+    /// When set, the response waits here until the test releases it — see
+    /// [`PreparedResponse::gated`].
+    gate: Option<Arc<Semaphore>>,
 }
 
 impl PreparedResponse {
@@ -42,6 +45,7 @@ impl PreparedResponse {
             comment: None,
             no_reply: false,
             delay: None,
+            gate: None,
         }
     }
 
@@ -52,6 +56,7 @@ impl PreparedResponse {
             comment: Some(comment.to_string()),
             no_reply: false,
             delay: None,
+            gate: None,
         }
     }
 
@@ -63,6 +68,7 @@ impl PreparedResponse {
             comment: None,
             no_reply: true,
             delay: None,
+            gate: None,
         }
     }
 
@@ -70,6 +76,35 @@ impl PreparedResponse {
     pub fn delayed(mut self, delay: std::time::Duration) -> Self {
         self.delay = Some(delay);
         self
+    }
+
+    /// The server receives the request and holds the reply until the test says
+    /// so, through the returned [`ResponseGate`].
+    ///
+    /// This is how a test makes a command take a controllable amount of time
+    /// inside the daemon without timing anything: the command is stuck in its
+    /// OBS round trip for exactly as long as the test leaves the gate shut, so
+    /// there is no delay to guess at and no race to lose.
+    ///
+    /// The connection handling the gated request waits with it, so any *other*
+    /// request on the same connection is held too. A test that needs something
+    /// to happen while the gate is shut must therefore choose something that
+    /// does not go to OBS at all.
+    pub fn gated(mut self) -> (Self, ResponseGate) {
+        let gate = Arc::new(Semaphore::new(0));
+        self.gate = Some(Arc::clone(&gate));
+        (self, ResponseGate(gate))
+    }
+}
+
+/// Releases responses held by [`PreparedResponse::gated`], one per call.
+#[derive(Clone)]
+pub struct ResponseGate(Arc<Semaphore>);
+
+impl ResponseGate {
+    /// Let one held request answer.
+    pub fn release(&self) {
+        self.0.add_permits(1);
     }
 }
 
@@ -130,6 +165,72 @@ impl FakeObsHandle {
     pub fn shutdown(self) {
         let _ = self.disconnect_tx.send(());
         let _ = self.shutdown.send(());
+    }
+}
+
+/// Handle to a fake OBS that never speaks the protocol — see [`spawn_silent_obs`].
+pub struct SilentObsHandle {
+    pub addr: SocketAddr,
+    /// One item per client that finished the WebSocket upgrade.
+    connections: mpsc::Receiver<()>,
+    shutdown: oneshot::Sender<()>,
+}
+
+impl SilentObsHandle {
+    /// Resolve once a client has completed the WebSocket upgrade against this
+    /// server, so a test knows the connection attempt it is about to interfere
+    /// with is genuinely in flight — without sleeping to guess at it.
+    pub async fn wait_for_connection(&mut self) {
+        self.connections
+            .recv()
+            .await
+            .expect("silent fake OBS accepted no connection");
+    }
+
+    /// Stop accepting, and drop every connection being held open.
+    pub fn shutdown(self) {
+        let _ = self.shutdown.send(());
+    }
+}
+
+/// Spawn a fake OBS that accepts the TCP connection and the WebSocket upgrade
+/// and then deliberately says nothing at all — no Hello, ever.
+///
+/// This is the "hung OBS" shape: from the client's point of view the socket is
+/// open and healthy, so the connect step succeeds and the obs-websocket
+/// handshake is left waiting for a message that never comes. The connection is
+/// held open (rather than dropped) so the client waits rather than seeing a
+/// close frame.
+pub async fn spawn_silent_obs() -> SilentObsHandle {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let (connection_tx, connection_rx) = mpsc::channel::<()>(8);
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        // Every upgraded connection is parked here, keeping the WebSocket
+        // alive; they are all dropped together when this task ends.
+        let mut held = Vec::new();
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                result = listener.accept() => {
+                    let Ok((stream, _)) = result else { break };
+                    let Ok(ws_stream) = accept_async(stream).await else { continue };
+                    held.push(ws_stream);
+                    if connection_tx.send(()).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    SilentObsHandle {
+        addr,
+        connections: connection_rx,
+        shutdown: shutdown_tx,
     }
 }
 
@@ -373,6 +474,15 @@ async fn handle_connection(
                 let response = if let Some(p) = prepared {
                     if let Some(delay) = p.delay {
                         tokio::time::sleep(delay).await;
+                    }
+
+                    if let Some(gate) = &p.gate {
+                        // One permit per held request: the request stays here
+                        // until the test calls `ResponseGate::release`.
+                        match gate.acquire().await {
+                            Ok(permit) => permit.forget(),
+                            Err(_) => break,
+                        }
                     }
 
                     json!({

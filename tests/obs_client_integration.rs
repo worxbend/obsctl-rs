@@ -12,10 +12,11 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use obsctl_rs::domain::errors::ObsctlError;
 use obsctl_rs::obs::client::{ObsEvent, handshake};
-use obsctl_rs::obs::connection::ObsConnectionParams;
+use obsctl_rs::obs::connection::{ObsConnectionParams, connect};
 use obsctl_rs::obs::requests;
-use support::fake_obs_server::{PreparedResponse, spawn_fake_obs};
+use support::fake_obs_server::{PreparedResponse, spawn_fake_obs, spawn_silent_obs};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -566,4 +567,43 @@ fn connection_params_from_config_resolves_password_env() {
     let params = ObsConnectionParams::from_config(&cfg).unwrap();
     assert_eq!(params.password.as_deref(), Some("mypassword"));
     unsafe { std::env::remove_var("TEST_OBS_PW_RESOLVE") };
+}
+
+#[test]
+fn handshake_against_a_silent_server_fails_instead_of_hanging() {
+    rt().block_on(async {
+        // The server accepts the socket and then says nothing, so the connect
+        // step succeeds and the obs-websocket handshake is left waiting for a
+        // Hello that never arrives.
+        let mut server = spawn_silent_obs().await;
+
+        let params = ObsConnectionParams {
+            url: format!("ws://{}", server.addr),
+            password: None,
+            connect_timeout_ms: 250,
+            request_timeout_ms: 2500,
+        };
+        let (event_tx, _event_rx) = mpsc::channel(8);
+
+        let started = std::time::Instant::now();
+        // The outer bound is the test's own safety net: twenty times the
+        // configured timeout, so it can only fire if the handshake is unbounded.
+        let outcome = tokio::time::timeout(Duration::from_secs(5), connect(&params, event_tx))
+            .await
+            .expect("connect must give up on a silent server, not wait forever");
+
+        let error = outcome.expect_err("a server that never sends Hello cannot connect");
+        assert!(
+            matches!(error, ObsctlError::ConnectionFailed(_)),
+            "a stalled handshake should look like any other failed connection, got {error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the attempt should end near the configured timeout, took {:?}",
+            started.elapsed()
+        );
+
+        server.wait_for_connection().await;
+        server.shutdown();
+    });
 }
