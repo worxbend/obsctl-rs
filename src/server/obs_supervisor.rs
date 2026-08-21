@@ -6,6 +6,7 @@ use tracing::{info, warn};
 
 use crate::config::model::Config;
 use crate::domain::errors::ObsctlError;
+use crate::domain::result::Result;
 use crate::ipc::{
     protocol::{LogEvent, LogLevel},
     session::BroadcastHub,
@@ -182,7 +183,7 @@ impl ObsSupervisor {
     async fn attempt_connect(
         &self,
         params: &ObsConnectionParams,
-    ) -> crate::domain::result::Result<(
+    ) -> Result<(
         ObsClient,
         String,
         String,
@@ -266,7 +267,7 @@ impl ObsSupervisor {
         client: &ObsClient,
         obs_version: &str,
         ws_version: &str,
-    ) -> crate::domain::result::Result<()> {
+    ) -> Result<()> {
         fetch_and_publish_snapshot_from(&self.config, &self.state, client, obs_version, ws_version)
             .await
     }
@@ -311,9 +312,57 @@ async fn fetch_and_publish_snapshot_from(
     client: &ObsClient,
     obs_version: &str,
     ws_version: &str,
-) -> crate::domain::result::Result<()> {
+) -> Result<()> {
+    let scenes = fetch_scene_listing(client).await?;
+    let inputs = fetch_input_states(client).await?;
+
+    let refreshed = RefreshedObsState {
+        versions: ObsVersions {
+            studio: obs_version.to_string(),
+            websocket: ws_version.to_string(),
+        },
+        scenes,
+        inputs,
+        profiles: fetch_listing(client, ListingRequest::PROFILES).await,
+        collections: fetch_listing(client, ListingRequest::SCENE_COLLECTIONS).await,
+        outputs: OutputFlags {
+            streaming: fetch_output_active(
+                client,
+                requests::get_stream_status(),
+                "GetStreamStatus",
+            )
+            .await,
+            recording: fetch_output_active(
+                client,
+                requests::get_record_status(),
+                "GetRecordStatus",
+            )
+            .await,
+        },
+    };
+
+    let (scene_cfgs, audio_cfgs) = {
+        let cfg = config.lock().await;
+        (cfg.scenes.clone(), cfg.audio.inputs.clone())
+    };
+
+    // `apply_full_refresh` merges under the store's write lock, so the live
+    // metrics the stats poller owns survive and events that arrived during the
+    // round-trips above are not clobbered by this (necessarily stale) fetch.
+    state
+        .apply_full_refresh(&refreshed, &scene_cfgs, &audio_cfgs)
+        .await;
+    Ok(())
+}
+
+/// Every scene OBS knows, plus the one currently on program.
+///
+/// Unlike the profile and scene-collection listings below, a failure here
+/// fails the whole refresh: a snapshot without a scene list is not worth
+/// publishing.
+async fn fetch_scene_listing(client: &ObsClient) -> Result<Listing> {
     let scene_list_resp = client.request(requests::get_scene_list()).await?;
-    let scenes_raw = extract_resource_names(&scene_list_resp, "scenes", "sceneName")?;
+    let scenes = extract_resource_names(&scene_list_resp, "scenes", "sceneName")?;
 
     let current_resp = client
         .request(requests::get_current_program_scene())
@@ -332,13 +381,15 @@ async fn fetch_and_publish_snapshot_from(
             |error| ObsctlError::ObsRequestFailed(format!("currentProgramSceneName {error}")),
         )?;
 
-    if !scenes_raw.contains(&current_scene) {
-        warn!(
-            "Current program scene '{}' is not present in GetSceneList response",
-            current_scene
-        );
+    if !scenes.contains(&current_scene) {
+        warn!("Current program scene '{current_scene}' is not present in GetSceneList response");
     }
 
+    Ok(Listing::new(scenes, current_scene))
+}
+
+/// The mute and volume of every audio input.
+async fn fetch_input_states(client: &ObsClient) -> Result<Vec<RawInputState>> {
     let input_names = extract_resource_names(
         &client.request(requests::get_input_list()).await?,
         "inputs",
@@ -349,106 +400,99 @@ async fn fetch_and_publish_snapshot_from(
     // dominant cost of a refresh — with ten inputs it was twenty sequential
     // waits — and every millisecond of it is time in which the snapshot being
     // assembled goes further out of date. `join_all` overlaps them instead.
-    let inputs: Vec<RawInputState> = futures_util::future::join_all(
+    futures_util::future::join_all(
         input_names
             .iter()
             .map(|name| fetch_input_state(client, name)),
     )
     .await
     .into_iter()
-    .collect::<crate::domain::result::Result<Vec<_>>>()?;
+    .collect()
+}
 
-    let streaming = client
-        .request(requests::get_stream_status())
+/// Which obs-websocket request supplies a "list plus current selection", and
+/// under which JSON keys its answer carries the two.
+///
+/// Profiles and scene collections are read exactly alike and differ only in
+/// those names, so the difference lives in this table rather than in two
+/// copies of [`fetch_listing`].
+struct ListingRequest {
+    build: fn() -> crate::obs::protocol::RequestData,
+    request_name: &'static str,
+    /// Key holding the array of names, e.g. `"profiles"`.
+    list_key: &'static str,
+    /// Key holding the currently selected name, e.g. `"currentProfileName"`.
+    current_key: &'static str,
+}
+
+impl ListingRequest {
+    const PROFILES: Self = Self {
+        build: requests::get_profile_list,
+        request_name: "GetProfileList",
+        list_key: "profiles",
+        current_key: "currentProfileName",
+    };
+
+    const SCENE_COLLECTIONS: Self = Self {
+        build: requests::get_scene_collection_list,
+        request_name: "GetSceneCollectionList",
+        list_key: "sceneCollections",
+        current_key: "currentSceneCollectionName",
+    };
+}
+
+/// Read one "list plus current selection" from OBS.
+///
+/// A failed or malformed reply yields an empty listing rather than an error:
+/// profiles and scene collections are secondary information, and losing them
+/// should not cost the user the scene and audio state in the same snapshot.
+async fn fetch_listing(client: &ObsClient, spec: ListingRequest) -> Listing {
+    let Ok(response) = client.request((spec.build)()).await else {
+        warn!("Missing {} response", spec.request_name);
+        return Listing::new(Vec::new(), String::new());
+    };
+
+    let names = crate::obs::validation::extract_string_array(&response, spec.list_key)
+        .unwrap_or_else(|_| {
+            warn!(
+                "Malformed {} response: missing `{}`",
+                spec.request_name, spec.list_key
+            );
+            Vec::new()
+        });
+    let current = response
+        .get(spec.current_key)
+        .and_then(|s| s.as_str())
+        .unwrap_or_else(|| {
+            warn!(
+                "Malformed {} response: missing `{}`",
+                spec.request_name, spec.current_key
+            );
+            ""
+        })
+        .to_string();
+
+    Listing::new(names, current)
+}
+
+/// Whether a stream or recording output is running.
+///
+/// Like [`fetch_listing`], an unreadable reply degrades rather than fails —
+/// here to `false`, matching what the panel shows before OBS has answered.
+async fn fetch_output_active(
+    client: &ObsClient,
+    request: crate::obs::protocol::RequestData,
+    request_name: &str,
+) -> bool {
+    client
+        .request(request)
         .await
         .ok()
         .and_then(|v| v.get("outputActive").and_then(|b| b.as_bool()))
         .unwrap_or_else(|| {
-            warn!(
-                "Malformed GetStreamStatus response: missing `outputActive`, defaulting to false"
-            );
+            warn!("Malformed {request_name} response: missing `outputActive`, defaulting to false");
             false
-        });
-
-    let recording = client
-        .request(requests::get_record_status())
-        .await
-        .ok()
-        .and_then(|v| v.get("outputActive").and_then(|b| b.as_bool()))
-        .unwrap_or_else(|| {
-            warn!(
-                "Malformed GetRecordStatus response: missing `outputActive`, defaulting to false"
-            );
-            false
-        });
-
-    let (profiles, current_profile) = client
-        .request(requests::get_profile_list())
-        .await
-        .ok()
-        .map(|v| {
-            let profiles = crate::obs::validation::extract_string_array(&v, "profiles")
-                .ok()
-                .unwrap_or_default();
-            let current = v
-                .get("currentProfileName")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .to_string();
-            (profiles, current)
         })
-        .unwrap_or_else(|| {
-            warn!("Malformed or missing GetProfileList response");
-            (Vec::new(), String::new())
-        });
-
-    let (scene_collections, current_scene_collection) = client
-        .request(requests::get_scene_collection_list())
-        .await
-        .ok()
-        .map(|v| {
-            let collections = crate::obs::validation::extract_string_array(&v, "sceneCollections")
-                .ok()
-                .unwrap_or_default();
-            let current = v
-                .get("currentSceneCollectionName")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .to_string();
-            (collections, current)
-        })
-        .unwrap_or_else(|| {
-            warn!("Malformed or missing GetSceneCollectionList response");
-            (Vec::new(), String::new())
-        });
-
-    let refreshed = RefreshedObsState {
-        versions: ObsVersions {
-            studio: obs_version.to_string(),
-            websocket: ws_version.to_string(),
-        },
-        scenes: Listing::new(scenes_raw, current_scene),
-        inputs,
-        profiles: Listing::new(profiles, current_profile),
-        collections: Listing::new(scene_collections, current_scene_collection),
-        outputs: OutputFlags {
-            streaming,
-            recording,
-        },
-    };
-
-    let (scene_cfgs, audio_cfgs) = {
-        let cfg = config.lock().await;
-        (cfg.scenes.clone(), cfg.audio.inputs.clone())
-    };
-
-    // `apply_full_refresh` merges under the store's write lock, so the live
-    // metrics the stats poller owns survive and events that arrived during the
-    // round-trips above are not clobbered by this (necessarily stale) fetch.
-    state
-        .apply_full_refresh(&refreshed, &scene_cfgs, &audio_cfgs)
-        .await;
-    Ok(())
 }
 
 /// Read one input's mute and volume.
@@ -457,10 +501,7 @@ async fn fetch_and_publish_snapshot_from(
 /// rather than failing the whole refresh: one unreadable input should not cost
 /// the user their scene list. Only a request that cannot be built at all — an
 /// input name that fails validation — is an error.
-async fn fetch_input_state(
-    client: &ObsClient,
-    name: &str,
-) -> crate::domain::result::Result<RawInputState> {
+async fn fetch_input_state(client: &ObsClient, name: &str) -> Result<RawInputState> {
     let mute_request = requests::get_input_mute(name)?;
     let volume_request = requests::get_input_volume(name)?;
 
