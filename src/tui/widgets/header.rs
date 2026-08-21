@@ -78,8 +78,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 
     let obs_text = if model.obs_connected() {
         let version = model
-            .snapshot
-            .as_ref()
+            .snapshot()
             .and_then(|snapshot| snapshot.obs_studio_version.as_deref())
             .unwrap_or("?");
         t!("tui.header.obs_connected", version = version).into_owned()

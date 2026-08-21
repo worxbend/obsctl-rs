@@ -98,7 +98,7 @@ mod tests {
 
     fn make_model(scenes: Vec<SceneState>, audio: Vec<AudioState>) -> TuiModel {
         let mut model = TuiModel::default();
-        model.snapshot = Some(ObsSnapshot {
+        model.set_snapshot(ObsSnapshot {
             scenes,
             audio_inputs: audio,
             ..Default::default()
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn profile_arg_filter() {
         let mut model = make_model(vec![], vec![]);
-        model.snapshot = Some(ObsSnapshot {
+        model.set_snapshot(ObsSnapshot {
             profiles: vec!["Default".to_string(), "Streaming".to_string()],
             ..Default::default()
         });
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn collection_arg_filter() {
         let mut model = make_model(vec![], vec![]);
-        model.snapshot = Some(ObsSnapshot {
+        model.set_snapshot(ObsSnapshot {
             scene_collections: vec!["Podcast".to_string(), "Gaming".to_string()],
             ..Default::default()
         });

@@ -94,7 +94,7 @@ fn log_entry(level: LogLevel, message: &str) -> TuiLogEntry {
 
 fn model_connected() -> TuiModel {
     let mut model = TuiModel::default();
-    model.snapshot = Some(snap_connected());
+    model.set_snapshot(snap_connected());
     model.logs = vec![
         log_entry(LogLevel::Info, "server started"),
         log_entry(LogLevel::Warn, "reconnect attempt"),
@@ -234,7 +234,7 @@ fn live_bar_omits_its_badges_when_the_status_pane_is_showing() {
 #[test]
 fn live_bar_renders_active_stream_and_record_with_stats() {
     let mut model = model_connected();
-    if let Some(snap) = model.snapshot.as_mut() {
+    model.update_snapshot(|snap| {
         snap.streaming = true;
         snap.recording = true;
         snap.stream_duration_ms = Some(65_000);
@@ -246,7 +246,7 @@ fn live_bar_renders_active_stream_and_record_with_stats() {
             memory_usage_mb: 512.0,
             ..Default::default()
         });
-    }
+    });
     let mut t = term(100, 3);
     t.draw(|f| {
         widgets::live_bar::render(f, Rect::new(0, 0, 100, 3), &model, true);
@@ -263,14 +263,14 @@ fn live_bar_renders_active_stream_and_record_with_stats() {
 #[test]
 fn live_bar_draws_braille_meters_for_cpu_and_memory() {
     let mut model = model_connected();
-    if let Some(snap) = model.snapshot.as_mut() {
+    model.update_snapshot(|snap| {
         snap.stats = Some(obsctl_rs::obs::state::ObsStats {
             cpu_usage_percent: 42.0,
             active_fps: 60.0,
             memory_usage_mb: 512.0,
             ..Default::default()
         });
-    }
+    });
     // Two rows of inner height, so the meter row renders.
     let mut t = term(100, 4);
     t.draw(|f| {
@@ -294,14 +294,14 @@ fn live_bar_draws_braille_meters_for_cpu_and_memory() {
 fn live_bar_meters_fall_back_to_ascii_in_simplified_mode() {
     let mut model = model_connected();
     model.advanced_ui = false;
-    if let Some(snap) = model.snapshot.as_mut() {
+    model.update_snapshot(|snap| {
         snap.stats = Some(obsctl_rs::obs::state::ObsStats {
             cpu_usage_percent: 50.0,
             active_fps: 60.0,
             memory_usage_mb: 128.0,
             ..Default::default()
         });
-    }
+    });
     let mut t = term(100, 4);
     t.draw(|f| {
         widgets::live_bar::render(f, Rect::new(0, 0, 100, 4), &model, false);
@@ -346,12 +346,12 @@ fn status_pane_shows_idle_when_nothing_is_running() {
 #[test]
 fn status_pane_shows_live_and_rec_side_by_side_with_durations() {
     let mut model = model_connected();
-    if let Some(snap) = model.snapshot.as_mut() {
+    model.update_snapshot(|snap| {
         snap.streaming = true;
         snap.recording = true;
         snap.stream_duration_ms = Some(65_000);
         snap.record_duration_ms = Some(5_000);
-    }
+    });
     let mut t = term(32, 8);
     t.draw(|f| {
         widgets::status::render(f, Rect::new(0, 0, 32, 8), &model);
@@ -377,10 +377,10 @@ fn status_pane_shows_live_and_rec_side_by_side_with_durations() {
 #[test]
 fn status_pane_shows_rec_alone_while_only_recording() {
     let mut model = model_connected();
-    if let Some(snap) = model.snapshot.as_mut() {
+    model.update_snapshot(|snap| {
         snap.recording = true;
         snap.record_duration_ms = Some(3_600_000);
-    }
+    });
     let mut t = term(32, 8);
     t.draw(|f| {
         widgets::status::render(f, Rect::new(0, 0, 32, 8), &model);
@@ -409,9 +409,9 @@ fn status_pane_spinner_distinguishes_live_from_idle_at_the_same_tick() {
         .unwrap();
     let idle_out = buf_string(&t);
 
-    if let Some(snap) = model.snapshot.as_mut() {
+    model.update_snapshot(|snap| {
         snap.streaming = true;
-    }
+    });
     let mut t = term(32, 8);
     t.draw(|f| widgets::status::render(f, Rect::new(0, 0, 32, 8), &model))
         .unwrap();
@@ -428,10 +428,10 @@ fn status_pane_spinner_distinguishes_live_from_idle_at_the_same_tick() {
 #[test]
 fn status_pane_degrades_to_a_single_line_when_too_small_for_block_letters() {
     let mut model = model_connected();
-    if let Some(snap) = model.snapshot.as_mut() {
+    model.update_snapshot(|snap| {
         snap.streaming = true;
         snap.stream_duration_ms = Some(65_000);
-    }
+    });
     // Three rows total leaves one inner row — no room for the 3-row font.
     let mut t = term(24, 3);
     t.draw(|f| {
@@ -473,12 +473,12 @@ fn status_pane_is_ascii_in_simplified_mode() {
     let mut model = model_connected();
     model.advanced_ui = false;
     model.show_icons = true;
-    if let Some(snap) = model.snapshot.as_mut() {
+    model.update_snapshot(|snap| {
         snap.streaming = true;
         snap.recording = true;
         snap.stream_duration_ms = Some(1_000);
         snap.record_duration_ms = Some(1_000);
-    }
+    });
     let mut t = term(32, 8);
     t.draw(|f| {
         widgets::status::render(f, Rect::new(0, 0, 32, 8), &model);
@@ -525,7 +525,7 @@ fn connection_renders_not_connected_to_daemon() {
 #[test]
 fn connection_renders_obs_disconnected_with_error() {
     let mut model = model_connected();
-    model.snapshot = Some(snap_disconnected_with_error());
+    model.set_snapshot(snap_disconnected_with_error());
     let mut t = term(60, 6);
     t.draw(|f| {
         widgets::connection::render(f, Rect::new(0, 0, 60, 6), &model);
@@ -541,7 +541,7 @@ fn connection_renders_obs_disconnected_with_error() {
 #[test]
 fn connection_renders_waiting_when_no_snapshot() {
     let mut model = model_connected();
-    model.snapshot = None;
+    model.clear_snapshot();
     let mut t = term(60, 6);
     t.draw(|f| {
         widgets::connection::render(f, Rect::new(0, 0, 60, 6), &model);
@@ -660,9 +660,9 @@ fn unfocused_scene_selection_is_fainter_than_focused() {
 #[test]
 fn scenes_renders_empty_list_without_panic() {
     let mut model = model_connected();
-    if let Some(ref mut snap) = model.snapshot {
+    model.update_snapshot(|snap| {
         snap.scenes.clear();
-    }
+    });
     let mut t = term(60, 10);
     t.draw(|f| {
         widgets::scenes::render(f, Rect::new(0, 0, 60, 10), &model);
@@ -675,13 +675,13 @@ fn scenes_renders_empty_list_without_panic() {
 #[test]
 fn scenes_renders_long_name_without_panic() {
     let mut model = model_connected();
-    if let Some(ref mut snap) = model.snapshot {
+    model.update_snapshot(|snap| {
         snap.scenes = vec![SceneState {
             name: "A".repeat(200),
             active: true,
             ..Default::default()
         }];
-    }
+    });
     let mut t = term(40, 8);
     // This must not panic on narrow terminals.
     t.draw(|f| {
@@ -831,9 +831,9 @@ fn audio_uses_ascii_symbols_when_icons_are_disabled() {
 #[test]
 fn audio_renders_empty_list_without_panic() {
     let mut model = model_connected();
-    if let Some(ref mut snap) = model.snapshot {
+    model.update_snapshot(|snap| {
         snap.audio_inputs.clear();
-    }
+    });
     let out = audio_lines(&model, 60, 8).join("\n");
     assert!(out.contains("Audio"), "should still render block title");
     assert!(
@@ -855,7 +855,7 @@ fn audio_says_so_when_the_pane_is_too_narrow_for_a_strip() {
 #[test]
 fn audio_scrolls_sideways_to_keep_the_selected_strip_visible() {
     let mut model = model_connected();
-    if let Some(ref mut snap) = model.snapshot {
+    model.update_snapshot(|snap| {
         snap.audio_inputs = (0..6)
             .map(|i| AudioState {
                 name: format!("In{i}"),
@@ -864,7 +864,7 @@ fn audio_scrolls_sideways_to_keep_the_selected_strip_visible() {
                 ..Default::default()
             })
             .collect();
-    }
+    });
     model.clamp_cursors();
 
     // Only three strips fit in 38 columns of pane interior.
@@ -889,14 +889,14 @@ fn audio_scrolls_sideways_to_keep_the_selected_strip_visible() {
 #[test]
 fn audio_renders_long_name_without_panic() {
     let mut model = model_connected();
-    if let Some(ref mut snap) = model.snapshot {
+    model.update_snapshot(|snap| {
         snap.audio_inputs = vec![AudioState {
             name: "Z".repeat(200),
             muted: Some(false),
             volume_percent: Some(100),
             ..Default::default()
         }];
-    }
+    });
     let mut t = term(30, 6);
     t.draw(|f| {
         widgets::audio::render(f, Rect::new(0, 0, 30, 6), &model);
@@ -924,10 +924,10 @@ fn profiles_renders_active_profile_marker() {
 #[test]
 fn profiles_renders_empty_list_without_panic() {
     let mut model = model_connected();
-    if let Some(ref mut snap) = model.snapshot {
+    model.update_snapshot(|snap| {
         snap.profiles.clear();
         snap.current_profile = None;
-    }
+    });
     let mut t = term(60, 10);
     t.draw(|f| {
         widgets::profiles::render(f, Rect::new(0, 0, 60, 10), &model);
@@ -957,10 +957,10 @@ fn collections_renders_active_collection_marker() {
 #[test]
 fn collections_renders_empty_list_without_panic() {
     let mut model = model_connected();
-    if let Some(ref mut snap) = model.snapshot {
+    model.update_snapshot(|snap| {
         snap.scene_collections.clear();
         snap.current_scene_collection = None;
-    }
+    });
     let mut t = term(60, 10);
     t.draw(|f| {
         widgets::collections::render(f, Rect::new(0, 0, 60, 10), &model);
@@ -1574,7 +1574,7 @@ fn healthy_stats() -> ObsStats {
 
 fn model_streaming(stats: ObsStats) -> TuiModel {
     let mut model = model_connected();
-    model.snapshot = Some(snap_streaming(stats));
+    model.set_snapshot(snap_streaming(stats));
     model.clamp_cursors();
     model.record_metric_sample();
     model
@@ -1634,14 +1634,17 @@ fn stats_pane_falls_back_to_lifetime_counters_on_the_baseline_sample() {
 fn stats_pane_reports_per_stream_drops_and_flags_a_degraded_stream() {
     let mut model = model_streaming(healthy_stats());
     // Second poll: FPS has sagged, frames are being skipped.
-    if let Some(stats) = model.snapshot.as_mut().and_then(|s| s.stats.as_mut()) {
+    model.update_snapshot(|snapshot| {
+        let Some(stats) = snapshot.stats.as_mut() else {
+            return;
+        };
         stats.active_fps = 51.3;
         stats.average_frame_render_time_ms = 14.9;
         stats.render_total_frames = 10_600;
         stats.render_skipped_frames = 9;
         stats.output_total_frames = 10_580;
         stats.output_skipped_frames = 42;
-    }
+    });
     model.record_metric_sample();
 
     let out = draw_stats(&model);
@@ -1669,7 +1672,7 @@ fn stats_pane_reports_per_stream_drops_and_flags_a_degraded_stream() {
 #[test]
 fn stats_pane_waits_for_metrics_before_reporting() {
     let mut model = model_streaming(healthy_stats());
-    model.snapshot.as_mut().unwrap().stats = None;
+    model.update_snapshot(|snapshot| snapshot.stats = None);
 
     let out = draw_stats(&model);
     assert!(

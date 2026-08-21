@@ -64,9 +64,8 @@ fn apply_snapshot(model: &mut TuiModel, snapshot: ObsSnapshot) {
     {
         model.scene_flash = Some((next.to_string(), model.anim.frame));
     }
-    model.snapshot = Some(snapshot);
+    model.set_snapshot(snapshot);
     model.connected_to_daemon = true;
-    model.clamp_cursors();
     model.record_metric_sample();
 }
 
@@ -103,7 +102,7 @@ mod tests {
 
         assert!(redraw, "the frame should still be redrawn");
         assert!(
-            model.snapshot.is_none(),
+            model.snapshot().is_none(),
             "a snapshot that failed to parse must not be applied"
         );
         let entry = model.logs.last().expect("expected a log entry");
@@ -121,7 +120,7 @@ mod tests {
         let snapshot = serde_json::to_value(crate::obs::state::ObsSnapshot::default()).unwrap();
 
         assert!(apply_server_message(&mut model, state_event(snapshot)));
-        assert!(model.snapshot.is_some());
+        assert!(model.snapshot().is_some());
         assert!(model.connected_to_daemon);
         assert!(model.logs.is_empty(), "a good snapshot must not log");
     }

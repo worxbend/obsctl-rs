@@ -333,7 +333,7 @@ mod tests {
 
     fn model_with_scenes(count: usize) -> TuiModel {
         let mut model = TuiModel::default();
-        model.snapshot = Some(ObsSnapshot {
+        model.set_snapshot(ObsSnapshot {
             scenes: (0..count).map(|i| scene(&format!("scene{i}"))).collect(),
             ..Default::default()
         });
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn audio_clicks_resolve_by_column_because_the_strips_are_vertical() {
         let mut model = TuiModel::default();
-        model.snapshot = Some(ObsSnapshot {
+        model.set_snapshot(ObsSnapshot {
             audio_inputs: vec![
                 AudioState {
                     name: "Mic".into(),

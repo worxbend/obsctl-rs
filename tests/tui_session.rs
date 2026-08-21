@@ -55,7 +55,7 @@ fn state_event_updates_model_snapshot() {
     apply_server_message(&mut model, msg);
 
     assert!(model.connected_to_daemon);
-    assert!(model.snapshot.is_some());
+    assert!(model.snapshot().is_some());
     assert!(model.obs_connected());
     assert_eq!(model.current_scene(), Some("Main"));
     assert_eq!(model.scenes().len(), 1);
@@ -173,7 +173,7 @@ fn undecodable_obs_event_touches_nothing_but_is_reported() {
     apply_server_message(&mut model, msg);
 
     assert!(!model.connected_to_daemon);
-    assert!(model.snapshot.is_none());
+    assert!(model.snapshot().is_none());
     assert_eq!(model.logs.len(), 1);
     assert_eq!(model.logs[0].level, LogLevel::Warn);
 }
@@ -190,7 +190,7 @@ fn malformed_state_payload_does_not_panic() {
     // Should not panic even with malformed data
     apply_server_message(&mut model, msg);
     // snapshot stays None because deserialization fails
-    assert!(model.snapshot.is_none());
+    assert!(model.snapshot().is_none());
     // ...and the user is told, rather than left looking at a frozen dashboard.
     assert_eq!(model.logs.len(), 1);
     assert_eq!(model.logs[0].level, LogLevel::Warn);

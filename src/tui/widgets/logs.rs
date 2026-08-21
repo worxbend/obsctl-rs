@@ -179,7 +179,7 @@ fn highlight_message(
 
 fn known_resources(model: &TuiModel) -> Vec<(&str, ResourceKind)> {
     let mut resources = Vec::new();
-    if let Some(snapshot) = model.snapshot.as_ref() {
+    if let Some(snapshot) = model.snapshot() {
         for scene in &snapshot.scenes {
             resources.push((scene.name.as_str(), ResourceKind::Scene));
             if let Some(alias) = scene.alias.as_deref() {
@@ -387,7 +387,7 @@ mod tests {
 
     fn semantic_model() -> TuiModel {
         let mut model = TuiModel::default();
-        model.snapshot = Some(ObsSnapshot {
+        model.set_snapshot(ObsSnapshot {
             scenes: vec![SceneState {
                 name: "Main Scene".into(),
                 alias: Some("main".into()),

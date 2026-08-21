@@ -157,7 +157,16 @@ impl FrameCounters {
 
 #[derive(Debug, Clone)]
 pub struct TuiModel {
-    pub snapshot: Option<ObsSnapshot>,
+    /// The daemon's view of OBS, or `None` before the first snapshot arrives.
+    ///
+    /// Private because `cached_visible_scenes` is derived from it and is what
+    /// `scenes()` and `focused_scene()` actually read. Assigning this directly
+    /// left that cache describing the previous snapshot — so `focused_scene()`
+    /// could hand back a scene OBS no longer has, and acting on it would fire
+    /// `set_scene` for a name that is gone. Go through [`TuiModel::set_snapshot`],
+    /// [`TuiModel::update_snapshot`], or [`TuiModel::clear_snapshot`], which
+    /// re-derive it.
+    snapshot: Option<ObsSnapshot>,
     pub server_status: Option<ServerStatus>,
     pub logs: Vec<TuiLogEntry>,
     pub command_palette: CommandPaletteState,
@@ -506,6 +515,33 @@ impl TuiModel {
     pub fn log_view_start(&self, visible: usize) -> usize {
         let max = self.logs.len().saturating_sub(visible);
         max - self.log_scroll.min(max)
+    }
+
+    /// The daemon's latest view of OBS, if one has arrived.
+    pub fn snapshot(&self) -> Option<&ObsSnapshot> {
+        self.snapshot.as_ref()
+    }
+
+    /// Replace the snapshot and bring everything derived from it up to date.
+    pub fn set_snapshot(&mut self, snapshot: ObsSnapshot) {
+        self.snapshot = Some(snapshot);
+        self.clamp_cursors();
+    }
+
+    /// Forget the snapshot — the daemon has gone away, or has no OBS to
+    /// describe — and clear what was derived from it.
+    pub fn clear_snapshot(&mut self) {
+        self.snapshot = None;
+        self.clamp_cursors();
+    }
+
+    /// Change the snapshot in place, re-deriving afterwards. Does nothing if
+    /// no snapshot has arrived yet.
+    pub fn update_snapshot(&mut self, edit: impl FnOnce(&mut ObsSnapshot)) {
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            edit(snapshot);
+            self.clamp_cursors();
+        }
     }
 
     /// Visible (non-hidden) scenes, in snapshot order. Returns the cached slice; no allocation per call.

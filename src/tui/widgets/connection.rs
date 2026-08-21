@@ -93,7 +93,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             ),
             Line::raw(t!("tui.connection.press_r_to_retry").into_owned()),
         ]
-    } else if let Some(snap) = &model.snapshot {
+    } else if let Some(snap) = model.snapshot() {
         let status = if snap.connected {
             t!("tui.connection.obs_connected")
         } else {
