@@ -6,6 +6,8 @@ use ratatui::{
     widgets::{List, ListItem, ListState},
 };
 
+use rust_i18n::t;
+
 use crate::tui::{
     anim,
     model::{FocusPanel, TuiModel},
@@ -70,11 +72,11 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
             }
             if let Some(group) = &s.group {
                 spans.push(Span::styled(
-                    if model.advanced_ui {
-                        format!("  ⟨{group}⟩")
-                    } else {
-                        format!("  [{group}]")
-                    },
+                    format!(
+                        "  {}{group}{}",
+                        chrome::glyph(model, "⟨", "["),
+                        chrome::glyph(model, "⟩", "]")
+                    ),
                     Style::default().fg(theme.accent_alt),
                 ));
             }
@@ -88,10 +90,12 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
         })
         .collect();
 
+    let title = t!("tui.panels.scenes.title");
+    let hint = t!(model.symbol("tui.panels.scenes.hint", "tui.panels.scenes.hint_ascii"));
     let block = chrome::panel(
         model.symbol("🎬", "S"),
-        "Scenes",
-        model.symbol("[s]  ↵ switch", "[s]  Enter switch"),
+        &title,
+        &hint,
         model.scenes().len(),
         focused,
         model,

@@ -26,6 +26,32 @@ pub struct LayoutAreas {
     pub palette: Rect,
 }
 
+/// Heights (in rows) of the five stacked rows the screen is cut into, top to
+/// bottom: the header, the live-telemetry bar, the dashboard in the middle,
+/// the logs strip, and the command palette at the bottom.
+///
+/// The dashboard is the only row that grows: it is a `Min`, so it absorbs
+/// whatever a taller terminal has spare while the four fixed rows keep their
+/// size. Naming them matters because they are read outside this module — the
+/// which-key popup positions itself relative to the palette row (see
+/// [`PALETTE_ROW_HEIGHT`]) — and because two unrelated rows happening to be
+/// the same number of lines is a coincidence, not a rule.
+const HEADER_ROW_HEIGHT: u16 = 4;
+const LIVE_BAR_ROW_HEIGHT: u16 = 4;
+const DASHBOARD_MIN_HEIGHT: u16 = 6;
+const LOGS_ROW_HEIGHT: u16 = 7;
+
+/// Height of the bottom command-palette row. Public because the which-key
+/// popup floats directly above it and has to know how many rows to clear;
+/// hard-coding a second copy of this number is how the two silently drift
+/// into overlapping. See [`crate::tui::widgets::which_key`].
+pub const PALETTE_ROW_HEIGHT: u16 = 4;
+
+/// Minimum height the scenes/audio row keeps inside the dashboard. It is a
+/// `Min` so it takes the dashboard's spare rows; the profiles/collections row
+/// below it stays at its fixed height.
+const SCENES_AUDIO_MIN_HEIGHT: u16 = 8;
+
 /// Minimum height (in rows) reserved for the profiles/collections row,
 /// deliberately small since those lists are usually short — the
 /// scenes/audio row above it (`Constraint::Min`) absorbs any extra space.
@@ -60,11 +86,11 @@ pub fn compute(frame: &Frame, show_stats: bool) -> LayoutAreas {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
-            Constraint::Length(4),
-            Constraint::Min(6),
-            Constraint::Length(7),
-            Constraint::Length(4),
+            Constraint::Length(HEADER_ROW_HEIGHT),
+            Constraint::Length(LIVE_BAR_ROW_HEIGHT),
+            Constraint::Min(DASHBOARD_MIN_HEIGHT),
+            Constraint::Length(LOGS_ROW_HEIGHT),
+            Constraint::Length(PALETTE_ROW_HEIGHT),
         ])
         .split(area);
 
@@ -115,7 +141,7 @@ pub fn compute(frame: &Frame, show_stats: bool) -> LayoutAreas {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(8),
+            Constraint::Min(SCENES_AUDIO_MIN_HEIGHT),
             Constraint::Length(PROFILES_COLLECTIONS_ROW_HEIGHT),
         ])
         .split(middle);
@@ -223,10 +249,10 @@ mod tests {
     #[test]
     fn chrome_rows_have_room_for_rich_status_content() {
         let areas = compute_for(100, 40);
-        assert_eq!(areas.header.height, 4);
-        assert_eq!(areas.live_bar.height, 4);
-        assert_eq!(areas.logs.height, 7);
-        assert_eq!(areas.palette.height, 4);
+        assert_eq!(areas.header.height, HEADER_ROW_HEIGHT);
+        assert_eq!(areas.live_bar.height, LIVE_BAR_ROW_HEIGHT);
+        assert_eq!(areas.logs.height, LOGS_ROW_HEIGHT);
+        assert_eq!(areas.palette.height, PALETTE_ROW_HEIGHT);
     }
 
     #[test]

@@ -16,6 +16,7 @@ use ratatui::{
     widgets::{BorderType, Paragraph},
 };
 use ratatui_braille_bar::BrailleBar;
+use rust_i18n::t;
 
 use crate::tui::widgets::chrome;
 use crate::tui::{anim, model::TuiModel, spinner, theme::Theme};
@@ -45,9 +46,14 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, include_badges: bool)
     } else {
         anim::blend(theme.border, theme.info, pulse * 0.18)
     };
+    let title_text = format!(
+        "{}{} ",
+        chrome::glyph(model, " ◉ ", " "),
+        t!("tui.panels.live_bar.title")
+    );
     let title = if model.advanced_ui {
         anim::gradient_line(
-            " ◉ LIVE TELEMETRY ",
+            &title_text,
             theme.danger,
             theme.warning,
             model.anim.frame,
@@ -55,35 +61,36 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, include_badges: bool)
         )
     } else {
         Line::styled(
-            " LIVE TELEMETRY ",
+            title_text,
             Style::default()
                 .fg(theme.danger)
                 .add_modifier(Modifier::BOLD),
         )
     };
     let block = chrome::bordered(model, BorderType::Rounded, border, title);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = chrome::frame(f, area, block) else {
         return;
-    }
+    };
 
     let mut first = Vec::new();
     if include_badges {
         first.extend(badges(model, pulse));
-        first.push(separator(model, theme));
+        first.push(chrome::separator(model));
     }
     first.push(Span::styled(
         format!(
             "{} {}",
             model.symbol("🎬", "SCN"),
-            model.current_scene().unwrap_or("no active scene")
+            model
+                .current_scene()
+                .map(str::to_string)
+                .unwrap_or_else(|| t!("tui.panels.live_bar.no_active_scene").into_owned())
         ),
         Style::default().fg(theme.fg),
     ));
 
     if inner.height < 2 {
-        first.push(separator(model, theme));
+        first.push(chrome::separator(model));
         first.push(compact_metrics(model, theme));
         f.render_widget(Paragraph::new(Line::from(first)), inner);
         return;
@@ -135,14 +142,10 @@ fn badges(model: &TuiModel, pulse: f32) -> Vec<Span<'static>> {
 fn throughput_spans(model: &TuiModel, theme: Theme) -> Vec<Span<'static>> {
     let Some(stats) = model.stats() else {
         return vec![
-            separator(model, theme),
-            Span::styled(
-                if model.advanced_ui {
-                    "waiting for OBS metrics…"
-                } else {
-                    "waiting for OBS metrics..."
-                },
-                Style::default().fg(theme.muted),
+            chrome::separator(model),
+            chrome::placeholder_span(
+                model,
+                chrome::typographic(model, &t!("tui.stats.waiting_for_metrics")),
             ),
         ];
     };
@@ -156,14 +159,14 @@ fn throughput_spans(model: &TuiModel, theme: Theme) -> Vec<Span<'static>> {
         .map(|value| format!("{value:.0}kbps"))
         .unwrap_or_else(|| "--kbps".to_string());
     vec![
-        separator(model, theme),
+        chrome::separator(model),
         Span::styled(
             format!("FPS {:.1}", stats.active_fps),
             Style::default()
                 .fg(theme.success)
                 .add_modifier(Modifier::BOLD),
         ),
-        separator(model, theme),
+        chrome::separator(model),
         Span::styled(
             format!(
                 "NET {bitrate} {}",
@@ -179,18 +182,14 @@ fn throughput_spans(model: &TuiModel, theme: Theme) -> Vec<Span<'static>> {
 /// The CPU and memory meter row.
 fn meters_line(model: &TuiModel, theme: Theme) -> Line<'static> {
     let Some(stats) = model.stats() else {
-        return Line::from(vec![Span::styled(
+        return chrome::placeholder_line(
+            model,
             format!(
                 "{} {}",
                 model.symbol("⌁", "~"),
-                if model.advanced_ui {
-                    "telemetry idle — no CPU or memory samples yet"
-                } else {
-                    "telemetry idle - no CPU or memory samples yet"
-                }
+                chrome::typographic(model, &t!("tui.panels.live_bar.telemetry_idle"))
             ),
-            Style::default().fg(theme.muted),
-        )]);
+        );
     };
 
     let cpu_peak = model.cpu_history.peak(stats.cpu_usage_percent);
@@ -205,7 +204,7 @@ fn meters_line(model: &TuiModel, theme: Theme) -> Line<'static> {
         100.0,
         theme.warning,
     );
-    spans.push(separator(model, theme));
+    spans.push(chrome::separator(model));
     spans.extend(meter(
         model,
         "MEM",
@@ -295,26 +294,11 @@ fn compact_metrics(model: &TuiModel, theme: Theme) -> Span<'static> {
             ),
             Style::default().fg(theme.info),
         ),
-        None => Span::styled(
-            if model.advanced_ui {
-                "telemetry waiting…"
-            } else {
-                "telemetry waiting..."
-            },
-            Style::default().fg(theme.muted),
+        None => chrome::placeholder_span(
+            model,
+            chrome::typographic(model, &t!("tui.panels.live_bar.telemetry_waiting")),
         ),
     }
-}
-
-fn separator(model: &TuiModel, theme: Theme) -> Span<'static> {
-    Span::styled(
-        if model.advanced_ui {
-            "  │  "
-        } else {
-            "  |  "
-        },
-        Style::default().fg(theme.border),
-    )
 }
 
 #[cfg(test)]

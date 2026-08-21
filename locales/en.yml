@@ -92,3 +92,86 @@ tui:
     waiting_for_state: "Waiting for state..."
     title: " Connection "
     title_unavailable: " obsctl — daemon unavailable "
+
+  # --- TUI widget layer ---------------------------------------------------
+  # Everything the dashboard panels draw. A key ending in `_ascii` is the
+  # plain-ASCII spelling of the key above it, for terminals that cannot show
+  # arrows, box drawing or emoji. The widget picks between the pair with
+  # `TuiModel::symbol` where the difference is a pictogram, and with
+  # `chrome::glyph` where it is box drawing — so the two keys must stay
+  # adjacent and describe the same thing. Keep this whole block in the same
+  # key order in contrib/locales/uk.yml.
+
+  audio:
+    title: "Audio Matrix"
+    hint: "[a]  ↑↓ gain  m mute"
+    hint_ascii: "[a]  ^v gain  m mute"
+    no_inputs: "no audio inputs"
+    too_narrow: "too narrow"
+    # OBS reports -inf dB for a fader pulled all the way down.
+    gain_silent: "-inf dB"
+    muted: "mute"
+
+  stats:
+    title: "Stats // Stream Health"
+    hint: "frames"
+    waiting_for_metrics: "waiting for OBS metrics…"
+    # Which frame counters the drop rows are counting: the current broadcast,
+    # or everything since OBS itself started.
+    scope_this_stream: "this stream"
+    scope_since_launch: "since launch"
+    row_render: "RENDER"
+    row_output: "OUTPUT"
+    verdict_healthy: "HEALTHY"
+    verdict_healthy_detail: "encoder keeping up with OBS"
+    verdict_strained: "STRAINED"
+    verdict_strained_detail: "frames are starting to slip"
+    verdict_dropping: "DROPPING"
+    verdict_dropping_detail: "reduce bitrate or scene load"
+    verdict_measuring: "MEASURING"
+    verdict_measuring_detail: "collecting samples"
+
+  panels:
+    scenes:
+      title: "Scenes"
+      hint: "[s]  ↵ switch"
+      hint_ascii: "[s]  Enter switch"
+
+    profiles:
+      title: "Profiles"
+      hint: "[p]  ↵ switch"
+      hint_ascii: "[p]  Enter switch"
+
+    collections:
+      title: "Collections"
+      hint: "[c]  ↵ switch"
+      hint_ascii: "[c]  Enter switch"
+
+    logs:
+      title: "Logs // Event Stream"
+      hint_following: "live daemon feed"
+      hint_scrolled_back: "↑ scrolled back  wheel/Esc to follow"
+      hint_scrolled_back_ascii: "^ scrolled back  wheel/Esc to follow"
+
+    live_bar:
+      title: "LIVE TELEMETRY"
+      no_active_scene: "no active scene"
+      telemetry_idle: "telemetry idle — no CPU or memory samples yet"
+      telemetry_waiting: "telemetry waiting…"
+
+    palette:
+      title: "Command Palette"
+      hint_typing: "type command  ↵ run  ⇥ complete  esc close"
+      hint_typing_ascii: "type command  Enter run  Tab complete  Esc close"
+      hint_idle: ": open  <space> which-key  q quit"
+      keys: "  ◈  : command  │  <space> which-key  │  gg/G jump  │  ⇥ pane  │  q quit"
+      keys_ascii: "  >  : command  |  <space> which-key  |  gg/G jump  |  Tab pane  |  q quit"
+      no_completions: "  no completions"
+
+    settings:
+      title: " ⚙ Settings // Appearance Lab // ↑↓/jk preview · Enter apply · Esc cancel "
+      title_ascii: " Settings // Appearance // arrows preview | Enter apply | Esc cancel "
+      themes: " Themes // %{count} palettes "
+      preview: " Preview: %{theme} "
+      preview_heading: "◈ OBSCTL // THEME PREVIEW"
+      preview_heading_ascii: "OBSCTL // THEME PREVIEW"

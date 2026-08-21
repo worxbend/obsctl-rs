@@ -16,6 +16,8 @@ use ratatui::{
     widgets::Paragraph,
 };
 
+use rust_i18n::t;
+
 use crate::tui::{
     anim,
     model::{FrameCounters, TuiModel},
@@ -72,33 +74,31 @@ impl Health {
 }
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
-    let theme = model.theme;
     let stats = model.stats().copied();
 
+    let title = t!("tui.stats.title");
+    let hint = t!("tui.stats.hint");
     let block = chrome::panel(
         model.symbol("⚡", "%"),
-        "Stats // Stream Health",
-        "frames",
+        &title,
+        &hint,
         stats.map(|s| s.active_fps.round() as usize).unwrap_or(0),
         false,
         model,
     );
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = chrome::frame(f, area, block) else {
         return;
-    }
+    };
 
     let Some(stats) = stats else {
         f.render_widget(
-            Paragraph::new(Line::styled(
-                if model.advanced_ui {
-                    " waiting for OBS metrics…"
-                } else {
-                    " waiting for OBS metrics..."
-                },
-                Style::default().fg(theme.muted),
-            )),
+            chrome::placeholder(
+                model,
+                format!(
+                    " {}",
+                    chrome::typographic(model, &t!("tui.stats.waiting_for_metrics"))
+                ),
+            ),
             inner,
         );
         return;
@@ -108,8 +108,11 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     // broadcast, otherwise OBS's since-launch totals — labelled either way
     // so the numbers are never ambiguous.
     let (counters, scope) = match model.stream_frame_drops() {
-        Some(drops) => (drops, "this stream"),
-        None => (FrameCounters::from_stats(&stats), "since launch"),
+        Some(drops) => (drops, t!("tui.stats.scope_this_stream")),
+        None => (
+            FrameCounters::from_stats(&stats),
+            t!("tui.stats.scope_since_launch"),
+        ),
     };
 
     let target_fps = target_fps(model, stats.active_fps);
@@ -131,21 +134,21 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         ),
         drop_line(
             model,
-            "RENDER",
+            &t!("tui.stats.row_render"),
             counters.render_skipped,
             counters.render_total,
             render_rate,
             render_health,
-            scope,
+            &scope,
         ),
         drop_line(
             model,
-            "OUTPUT",
+            &t!("tui.stats.row_output"),
             counters.output_skipped,
             counters.output_total,
             output_rate,
             output_health,
-            scope,
+            &scope,
         ),
         verdict_line(
             model,
@@ -199,12 +202,12 @@ fn frame_time_line(
 
 fn drop_line(
     model: &TuiModel,
-    name: &'static str,
+    name: &str,
     skipped: u64,
     total: u64,
     rate: Option<f64>,
     health: Health,
-    scope: &'static str,
+    scope: &str,
 ) -> Line<'static> {
     let theme = model.theme;
     let percent = match rate {
@@ -231,20 +234,24 @@ fn verdict_line(model: &TuiModel, health: Health) -> Line<'static> {
     let (icon, headline, detail) = match health {
         Health::Good => (
             model.symbol("✔", "+"),
-            "HEALTHY",
-            "encoder keeping up with OBS",
+            t!("tui.stats.verdict_healthy"),
+            t!("tui.stats.verdict_healthy_detail"),
         ),
         Health::Strained => (
             model.symbol("▲", "!"),
-            "STRAINED",
-            "frames are starting to slip",
+            t!("tui.stats.verdict_strained"),
+            t!("tui.stats.verdict_strained_detail"),
         ),
         Health::Bad => (
             model.symbol("◆", "x"),
-            "DROPPING",
-            "reduce bitrate or scene load",
+            t!("tui.stats.verdict_dropping"),
+            t!("tui.stats.verdict_dropping_detail"),
         ),
-        Health::Unknown => (model.symbol("·", "."), "MEASURING", "collecting samples"),
+        Health::Unknown => (
+            model.symbol("·", "."),
+            t!("tui.stats.verdict_measuring"),
+            t!("tui.stats.verdict_measuring_detail"),
+        ),
     };
     // The verdict is the one row that should catch the eye when it turns
     // bad, so a degraded stream pulses in time with the LIVE badge.
@@ -286,11 +293,8 @@ fn value(text: String, color: Color) -> Span<'static> {
 /// A filled/empty bar showing how much of the per-frame time budget the
 /// average render is using.
 fn budget_bar(model: &TuiModel, usage: Option<f64>) -> String {
-    let (full, empty) = if model.advanced_ui {
-        ('█', '░')
-    } else {
-        ('#', '-')
-    };
+    let full = chrome::glyph_char(model, '█', '#');
+    let empty = chrome::glyph_char(model, '░', '-');
     let Some(usage) = usage else {
         return std::iter::repeat_n(empty, GRAPH_WIDTH).collect();
     };

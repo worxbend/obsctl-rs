@@ -10,8 +10,8 @@ const PROFILES: NameListPanel = NameListPanel {
     names: TuiModel::profiles,
     current: TuiModel::current_profile,
     icon: ("🎛", "P"),
-    title: "Profiles",
-    hint: ("[p]  ↵ switch", "[p]  Enter switch"),
+    title_key: "tui.panels.profiles.title",
+    hint_keys: ("tui.panels.profiles.hint", "tui.panels.profiles.hint_ascii"),
 };
 
 #[must_use]

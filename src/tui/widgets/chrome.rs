@@ -1,8 +1,10 @@
 use ratatui::{
+    Frame,
+    layout::Rect,
     style::{Color, Modifier, Style},
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 
 use crate::tui::{anim, model::TuiModel};
@@ -41,6 +43,63 @@ pub fn bordered<'a>(
             .title(title),
         model,
     )
+}
+
+/// Pick between a box-drawing / chart / typography glyph and its plain-ASCII
+/// stand-in, on `advanced_ui` alone.
+///
+/// The model has two separate switches. `show_icons` is about emoji and
+/// pictograms — 🎬, ⚡, ✔ — which some terminals render at the wrong width or
+/// not at all. `advanced_ui` is about whether the terminal can do Unicode
+/// box drawing and shading at all. [`TuiModel::symbol`] is the twin of this
+/// function for the first switch (it is gated on `rich_ui()`, meaning both
+/// must be on); this one is for the second.
+///
+/// Widgets used to write the second decision out inline, thirty-five times,
+/// and one of them reached for the wrong switch — so with icons off but
+/// Unicode on, the status pane drew its big letters out of `#` while the
+/// settings swatches and the stats bars beside it stayed `█`. Naming the
+/// decision is what stops the two from being answered differently.
+pub fn glyph(model: &TuiModel, advanced: &'static str, plain: &'static str) -> &'static str {
+    if model.advanced_ui { advanced } else { plain }
+}
+
+/// [`glyph`] for the call sites that build a string a character at a time,
+/// such as the fill and empty cells of a bar.
+pub fn glyph_char(model: &TuiModel, advanced: char, plain: char) -> char {
+    if model.advanced_ui { advanced } else { plain }
+}
+
+/// The vertical rule drawn between two readouts sharing one row.
+///
+/// The live bar and the status pane each had their own copy, identical down
+/// to the two spaces either side; one file changing its gutter would have
+/// silently unaligned the two rows the user sees stacked on top of each
+/// other.
+pub fn separator(model: &TuiModel) -> Span<'static> {
+    Span::styled(
+        glyph(model, "  │  ", "  |  "),
+        Style::default().fg(model.theme.border),
+    )
+}
+
+/// Rewrite the typographic punctuation an ASCII-only terminal cannot show —
+/// the ellipsis `…` and the em dash `—` — into plain equivalents, unless the
+/// model is drawing the advanced UI.
+///
+/// Five messages used to be stored twice, once spelled with the typographic
+/// character and once with the ASCII one, sitting in the two arms of an
+/// `if`. That is two chances to fix a wording and only remember one of them,
+/// and it had already produced five slightly different spellings of the same
+/// idea. Writing the sentence once in its typographic form and passing it
+/// through here keeps the pair in step — which is what `connection` was
+/// already doing by hand for its em dash.
+pub fn typographic(model: &TuiModel, text: &str) -> String {
+    if model.advanced_ui {
+        text.to_string()
+    } else {
+        text.replace('…', "...").replace('—', "-")
+    }
 }
 
 /// Swap a block's box-drawing border for the ASCII one when the model is in
@@ -109,6 +168,50 @@ pub fn panel<'a>(
         }))
         .title(Line::from(title_spans));
     ascii_aware(block, model)
+}
+
+/// Draw `block` into `area` and hand back the interior left to fill, or
+/// `None` when that interior has collapsed to nothing.
+///
+/// Drawing a panel is always the same three steps: measure the interior of
+/// the border, paint the border, then stop if there is no interior left. That
+/// last case happens on genuinely tiny terminals, where a pane can be squeezed
+/// down to fewer columns than its own border needs. Only four of the eleven
+/// panels wrote the check out; the rest were relying on Ratatui quietly
+/// clipping whatever they drew, which works but is indistinguishable from
+/// having forgotten. Going through here makes the check part of drawing a
+/// frame rather than something each panel remembers separately.
+///
+/// Callers read as `let Some(inner) = chrome::frame(f, area, block) else { return; };`
+pub fn frame(f: &mut Frame, area: Rect, block: Block) -> Option<Rect> {
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    (inner.width > 0 && inner.height > 0).then_some(inner)
+}
+
+/// The muted one-liner a panel shows in place of content it does not have:
+/// no audio inputs, no metrics from OBS yet, nothing to complete.
+///
+/// Five panels each built this line themselves, and had already drifted apart
+/// on styling. The wording — and the indentation baked into it, which lines
+/// the text up with whatever else that panel draws — stays with the caller,
+/// because that part legitimately differs; the colour is decided here so an
+/// empty pane reads the same wherever the user meets one.
+pub fn placeholder(model: &TuiModel, text: impl Into<String>) -> Paragraph<'static> {
+    Paragraph::new(placeholder_line(model, text))
+}
+
+/// [`placeholder`] as a bare [`Line`], for the panels that fold their empty
+/// state into a paragraph they are already assembling line by line.
+pub fn placeholder_line(model: &TuiModel, text: impl Into<String>) -> Line<'static> {
+    Line::from(placeholder_span(model, text))
+}
+
+/// [`placeholder`] as a bare [`Span`], for the two spots where the empty
+/// state is one phrase inside a row that also carries other things — the live
+/// bar's throughput slot and its compact single-line fallback.
+pub fn placeholder_span(model: &TuiModel, text: impl Into<String>) -> Span<'static> {
+    Span::styled(text.into(), Style::default().fg(model.theme.muted))
 }
 
 pub fn status_dot(active: bool, fancy: bool) -> &'static str {

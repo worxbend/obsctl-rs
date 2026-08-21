@@ -14,6 +14,8 @@ use ratatui::{
     widgets::{List, ListItem, ListState},
 };
 
+use rust_i18n::t;
+
 use crate::tui::{
     model::{FocusPanel, TuiModel},
     widgets::chrome,
@@ -29,9 +31,14 @@ pub struct NameListPanel {
     pub current: fn(&TuiModel) -> Option<&str>,
     /// Panel icon, as `(rich, ascii)` — the model picks per `rich_ui`.
     pub icon: (&'static str, &'static str),
-    pub title: &'static str,
-    /// Key hint in the panel's top-right corner, as `(rich, ascii)`.
-    pub hint: (&'static str, &'static str),
+    /// Translation key for the panel title. A key rather than the text
+    /// itself because these panels are built as `const`s, which cannot call
+    /// `t!` — so the lookup is deferred to render time.
+    pub title_key: &'static str,
+    /// Translation keys for the key hint in the panel's top-right corner, as
+    /// `(rich, ascii)`. The model picks per `rich_ui`, the same way the icon
+    /// above it does.
+    pub hint_keys: (&'static str, &'static str),
 }
 
 /// Returns the scroll offset Ratatui settled on, so the mouse code can map a
@@ -73,10 +80,12 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, spec: &NameListPanel)
         })
         .collect();
 
+    let title = t!(spec.title_key);
+    let hint = t!(model.symbol(spec.hint_keys.0, spec.hint_keys.1));
     let block = chrome::panel(
         model.symbol(spec.icon.0, spec.icon.1),
-        spec.title,
-        model.symbol(spec.hint.0, spec.hint.1),
+        &title,
+        &hint,
         names.len(),
         focused,
         model,

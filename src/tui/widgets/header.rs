@@ -17,9 +17,14 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     } else {
         theme.border
     };
+    let title_text = chrome::glyph(
+        model,
+        " ◈ OBSCTL // BROADCAST COMMAND CENTER ",
+        " OBSCTL // BROADCAST COMMAND CENTER ",
+    );
     let title = if model.advanced_ui {
         anim::gradient_line(
-            " ◈ OBSCTL // BROADCAST COMMAND CENTER ",
+            title_text,
             theme.accent,
             theme.accent_alt,
             model.anim.frame,
@@ -27,15 +32,16 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         )
     } else {
         Line::styled(
-            " OBSCTL // BROADCAST COMMAND CENTER ",
+            title_text,
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )
     };
     let block = chrome::bordered(model, BorderType::Rounded, border, title);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let Some(inner) = chrome::frame(f, area, block) else {
+        return;
+    };
 
     let brand_icon = model.symbol("⚡", "#");
     let first = Line::from(vec![
@@ -50,11 +56,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             Style::default().fg(theme.muted),
         ),
         Span::styled(
-            if model.advanced_ui {
-                "  •  "
-            } else {
-                "  |  "
-            },
+            chrome::glyph(model, "  •  ", "  |  "),
             Style::default().fg(theme.border),
         ),
         Span::styled(
@@ -97,7 +99,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     if let Some(scene) = model.current_scene() {
         status.extend([
             Span::styled(
-                if model.advanced_ui { "  ◆ " } else { "  > " },
+                chrome::glyph(model, "  ◆ ", "  > "),
                 Style::default().fg(theme.accent_alt),
             ),
             Span::styled(
@@ -109,7 +111,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     if let Some(profile) = model.current_profile() {
         status.extend([
             Span::styled(
-                if model.advanced_ui { "  ◇ " } else { "  - " },
+                chrome::glyph(model, "  ◇ ", "  - "),
                 Style::default().fg(theme.info),
             ),
             Span::styled(

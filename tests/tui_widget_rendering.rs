@@ -496,6 +496,33 @@ fn status_pane_is_ascii_in_simplified_mode() {
     );
 }
 
+/// The two appearance switches are independent: `show_icons` turns off emoji
+/// and pictograms, `advanced_ui` turns off Unicode box drawing and shading.
+/// A solid block is the second kind, so turning icons off on a terminal that
+/// still handles Unicode must leave every block glyph on screen alone — the
+/// status pane's big letters included, the settings colour swatches and the
+/// stats budget bar beside them having always behaved this way.
+#[test]
+fn block_glyphs_follow_unicode_support_rather_than_the_icon_switch() {
+    let mut model = model_connected();
+    model.advanced_ui = true;
+    model.show_icons = false;
+    let mut t = term(32, 8);
+    t.draw(|f| {
+        widgets::status::render(f, Rect::new(0, 0, 32, 8), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.contains(&block_top_row("IDLE")),
+        "block letters stay Unicode when only icons are switched off; got: {out}"
+    );
+    assert!(
+        !out.contains(&obsctl_rs::tui::spinner::block_word("IDLE", '#')[0]),
+        "the ASCII fallback belongs to advanced_ui, not show_icons; got: {out}"
+    );
+}
+
 #[test]
 fn status_pane_survives_a_degenerate_area() {
     let model = model_connected();
@@ -1196,7 +1223,14 @@ fn command_palette_renders_last_result() {
 fn splash_renders_wordmark_tagline_and_progress_bar() {
     let mut t = term(60, 12);
     t.draw(|f| {
-        widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 0, 40);
+        widgets::splash::render_with_appearance(
+            f,
+            obsctl_rs::tui::theme::Theme::default_theme(),
+            0,
+            40,
+            true,
+            true,
+        );
     })
     .unwrap();
     let out = buf_string(&t);
@@ -1223,7 +1257,14 @@ fn splash_renders_wordmark_tagline_and_progress_bar() {
 fn splash_renders_large_logo_and_layered_loaders() {
     let mut t = term(100, 20);
     t.draw(|f| {
-        widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 12, 40);
+        widgets::splash::render_with_appearance(
+            f,
+            obsctl_rs::tui::theme::Theme::default_theme(),
+            12,
+            40,
+            true,
+            true,
+        );
     })
     .unwrap();
     let out = buf_string(&t);
@@ -1242,7 +1283,14 @@ fn splash_renders_large_logo_and_layered_loaders() {
 fn splash_progress_bar_fills_as_frames_advance() {
     let mut t = term(60, 12);
     t.draw(|f| {
-        widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 40, 40);
+        widgets::splash::render_with_appearance(
+            f,
+            obsctl_rs::tui::theme::Theme::default_theme(),
+            40,
+            40,
+            true,
+            true,
+        );
     })
     .unwrap();
     let out = buf_string(&t);
@@ -1256,7 +1304,14 @@ fn splash_progress_bar_fills_as_frames_advance() {
 fn splash_renders_the_preparing_band() {
     let mut t = term(100, 20);
     t.draw(|f| {
-        widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 12, 40);
+        widgets::splash::render_with_appearance(
+            f,
+            obsctl_rs::tui::theme::Theme::default_theme(),
+            12,
+            40,
+            true,
+            true,
+        );
     })
     .unwrap();
     let out = buf_string(&t);
@@ -1281,7 +1336,14 @@ fn splash_preparing_band_shimmers_between_renders() {
     let render_once = || {
         let mut t = term(100, 20);
         t.draw(|f| {
-            widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 12, 40);
+            widgets::splash::render_with_appearance(
+                f,
+                obsctl_rs::tui::theme::Theme::default_theme(),
+                12,
+                40,
+                true,
+                true,
+            );
         })
         .unwrap();
         buf_string(&t)
@@ -1318,7 +1380,14 @@ fn splash_preparing_band_is_ascii_noise_in_simplified_mode() {
 fn splash_survives_minimum_terminal_size() {
     let mut t = term(20, 4);
     t.draw(|f| {
-        widgets::splash::render(f, obsctl_rs::tui::theme::Theme::default_theme(), 5, 40);
+        widgets::splash::render_with_appearance(
+            f,
+            obsctl_rs::tui::theme::Theme::default_theme(),
+            5,
+            40,
+            true,
+            true,
+        );
     })
     .unwrap();
 }

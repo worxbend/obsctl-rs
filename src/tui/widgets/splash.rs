@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -26,10 +26,35 @@ const LARGE_LOGO: &[&str] = &[
     " ╚═════╝ ╚═════╝ ╚══════╝ ╚═════╝   ╚═╝   ╚══════╝",
 ];
 
-pub fn render(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
-    render_with_symbols(f, theme, frame, total_frames, true);
+/// Centre a card of `width` x `height` cells inside `area`, clamped to what
+/// `area` actually has.
+///
+/// All three splash variants draw a single card floating in the middle of an
+/// otherwise empty frame, so each one used to spell out the same pair of
+/// splits: a vertical one with the card's height between two elastic gaps,
+/// then a horizontal one with its width between two more. Written three times
+/// it was three chances to centre a card slightly differently.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let rows = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(height.min(area.height)),
+        Constraint::Min(0),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(width.min(area.width)),
+        Constraint::Min(0),
+    ])
+    .split(rows[1])[1]
 }
 
+/// Animated startup identity with a responsive large wordmark, moving color
+/// wave, orbiting symbols, and a segmented multi-color boot indicator.
+///
+/// `advanced_ui` picks between the Unicode splash and the ASCII one;
+/// `show_icons` only chooses glyphs inside the Unicode one, matching how
+/// `TuiModel` gates the rest of the interface.
 pub fn render_with_appearance(
     f: &mut Frame,
     theme: Theme,
@@ -38,22 +63,11 @@ pub fn render_with_appearance(
     show_icons: bool,
     advanced_ui: bool,
 ) {
-    if advanced_ui {
-        render_with_symbols(f, theme, frame, total_frames, show_icons);
-    } else {
+    if !advanced_ui {
         render_ascii(f, theme, frame, total_frames);
+        return;
     }
-}
 
-/// Animated startup identity with a responsive large wordmark, moving color
-/// wave, orbiting symbols, and a segmented multi-color boot indicator.
-pub fn render_with_symbols(
-    f: &mut Frame,
-    theme: Theme,
-    frame: u64,
-    total_frames: u64,
-    show_icons: bool,
-) {
     let area = f.area();
     let large = area.width >= 76 && area.height >= 16;
     if large {
@@ -61,26 +75,7 @@ pub fn render_with_symbols(
         return;
     }
 
-    let desired_height = 13.min(area.height);
-    let desired_width = 60.min(area.width);
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(desired_height),
-            Constraint::Min(0),
-        ])
-        .split(area);
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(desired_width),
-            Constraint::Min(0),
-        ])
-        .split(rows[1]);
-    let card = cols[1];
+    let card = centered(area, 60, 13);
 
     let pulse = ((frame as f32 * 0.18).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
     let border = anim::blend(theme.accent, theme.accent_alt, pulse);
@@ -99,8 +94,9 @@ pub fn render_with_symbols(
             ),
             Span::styled(format!(" {orbit} "), Style::default().fg(theme.info)),
         ]));
-    let inner = block.inner(card);
-    f.render_widget(block, card);
+    let Some(inner) = chrome::frame(f, card, block) else {
+        return;
+    };
 
     let mut lines = vec![Line::raw("")];
     lines.push(
@@ -131,7 +127,7 @@ pub fn render_with_symbols(
     }
 
     let progress = (frame as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
-    lines.push(progress_line(progress, theme, frame).alignment(Alignment::Center));
+    lines.push(progress_line(progress, theme, frame, true).alignment(Alignment::Center));
     lines.push(
         Line::styled(
             boot_message(progress, show_icons),
@@ -151,37 +147,17 @@ fn render_ascii(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
         "| |_| | |_) |___) | |___  | | | |___ ",
         " \\___/|____/|____/ \\____| |_| |_____|",
     ];
-    let area = f.area();
-    let height = 15.min(area.height);
-    let width = 64.min(area.width);
-    let rows = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(height),
-        Constraint::Min(0),
-    ])
-    .split(area);
-    let cols = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(width),
-        Constraint::Min(0),
-    ])
-    .split(rows[1]);
+    let area = centered(f.area(), 64, 15);
     let card = Block::default()
         .borders(Borders::ALL)
         .border_set(chrome::ASCII_BORDER)
         .border_style(Style::default().fg(theme.accent))
         .title(" OBSCTL STARTUP ");
-    let inner = card.inner(cols[1]);
-    f.render_widget(card, cols[1]);
+    let Some(inner) = chrome::frame(f, area, card) else {
+        return;
+    };
 
     let progress = (frame as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
-    let filled = (progress * 30.0).round() as usize;
-    let bar = format!(
-        "[{}{}] {:>3}%",
-        "#".repeat(filled),
-        ".".repeat(30usize.saturating_sub(filled)),
-        (progress * 100.0).round() as u8
-    );
     let tick = spinner::splash_frame(false, frame);
     let mut lines = ASCII_LOGO
         .iter()
@@ -217,7 +193,7 @@ fn render_ascii(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
         false,
     ));
     lines.extend([
-        Line::styled(bar, Style::default().fg(theme.info)).alignment(Alignment::Center),
+        progress_line(progress, theme, frame, false).alignment(Alignment::Center),
         Line::styled(
             format!("{tick} initializing studio link"),
             Style::default().fg(theme.muted),
@@ -228,22 +204,7 @@ fn render_ascii(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
 }
 
 fn render_large(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64, show_icons: bool) {
-    let area = f.area();
-    let stage_height = 16.min(area.height);
-    let stage_width = 88.min(area.width);
-    let stage_rows = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(stage_height),
-        Constraint::Min(0),
-    ])
-    .split(area);
-    let stage_cols = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(stage_width),
-        Constraint::Min(0),
-    ])
-    .split(stage_rows[1]);
-    let stage = stage_cols[1];
+    let stage = centered(f.area(), 88, 16);
     let sections = Layout::vertical([
         Constraint::Length(6),
         Constraint::Length(3),
@@ -291,8 +252,9 @@ fn render_large(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64, show
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
-    let inner = card.inner(sections[2]);
-    f.render_widget(card, sections[2]);
+    let Some(inner) = chrome::frame(f, sections[2], card) else {
+        return;
+    };
 
     let progress = (frame as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
     let mut lines = vec![
@@ -306,7 +268,7 @@ fn render_large(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64, show
         show_icons,
     ));
     lines.extend([
-        progress_line(progress, theme, frame).alignment(Alignment::Center),
+        progress_line(progress, theme, frame, true).alignment(Alignment::Center),
         Line::styled(
             boot_message(progress, show_icons),
             Style::default().fg(theme.muted),
@@ -440,8 +402,29 @@ fn liquid_wave(frame: u64, width: usize) -> String {
         .collect()
 }
 
-fn progress_line(progress: f32, theme: Theme, frame: u64) -> Line<'static> {
+/// The boot progress bar, in whichever alphabet the splash is drawing in.
+///
+/// Both splashes show a bar of exactly [`PROGRESS_BAR_WIDTH`] cells; only the
+/// glyphs and the coloring differ, so both live here and the width is written
+/// down once. The Unicode bar tints every filled cell along the accent
+/// gradient and rides a blinking cursor glyph on its leading edge, which needs
+/// one span per cell. The ASCII bar has no per-cell color to express, so it is
+/// a single bracketed string.
+fn progress_line(progress: f32, theme: Theme, frame: u64, rich: bool) -> Line<'static> {
     let filled = (progress * PROGRESS_BAR_WIDTH as f32).round() as usize;
+    let percent = (progress * 100.0).round() as u8;
+
+    if !rich {
+        return Line::styled(
+            format!(
+                "[{}{}] {percent:>3}%",
+                "#".repeat(filled),
+                ".".repeat(PROGRESS_BAR_WIDTH.saturating_sub(filled))
+            ),
+            Style::default().fg(theme.info),
+        );
+    }
+
     let mut spans = vec![Span::styled("  ", Style::default())];
     for index in 0..PROGRESS_BAR_WIDTH {
         if index < filled {
@@ -460,7 +443,7 @@ fn progress_line(progress: f32, theme: Theme, frame: u64) -> Line<'static> {
         }
     }
     spans.push(Span::styled(
-        format!("  {:>3}%", (progress * 100.0).round() as u8),
+        format!("  {percent:>3}%"),
         Style::default()
             .fg(theme.warning)
             .add_modifier(Modifier::BOLD),

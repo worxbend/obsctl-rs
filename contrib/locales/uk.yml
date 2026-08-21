@@ -96,3 +96,80 @@ tui:
     waiting_for_state: "Очікування стану..."
     title: " З'єднання "
     title_unavailable: " obsctl — демон недоступний "
+
+  # --- TUI widget layer ---------------------------------------------------
+  # Same block, same order, as locales/en.yml. A key ending in `_ascii` is the
+  # plain-ASCII spelling of the key above it; keep the pair adjacent. Values
+  # left in English are keyboard names and short technical labels where a
+  # translation would be less recognisable than the original.
+
+  audio:
+    title: "Мікшер аудіо"
+    hint: "[a]  ↑↓ гучність  m без звуку"
+    hint_ascii: "[a]  ^v гучність  m без звуку"
+    no_inputs: "немає аудіовходів"
+    too_narrow: "замало місця"
+    gain_silent: "-inf dB"
+    muted: "тиша"
+
+  stats:
+    title: "Статистика // Стан трансляції"
+    hint: "кадри"
+    waiting_for_metrics: "очікування метрик OBS…"
+    scope_this_stream: "ця трансляція"
+    scope_since_launch: "від запуску"
+    row_render: "RENDER"
+    row_output: "OUTPUT"
+    verdict_healthy: "СТАБІЛЬНО"
+    verdict_healthy_detail: "кодувальник встигає за OBS"
+    verdict_strained: "НАПРУЖЕНО"
+    verdict_strained_detail: "кадри починають запізнюватися"
+    verdict_dropping: "ВТРАТИ"
+    verdict_dropping_detail: "зменште бітрейт або складність сцени"
+    verdict_measuring: "ВИМІРЮВАННЯ"
+    verdict_measuring_detail: "збираємо зразки"
+
+  panels:
+    scenes:
+      title: "Сцени"
+      hint: "[s]  ↵ перемкнути"
+      hint_ascii: "[s]  Enter перемкнути"
+
+    profiles:
+      title: "Профілі"
+      hint: "[p]  ↵ перемкнути"
+      hint_ascii: "[p]  Enter перемкнути"
+
+    collections:
+      title: "Колекції"
+      hint: "[c]  ↵ перемкнути"
+      hint_ascii: "[c]  Enter перемкнути"
+
+    logs:
+      title: "Журнал // Потік подій"
+      hint_following: "живий потік демона"
+      hint_scrolled_back: "↑ прокручено назад  колесо/Esc щоб стежити"
+      hint_scrolled_back_ascii: "^ прокручено назад  колесо/Esc щоб стежити"
+
+    live_bar:
+      title: "ЖИВА ТЕЛЕМЕТРІЯ"
+      no_active_scene: "немає активної сцени"
+      telemetry_idle: "телеметрія неактивна — ще немає даних про CPU чи пам'ять"
+      telemetry_waiting: "очікування телеметрії…"
+
+    palette:
+      title: "Палітра команд"
+      hint_typing: "введіть команду  ↵ виконати  ⇥ доповнити  esc закрити"
+      hint_typing_ascii: "введіть команду  Enter виконати  Tab доповнити  Esc закрити"
+      hint_idle: ": відкрити  <space> which-key  q вихід"
+      keys: "  ◈  : команда  │  <space> which-key  │  gg/G перехід  │  ⇥ панель  │  q вихід"
+      keys_ascii: "  >  : команда  |  <space> which-key  |  gg/G перехід  |  Tab панель  |  q вихід"
+      no_completions: "  немає доповнень"
+
+    settings:
+      title: " ⚙ Налаштування // Вигляд // ↑↓/jk перегляд · Enter застосувати · Esc скасувати "
+      title_ascii: " Налаштування // Вигляд // стрілки перегляд | Enter застосувати | Esc скасувати "
+      themes: " Теми // %{count} палітр "
+      preview: " Перегляд: %{theme} "
+      preview_heading: "◈ OBSCTL // ПЕРЕГЛЯД ТЕМИ"
+      preview_heading_ascii: "OBSCTL // ПЕРЕГЛЯД ТЕМИ"

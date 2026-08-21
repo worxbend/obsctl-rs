@@ -50,12 +50,7 @@ pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
         ),
     ];
 
-    let unavailable_title = t!("tui.connection.title_unavailable");
-    let unavailable_title = if model.advanced_ui {
-        unavailable_title.into_owned()
-    } else {
-        unavailable_title.replace('—', "-")
-    };
+    let unavailable_title = chrome::typographic(model, &t!("tui.connection.title_unavailable"));
     let title = if model.advanced_ui {
         anim::gradient_line(
             &unavailable_title,
@@ -78,8 +73,9 @@ pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
         theme.danger
     };
     let block = chrome::bordered(model, BorderType::Double, border_color, title);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let Some(inner) = chrome::frame(f, area, block) else {
+        return;
+    };
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -119,7 +115,8 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         theme.border,
         t!("tui.connection.title").into_owned(),
     );
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let Some(inner) = chrome::frame(f, area, block) else {
+        return;
+    };
     f.render_widget(Paragraph::new(lines), inner);
 }

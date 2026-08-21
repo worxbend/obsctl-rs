@@ -60,11 +60,9 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
                 .add_modifier(Modifier::BOLD),
         ),
     );
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = chrome::frame(f, area, block) else {
         return;
-    }
+    };
 
     let mut lines = if fits_block_form(&states, inner) {
         block_form(&states, model, pulse)
@@ -97,7 +95,12 @@ fn block_row_width(states: &[BroadcastState]) -> usize {
 }
 
 fn block_form(states: &[BroadcastState], model: &TuiModel, pulse: f32) -> Vec<Line<'static>> {
-    let fill = if model.rich_ui() { '█' } else { '#' };
+    // A solid block is box drawing, not a pictogram, so it follows
+    // `advanced_ui` like the settings swatches and the stats budget bar do.
+    // This used to read `rich_ui()`, which also demands `show_icons`, so a
+    // user who had turned icons off but kept Unicode on saw these letters
+    // built out of `#` while every other block glyph on screen stayed `█`.
+    let fill = chrome::glyph_char(model, '█', '#');
 
     // Words are laid out column-wise (one word per state, side by side) but
     // rendered row-wise, so fan each word's rows out into the shared row
@@ -133,14 +136,7 @@ fn detail_line(states: &[BroadcastState], model: &TuiModel, pulse: f32) -> Line<
     let mut spans = Vec::with_capacity(states.len() * 2);
     for (index, state) in states.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled(
-                if model.advanced_ui {
-                    "  │  "
-                } else {
-                    "  |  "
-                },
-                Style::default().fg(theme.border),
-            ));
+            spans.push(chrome::separator(model));
         }
         spans.push(Span::styled(
             format!(

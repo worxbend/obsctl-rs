@@ -43,6 +43,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
 };
+use rust_i18n::t;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
@@ -188,33 +189,34 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let focused = model.focus == FocusPanel::Audio;
     let inputs = model.audio_inputs();
 
+    let title = t!("tui.audio.title");
+    let hint = t!(chrome::glyph(
+        model,
+        "tui.audio.hint",
+        "tui.audio.hint_ascii"
+    ));
     let block = chrome::panel(
         model.symbol("🎚", "A"),
-        "Audio Matrix",
-        model.symbol("[a]  ↑↓ gain  m mute", "[a]  ^v gain  m mute"),
+        &title,
+        &hint,
         inputs.len(),
         focused,
         model,
     );
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let Some(inner) = chrome::frame(f, area, block) else {
+        return;
+    };
 
     let strips = strip_layout(inner, inputs.len(), model.panel_cursor(FocusPanel::Audio));
     if strips.is_empty() {
         // Either there is nothing to show or the pane is too narrow for even
         // one strip; say so rather than leaving an unexplained empty box.
         let note = if inputs.is_empty() {
-            "no audio inputs"
+            t!("tui.audio.no_inputs")
         } else {
-            "too narrow"
+            t!("tui.audio.too_narrow")
         };
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                note,
-                Style::default().fg(model.theme.muted),
-            ))),
-            inner,
-        );
+        f.render_widget(chrome::placeholder(model, note.into_owned()), inner);
         return;
     }
 
@@ -293,7 +295,7 @@ fn render_strip(
     // (two corners and a space either side) before handing it over.
     let name = truncate_to_cells(&input.name, usize::from(rect.width).saturating_sub(4));
 
-    let mut block = Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_type(if selected {
             BorderType::Thick
@@ -303,15 +305,11 @@ fn render_strip(
         .border_style(Style::default().fg(border_color))
         .title_top(Line::from(Span::styled(format!(" {name} "), name_style)).centered())
         .title_bottom(footer_line(input, model).centered());
-    if !model.advanced_ui {
-        block = block.border_set(chrome::ASCII_BORDER);
-    }
+    let block = chrome::ascii_aware(block, model);
 
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    if inner.width == 0 || inner.height == 0 {
+    let Some(inner) = chrome::frame(f, rect, block) else {
         return;
-    }
+    };
 
     let lines = strip_lines(
         input,
@@ -393,7 +391,7 @@ fn gain_text(input: &AudioState) -> String {
     match (input.volume_db, input.volume_percent) {
         // OBS reports -inf dB for a fader pulled all the way down.
         (Some(db), _) if db.is_finite() && db > -100.0 => format!("{db:.1} dB"),
-        (Some(_), _) => "-inf dB".to_string(),
+        (Some(_), _) => t!("tui.audio.gain_silent").into_owned(),
         (None, Some(percent)) => format!("{percent}%"),
         (None, None) => String::new(),
     }
@@ -410,7 +408,7 @@ fn footer_line(input: &AudioState, model: &TuiModel) -> Line<'static> {
         None => (model.symbol("〰", "-"), theme.muted),
     };
     let value = match (input.muted, input.volume_percent) {
-        (Some(true), _) => "mute".to_string(),
+        (Some(true), _) => t!("tui.audio.muted").into_owned(),
         (_, Some(percent)) => format!("{percent}%"),
         (_, None) => String::new(),
     };

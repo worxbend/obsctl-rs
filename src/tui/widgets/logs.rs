@@ -6,6 +6,8 @@ use ratatui::{
     widgets::{List, ListItem},
 };
 
+use rust_i18n::t;
+
 use crate::{
     ipc::protocol::LogLevel,
     tui::{
@@ -31,14 +33,18 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     // Scrolling back pauses the tail, so say so rather than leaving the pane
     // looking like a live feed that stopped updating.
     let hint = if model.log_scroll > 0 {
-        model.symbol("↑ scrolled back  wheel/Esc to follow", "scrolled back")
+        t!(model.symbol(
+            "tui.panels.logs.hint_scrolled_back",
+            "tui.panels.logs.hint_scrolled_back_ascii"
+        ))
     } else {
-        "live daemon feed"
+        t!("tui.panels.logs.hint_following")
     };
+    let title = t!("tui.panels.logs.title");
     let block = chrome::panel(
         model.symbol("📡", "L"),
-        "Logs // Event Stream",
-        hint,
+        &title,
+        &hint,
         model.logs.len(),
         false,
         model,

@@ -10,8 +10,11 @@ const COLLECTIONS: NameListPanel = NameListPanel {
     names: TuiModel::scene_collections,
     current: TuiModel::current_scene_collection,
     icon: ("🗂", "C"),
-    title: "Collections",
-    hint: ("[c]  ↵ switch", "[c]  Enter switch"),
+    title_key: "tui.panels.collections.title",
+    hint_keys: (
+        "tui.panels.collections.hint",
+        "tui.panels.collections.hint_ascii",
+    ),
 };
 
 #[must_use]

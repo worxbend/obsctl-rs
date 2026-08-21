@@ -6,6 +6,8 @@ use ratatui::{
     widgets::Paragraph,
 };
 
+use rust_i18n::t;
+
 use crate::tui::{model::TuiModel, widgets::chrome};
 
 const MAX_VISIBLE_COMPLETIONS: usize = 8;
@@ -15,23 +17,26 @@ const RESULT_REVEAL_CHARS_PER_TICK: usize = 3;
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
+    let title = t!("tui.panels.palette.title");
+    let hint = if model.command_palette.active {
+        t!(model.symbol(
+            "tui.panels.palette.hint_typing",
+            "tui.panels.palette.hint_typing_ascii"
+        ))
+    } else {
+        t!("tui.panels.palette.hint_idle")
+    };
     let block = chrome::panel(
         model.symbol("⌘", ">"),
-        "Command Palette",
-        if model.command_palette.active {
-            model.symbol(
-                "type command  ↵ run  ⇥ complete  esc close",
-                "type command  Enter run  Tab complete  Esc close",
-            )
-        } else {
-            ": open  <space> which-key  q quit"
-        },
+        &title,
+        &hint,
         model.command_palette.completions.len(),
         model.command_palette.active,
         model,
     );
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let Some(inner) = chrome::frame(f, area, block) else {
+        return;
+    };
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -48,7 +53,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             lines.push(Line::from(vec![
                 Span::styled(format!("{}  {revealed}", model.symbol("✉", "msg:")), style),
                 Span::styled(
-                    if model.advanced_ui { "▌" } else { "_" },
+                    chrome::glyph(model, "▌", "_"),
                     Style::default().fg(theme.accent),
                 ),
             ]));
@@ -72,17 +77,18 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
             ),
             Span::raw(model.command_palette.input.clone()),
             Span::styled(
-                if model.advanced_ui { "█" } else { "_" },
+                chrome::glyph(model, "█", "_"),
                 Style::default().fg(theme.accent),
             ),
         ])
     } else {
         Line::from(vec![Span::styled(
-            if model.advanced_ui {
-                "  ◈  : command  │  <space> which-key  │  gg/G jump  │  ⇥ pane  │  q quit"
-            } else {
-                "  >  : command  |  <space> which-key  |  gg/G jump  |  Tab pane  |  q quit"
-            },
+            t!(chrome::glyph(
+                model,
+                "tui.panels.palette.keys",
+                "tui.panels.palette.keys_ascii"
+            ))
+            .into_owned(),
             Style::default().fg(theme.muted),
         )])
     };
@@ -99,10 +105,13 @@ fn completion_line(model: &TuiModel) -> Line<'static> {
     let theme = model.theme;
     let completions = &model.command_palette.completions;
     if completions.is_empty() {
-        return Line::from(Span::styled(
-            "  no completions",
-            Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
-        ));
+        // Dimmed on top of the shared muted colour: this line sits under a
+        // live prompt, so it should read as fainter than an empty panel does.
+        return chrome::placeholder_line(
+            model,
+            t!("tui.panels.palette.no_completions").into_owned(),
+        )
+        .patch_style(Style::default().add_modifier(Modifier::DIM));
     }
 
     let mut spans = vec![Span::raw("  ")];

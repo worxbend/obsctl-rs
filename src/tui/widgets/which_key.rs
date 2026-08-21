@@ -71,8 +71,10 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let height = (rows as u16 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
-        // Sit just above the command bar, which owns the bottom four rows.
-        y: area.y + area.height.saturating_sub(height + 4),
+        y: area.y
+            + area
+                .height
+                .saturating_sub(height + crate::tui::layout::PALETTE_ROW_HEIGHT),
         width,
         height,
     };
@@ -97,11 +99,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         .border_style(Style::default().fg(theme.border_focus))
         .style(Style::default().bg(theme.bg))
         .title(Line::from(heading));
-    let block = if model.advanced_ui {
-        block
-    } else {
-        block.border_set(chrome::ASCII_BORDER)
-    };
+    let block = chrome::ascii_aware(block, model);
 
     // The popup overlays live panels, so clear what is underneath first —
     // otherwise the dashboard bleeds through the gaps between cells.
