@@ -246,6 +246,65 @@ mod tests {
         ));
     }
 
+    /// A source with no delimiter in it must be abandoned at the cap, not read
+    /// until it happens to stop.
+    ///
+    /// The test above only proves the verdict, and it would reach the same
+    /// verdict after swallowing the whole flood; what matters for memory is
+    /// *when* the reading stops. `EndlessBytes` never ends and counts what it
+    /// hands over, so an unbounded read shows up twice over: the byte count
+    /// runs past the cap, and the source's own patience runs out and reports
+    /// an I/O error instead of `Oversized`.
+    #[tokio::test]
+    async fn next_frame_stops_reading_a_line_that_never_ends() {
+        use std::pin::Pin;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll};
+        use tokio::io::{AsyncRead, BufReader, ReadBuf};
+
+        /// Bytes with no newline in them, for as long as anyone keeps asking.
+        struct EndlessBytes {
+            served: Arc<AtomicUsize>,
+            patience: usize,
+        }
+
+        impl AsyncRead for EndlessBytes {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                if self.served.load(Ordering::Relaxed) >= self.patience {
+                    return Poll::Ready(Err(std::io::Error::other("read far past the frame cap")));
+                }
+                const FILLER: [u8; 4096] = [b'a'; 4096];
+                let n = buf.remaining().min(FILLER.len());
+                buf.put_slice(&FILLER[..n]);
+                self.served.fetch_add(n, Ordering::Relaxed);
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let served = Arc::new(AtomicUsize::new(0));
+        let mut frames = FrameReader::new(BufReader::new(EndlessBytes {
+            served: Arc::clone(&served),
+            patience: MAX_IPC_LINE_BYTES * 8,
+        }));
+
+        assert!(matches!(
+            frames.next_frame().await,
+            Err(FrameError::Oversized)
+        ));
+        // The cap plus at most one read-ahead buffer; doubling it leaves room
+        // for a different buffer size without leaving room for a runaway read.
+        assert!(
+            served.load(Ordering::Relaxed) < MAX_IPC_LINE_BYTES * 2,
+            "read {} bytes of a line capped at {MAX_IPC_LINE_BYTES} bytes",
+            served.load(Ordering::Relaxed)
+        );
+    }
+
     #[tokio::test]
     async fn next_frame_reports_a_frame_that_is_not_utf8() {
         let mut frames = frames_of(b"\xff\xfe\n");

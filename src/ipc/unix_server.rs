@@ -14,7 +14,7 @@ use crate::ipc::{
         ServerCommand, ServerMessage, Topic, normalize_subscribe_topics, validate_command_name,
         validate_ipc_request_id,
     },
-    session::{BroadcastHub, CommandDispatch, SessionSubscriptions},
+    session::{BroadcastHub, CommandDispatch, CommandLanes, SessionSubscriptions},
     socket_path::ensure_socket_file,
 };
 use crate::server::client_registry::ClientRegistry;
@@ -75,18 +75,19 @@ impl IpcServer {
     }
 
     /// Run the accept loop until `shutdown` fires.
-    pub async fn run(
-        self,
-        command_tx: mpsc::Sender<CommandDispatch>,
-        mut shutdown: watch::Receiver<bool>,
-    ) {
+    ///
+    /// `lanes` is asked for a fresh sender per accepted connection rather than
+    /// being handed one sender to clone, because who receives a session's
+    /// commands is what decides the order they run in: see
+    /// [`CommandLanes`].
+    pub async fn run(self, lanes: impl CommandLanes, mut shutdown: watch::Receiver<bool>) {
         loop {
             tokio::select! {
                 result = self.listener.accept() => {
                     match result {
                         Ok((stream, _)) => {
                             let hub = Arc::clone(&self.hub);
-                            let tx = command_tx.clone();
+                            let tx = lanes.open_lane();
                             let registry = self.registry.clone();
                             tokio::spawn(run_session(stream, hub, tx, registry));
                         }
