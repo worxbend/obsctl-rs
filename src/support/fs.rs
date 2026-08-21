@@ -5,6 +5,22 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::path::PathBuf;
 
+/// The three refusals this module issues most often, each built in one place
+/// so its kind and its wording cannot drift between call sites. Callers match
+/// on `ErrorKind`, so a guard that reported the wrong kind would be silently
+/// tolerated somewhere it should not be.
+fn symlink_rejected() -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, "path is symbolic link")
+}
+
+fn no_parent() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, "path has no parent")
+}
+
+fn not_regular_file() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, "path is not a regular file")
+}
+
 pub fn has_symlink(path: &Path) -> bool {
     let mut cursor = Path::new("").to_path_buf();
     for component in path.components() {
@@ -45,10 +61,7 @@ pub fn is_private_dir_metadata(metadata: &std::fs::Metadata) -> bool {
 
 pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     if has_symlink(path) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "path is symbolic link",
-        ));
+        return Err(symlink_rejected());
     }
 
     let metadata = std::fs::symlink_metadata(path)?;
@@ -73,9 +86,7 @@ pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
 }
 
 pub fn ensure_private_parent(path: &Path) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+    let parent = path.parent().ok_or_else(no_parent)?;
 
     ensure_path_not_symlink(parent)?;
 
@@ -98,10 +109,7 @@ fn ensure_atomic_target_safe(path: &Path, parent: &Path) -> io::Result<()> {
 
 pub fn ensure_path_not_symlink(path: &Path) -> io::Result<()> {
     if has_symlink(path) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "path is symbolic link",
-        ));
+        return Err(symlink_rejected());
     }
     Ok(())
 }
@@ -113,16 +121,10 @@ pub fn ensure_regular_file(path: &Path) -> io::Result<()> {
 pub fn ensure_regular_file_with_metadata(path: &Path) -> io::Result<std::fs::Metadata> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "path is symbolic link",
-        ));
+        return Err(symlink_rejected());
     }
     if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path is not a regular file",
-        ));
+        return Err(not_regular_file());
     }
     Ok(metadata)
 }
@@ -152,10 +154,7 @@ pub fn read_file_no_follow(path: &Path) -> io::Result<String> {
     let mut file = options.open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path is not a regular file",
-        ));
+        return Err(not_regular_file());
     }
 
     let mut content = String::new();
@@ -167,9 +166,7 @@ pub fn remove_with_type_guard<F>(path: &Path, expected: F, what: &str) -> io::Re
 where
     F: Fn(&std::fs::Metadata) -> bool,
 {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+    let parent = path.parent().ok_or_else(no_parent)?;
 
     ensure_private_dir(parent)?;
     ensure_path_not_symlink(path)?;
@@ -317,9 +314,7 @@ where
         let _ = stdfs::remove_file(tmp_path);
     };
 
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+    let parent = path.parent().ok_or_else(no_parent)?;
 
     ensure_private_parent(path)?;
 
@@ -343,10 +338,7 @@ where
     match stdfs::symlink_metadata(path) {
         Ok(metadata) if !metadata.is_file() => {
             cleanup_tmp(&tmp_path);
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "path is not a regular file",
-            ));
+            return Err(not_regular_file());
         }
         Ok(_) if !allow_overwrite => {
             cleanup_tmp(&tmp_path);

@@ -43,23 +43,26 @@ pub fn is_safe_socket_path(path: &Path) -> bool {
     validate_socket_path(path).is_ok()
 }
 
-pub fn ensure_private_socket_parent(path: &Path) -> io::Result<()> {
-    if !path.is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "socket path must be absolute",
-        ));
+/// A relative socket path is refused rather than resolved, because what it
+/// would resolve against — the process's working directory — is not something
+/// the daemon controls or the config author can see.
+fn require_absolute(path: &Path) -> io::Result<()> {
+    if path.is_absolute() {
+        return Ok(());
     }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "socket path must be absolute",
+    ))
+}
+
+pub fn ensure_private_socket_parent(path: &Path) -> io::Result<()> {
+    require_absolute(path)?;
     support::fs::ensure_private_parent(path)
 }
 
 pub fn validate_socket_path(path: &Path) -> io::Result<()> {
-    if !path.is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "socket path must be absolute",
-        ));
-    }
+    require_absolute(path)?;
 
     if support::fs::has_path_traversal(path) {
         return Err(io::Error::new(
