@@ -863,77 +863,58 @@ async fn dispatch_palette_command(socket_path: &Path, input: &str) -> PaletteOut
     }
 }
 
+/// Turn a parsed palette command into the IPC payload that carries it.
+///
+/// Built through `CommandPayload`'s constructors rather than by writing the
+/// `{"target": ...}` envelopes out by hand — seven of them, in a file that
+/// already used the constructors correctly two functions further down, and
+/// beside a CLI that uses them throughout. Hand-written wire payloads are how
+/// a key gets misspelled in one command and not the others.
 fn command_to_payload(cmd: Command) -> std::result::Result<CommandPayload, String> {
-    let (command, args) = match cmd {
-        Command::Status => (ServerCommand::GetSnapshot, serde_json::Value::Null),
-        Command::ServerStatus => (ServerCommand::GetServerStatus, serde_json::Value::Null),
-        Command::ObsStatus => (ServerCommand::GetObsStatus, serde_json::Value::Null),
-        Command::ValidateConfig => (ServerCommand::ValidateConfig, serde_json::Value::Null),
+    let with_target = |command, target: String| {
+        sanitize_target_arg(&target).map(|target| CommandPayload::with_target(command, &target))
+    };
+
+    match cmd {
+        Command::Status => Ok(CommandPayload::simple(ServerCommand::GetSnapshot)),
+        Command::ServerStatus => Ok(CommandPayload::simple(ServerCommand::GetServerStatus)),
+        Command::ObsStatus => Ok(CommandPayload::simple(ServerCommand::GetObsStatus)),
+        Command::ValidateConfig => Ok(CommandPayload::simple(ServerCommand::ValidateConfig)),
         Command::Reconnect | Command::Connect => {
-            (ServerCommand::ReconnectObs, serde_json::Value::Null)
+            Ok(CommandPayload::simple(ServerCommand::ReconnectObs))
         }
-        Command::ShutdownServer => (ServerCommand::ShutdownServer, serde_json::Value::Null),
-        Command::DumpConfig => (ServerCommand::DumpConfig, serde_json::Value::Null),
-        Command::ReloadConfig => (ServerCommand::ReloadConfig, serde_json::Value::Null),
-        Command::SetScene { target } => {
-            let target = sanitize_target_arg(&target)?;
-            (
-                ServerCommand::SetScene,
-                serde_json::json!({ "target": target }),
-            )
-        }
-        Command::SetProfile { target } => {
-            let target = sanitize_target_arg(&target)?;
-            (
-                ServerCommand::SetProfile,
-                serde_json::json!({ "target": target }),
-            )
-        }
+        Command::ShutdownServer => Ok(CommandPayload::simple(ServerCommand::ShutdownServer)),
+        Command::DumpConfig => Ok(CommandPayload::simple(ServerCommand::DumpConfig)),
+        Command::ReloadConfig => Ok(CommandPayload::simple(ServerCommand::ReloadConfig)),
+        Command::ToggleStream => Ok(CommandPayload::simple(ServerCommand::ToggleStream)),
+        Command::ToggleRecord => Ok(CommandPayload::simple(ServerCommand::ToggleRecord)),
+
+        Command::SetScene { target } => with_target(ServerCommand::SetScene, target),
+        Command::SetProfile { target } => with_target(ServerCommand::SetProfile, target),
         Command::SetSceneCollection { target } => {
-            let target = sanitize_target_arg(&target)?;
-            (
-                ServerCommand::SetSceneCollection,
-                serde_json::json!({ "target": target }),
-            )
+            with_target(ServerCommand::SetSceneCollection, target)
         }
-        Command::Mute { target } => {
-            let target = sanitize_target_arg(&target)?;
-            (ServerCommand::Mute, serde_json::json!({ "target": target }))
-        }
-        Command::Unmute { target } => {
-            let target = sanitize_target_arg(&target)?;
-            (
-                ServerCommand::Unmute,
-                serde_json::json!({ "target": target }),
-            )
-        }
-        Command::ToggleMute { target } => {
-            let target = sanitize_target_arg(&target)?;
-            (
-                ServerCommand::ToggleMute,
-                serde_json::json!({ "target": target }),
-            )
-        }
+        Command::Mute { target } => with_target(ServerCommand::Mute, target),
+        Command::Unmute { target } => with_target(ServerCommand::Unmute, target),
+        Command::ToggleMute { target } => with_target(ServerCommand::ToggleMute, target),
+
         Command::SetVolume { target, percent } => {
+            // Checked before the target so an out-of-range percentage is
+            // reported as such even when the target is also wrong.
             if percent > 100 {
                 return Err("volume percent must be 0-100".to_string());
             }
-            (
-                ServerCommand::SetVolume,
-                serde_json::json!({
-                    "target": sanitize_target_arg(&target)?,
-                    "percent": percent
-                }),
-            )
+            let target = sanitize_target_arg(&target)?;
+            Ok(CommandPayload::set_volume(&target, percent))
         }
-        Command::ToggleStream => (ServerCommand::ToggleStream, serde_json::Value::Null),
-        Command::ToggleRecord => (ServerCommand::ToggleRecord, serde_json::Value::Null),
-        Command::Help | Command::Quit | Command::Themes => unreachable!("handled before"),
-    };
-    Ok(CommandPayload {
-        name: command.name().to_string(),
-        args,
-    })
+
+        // `dispatch_palette_command` acts on these itself and never reaches
+        // here. An `Err` rather than a panic: a future caller that does reach
+        // it gets a status line, not a dead TUI.
+        Command::Help | Command::Quit | Command::Themes => {
+            Err(format!("{cmd:?} is not a daemon command"))
+        }
+    }
 }
 
 fn sanitize_target_arg(value: &str) -> std::result::Result<String, String> {
