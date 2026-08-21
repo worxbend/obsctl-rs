@@ -1,10 +1,11 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{Mutex, mpsc, watch};
 use tracing::{debug, info, warn};
 
-use crate::config::model::Config;
+use crate::config::model::{Config, ReconnectConfig};
 use crate::domain::errors::ObsctlError;
 use crate::domain::result::Result;
 use crate::ipc::{
@@ -19,7 +20,7 @@ use crate::obs::{
     validation::extract_resource_names,
 };
 use crate::runtime::reconnect_policy::ReconnectPolicy;
-use crate::server::obs_event_adapter::normalize_obs_event;
+use crate::server::obs_event_adapter::{log_obs_event, needs_full_refresh, normalize_obs_event};
 use crate::server::state_store::{
     Listing, ObsVersions, OutputFlags, PolledMetrics, RawInputState, RefreshedObsState, StateStore,
 };
@@ -77,140 +78,212 @@ impl ObsSupervisor {
         let mut policy = ReconnectPolicy::new(reconnect_cfg.clone());
 
         loop {
-            let (params, latest_reconnect_cfg) = {
-                let cfg = self.config.lock().await;
-                (
-                    ObsConnectionParams::from_config(&cfg.connection),
-                    cfg.reconnect.clone(),
-                )
-            };
-            let attempt = match params {
-                Ok(params) => self.attempt_connect(&params).await,
-                Err(error) => Err(error),
-            };
-            if latest_reconnect_cfg != reconnect_cfg {
-                reconnect_cfg = latest_reconnect_cfg;
-                policy = ReconnectPolicy::new(reconnect_cfg.clone());
+            match self.connect_once(&mut reconnect_cfg, &mut policy).await {
+                Ok(session) => match self.serve(session).await {
+                    DisconnectReason::Shutdown => return,
+                    // The connection was thrown away on purpose, not lost, so
+                    // there is nothing to back off from: go straight round.
+                    DisconnectReason::ReconnectRequested => continue,
+                    DisconnectReason::ObsDisconnected => {}
+                },
+                Err(error) => self.record_connect_failure(&error).await,
             }
 
-            self.reconnecting.store(true, Ordering::Relaxed);
-            match attempt {
-                Ok((client, obs_version, ws_version, disconnect_rx)) => {
-                    info!("OBS connected: studio={obs_version} ws={ws_version}");
-                    self.publish_log(
-                        LogLevel::Info,
-                        format!("OBS connected: studio={obs_version} ws={ws_version}"),
-                    );
-                    policy.reset();
-                    self.reconnecting.store(false, Ordering::Relaxed);
-
-                    let fetch_result = self
-                        .fetch_and_publish_snapshot(&client, &obs_version, &ws_version)
-                        .await;
-                    if fetch_result.is_err() {
-                        warn!("Initial snapshot fetch failed");
-                        self.publish_log(LogLevel::Warn, "Initial OBS snapshot fetch failed");
-                    }
-
-                    *self.obs_handle.lock().await = Some(client);
-
-                    // Wait until OBS disconnects or reconnect/shutdown is requested
-                    let reason = self.wait_for_disconnect(disconnect_rx).await;
-                    *self.obs_handle.lock().await = None;
-
-                    match reason {
-                        DisconnectReason::Shutdown => {
-                            self.publish_log(LogLevel::Info, "OBS disconnected during shutdown");
-                            self.state.mark_disconnected(None).await;
-                            break;
-                        }
-                        DisconnectReason::ReconnectRequested => {
-                            self.publish_log(
-                                LogLevel::Warn,
-                                "OBS disconnected: reconnect requested",
-                            );
-                            self.state
-                                .mark_disconnected(Some("reconnect requested".to_string()))
-                                .await;
-                            continue;
-                        }
-                        DisconnectReason::ObsDisconnected => {
-                            self.publish_log(LogLevel::Warn, "OBS WebSocket closed");
-                            self.state
-                                .mark_disconnected(Some("OBS disconnected".to_string()))
-                                .await;
-                            // Fall through to the reconnect delay loop below.
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("OBS connection failed: {e}");
-                    self.publish_log(LogLevel::Warn, format!("OBS unavailable: {e}"));
-                    self.state.mark_disconnected(Some(e.to_string())).await;
-                }
-            }
-
-            // Reconnect delay loop
-            if !policy.enabled() {
-                info!("Reconnect disabled; supervisor stopping");
-                self.reconnecting.store(false, Ordering::Relaxed);
-                self.publish_log(
-                    LogLevel::Info,
-                    "OBS reconnect disabled; supervisor stopping",
-                );
-                break;
-            }
-            loop {
-                let Some(delay) = policy.next_delay() else {
-                    info!("Reconnect exhausted; supervisor stopping");
-                    self.reconnecting.store(false, Ordering::Relaxed);
-                    self.publish_log(
-                        LogLevel::Warn,
-                        "OBS reconnect exhausted; supervisor stopping",
-                    );
-                    return;
-                };
-                info!("Reconnecting in {delay:?}");
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => break,
-                    _ = self.reconnect_rx.recv() => {
-                        info!("Reconnect requested immediately");
-                        self.publish_log(LogLevel::Info, "OBS reconnect requested immediately");
-                        break;
-                    }
-                    _ = self.shutdown.changed() => {
-                        if *self.shutdown.borrow() {
-                            self.reconnecting.store(false, Ordering::Relaxed);
-                            return;
-                        }
-                    }
-                }
-            }
-
-            if *self.shutdown.borrow() {
-                break;
+            if self.wait_before_retry(&mut policy).await.is_break() {
+                return;
             }
         }
     }
 
-    async fn attempt_connect(
-        &self,
-        params: &ObsConnectionParams,
-    ) -> Result<(
-        ObsClient,
-        String,
-        String,
-        tokio::sync::oneshot::Receiver<()>,
-    )> {
+    /// Read the current connection settings and try to open one connection.
+    ///
+    /// This is also where a config reload takes effect. The `reconnect`
+    /// settings are re-read on every pass and the backoff policy rebuilt when
+    /// they have changed, so editing them and running `reload-config` changes
+    /// the next attempt rather than waiting for the daemon to be restarted.
+    async fn connect_once(
+        &mut self,
+        reconnect_cfg: &mut ReconnectConfig,
+        policy: &mut ReconnectPolicy,
+    ) -> Result<ConnectedSession> {
+        let (params, latest_reconnect_cfg) = {
+            let cfg = self.config.lock().await;
+            (
+                ObsConnectionParams::from_config(&cfg.connection),
+                cfg.reconnect.clone(),
+            )
+        };
+
+        // Raised before the attempt, not after it. Connecting takes up to
+        // `connect_timeout_ms` (3s by default) plus an auth round-trip, and for
+        // all of that time `server-status` used to report
+        // `reconnecting: false, obs_connected: false` — the same thing it
+        // reports once the supervisor has given up for good.
+        self.reconnecting.store(true, Ordering::Relaxed);
+        let attempt = match params {
+            Ok(params) => self.attempt_connect(&params).await,
+            Err(error) => Err(error),
+        };
+
+        // Done whether the attempt succeeded or not: a reload that fixes the
+        // backoff settings should apply to the retry that follows a failure,
+        // which is exactly the case where it matters most.
+        if latest_reconnect_cfg != *reconnect_cfg {
+            *reconnect_cfg = latest_reconnect_cfg;
+            *policy = ReconnectPolicy::new(reconnect_cfg.clone());
+        }
+
+        let session = attempt?;
+        let studio = &session.versions.studio;
+        let websocket = &session.versions.websocket;
+        info!("OBS connected: studio={studio} ws={websocket}");
+        self.publish_log(
+            LogLevel::Info,
+            format!("OBS connected: studio={studio} ws={websocket}"),
+        );
+        policy.reset();
+        self.reconnecting.store(false, Ordering::Relaxed);
+        Ok(session)
+    }
+
+    /// Record an attempt that never produced a connection, so that clients see
+    /// why rather than only seeing `connected: false`.
+    async fn record_connect_failure(&self, error: &ObsctlError) {
+        warn!("OBS connection failed: {error}");
+        self.publish_log(LogLevel::Warn, format!("OBS unavailable: {error}"));
+        self.state.mark_disconnected(Some(error.to_string())).await;
+    }
+
+    /// Run one OBS connection for as long as it lasts, and report what ended
+    /// it.
+    ///
+    /// Publishing the snapshot, handing the client to the command executor,
+    /// waiting, and taking the client away again are one function because the
+    /// taking-away has to happen on every way out. Spread across branches of
+    /// the loop, it was one edit away from leaving `obs_handle` holding a
+    /// client whose socket had already closed — which the executor would then
+    /// keep handing to `scene`, `mute` and `vol`.
+    async fn serve(&mut self, session: ConnectedSession) -> DisconnectReason {
+        let ConnectedSession {
+            client,
+            versions,
+            disconnect_rx,
+        } = session;
+
+        if let Err(e) = self.fetch_and_publish_snapshot(&client, &versions).await {
+            warn!("Initial OBS snapshot fetch failed: {e}");
+            self.publish_log(
+                LogLevel::Warn,
+                format!("Initial OBS snapshot fetch failed: {e}"),
+            );
+            // The fetch is what normally marks the snapshot connected, and it
+            // did not run. The client below is installed either way, so leaving
+            // the snapshot saying "disconnected" would have `obs-status` and
+            // the TUI contradicting `scene`/`mute`/`vol`, which succeed against
+            // exactly that client.
+            self.state
+                .mark_connected(
+                    &versions,
+                    Some(format!("initial snapshot fetch failed: {e}")),
+                )
+                .await;
+        }
+
+        *self.obs_handle.lock().await = Some(client);
+        let reason = self.wait_for_disconnect(disconnect_rx).await;
+        *self.obs_handle.lock().await = None;
+
+        match reason {
+            DisconnectReason::Shutdown => {
+                self.publish_log(LogLevel::Info, "OBS disconnected during shutdown");
+                self.state.mark_disconnected(None).await;
+            }
+            DisconnectReason::ReconnectRequested => {
+                self.publish_log(LogLevel::Warn, "OBS disconnected: reconnect requested");
+                self.state
+                    .mark_disconnected(Some("reconnect requested".to_string()))
+                    .await;
+            }
+            DisconnectReason::ObsDisconnected => {
+                self.publish_log(LogLevel::Warn, "OBS WebSocket closed");
+                self.state
+                    .mark_disconnected(Some("OBS disconnected".to_string()))
+                    .await;
+            }
+        }
+        reason
+    }
+
+    /// Sit out the backoff before the next connection attempt.
+    ///
+    /// [`ControlFlow::Break`] means supervision is over for good, and is the
+    /// one place `run` learns that: the config says not to reconnect, or the
+    /// policy has run out of attempts, or the daemon is shutting down. The wait
+    /// itself ends early when someone asks for a reconnect, so `obsctl
+    /// reconnect` does not have to wait out a ten-second backoff.
+    async fn wait_before_retry(&mut self, policy: &mut ReconnectPolicy) -> ControlFlow<()> {
+        if !policy.enabled() {
+            info!("Reconnect disabled; supervisor stopping");
+            self.reconnecting.store(false, Ordering::Relaxed);
+            self.publish_log(
+                LogLevel::Info,
+                "OBS reconnect disabled; supervisor stopping",
+            );
+            self.stop_supervising(RECONNECT_DISABLED).await;
+            return ControlFlow::Break(());
+        }
+
+        loop {
+            let Some(delay) = policy.next_delay() else {
+                info!("Reconnect exhausted; supervisor stopping");
+                self.reconnecting.store(false, Ordering::Relaxed);
+                self.publish_log(
+                    LogLevel::Warn,
+                    "OBS reconnect exhausted; supervisor stopping",
+                );
+                self.stop_supervising(RECONNECT_EXHAUSTED).await;
+                return ControlFlow::Break(());
+            };
+            info!("Reconnecting in {delay:?}");
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => break,
+                _ = self.reconnect_rx.recv() => {
+                    info!("Reconnect requested immediately");
+                    self.publish_log(LogLevel::Info, "OBS reconnect requested immediately");
+                    break;
+                }
+                // A shutdown signal that is not yet `true` (the initial value
+                // being observed) is not a reason to stop, so the wait starts
+                // over — which draws a fresh, longer delay from the policy.
+                _ = self.shutdown.changed() => {
+                    if *self.shutdown.borrow() {
+                        self.reconnecting.store(false, Ordering::Relaxed);
+                        return ControlFlow::Break(());
+                    }
+                }
+            }
+        }
+
+        if *self.shutdown.borrow() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+
+    async fn attempt_connect(&self, params: &ObsConnectionParams) -> Result<ConnectedSession> {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ObsEvent>(64);
         let (client, obs_version, ws_version, disconnect_rx) = connect(params, event_tx).await?;
+        let versions = ObsVersions {
+            studio: obs_version,
+            websocket: ws_version,
+        };
         let event_client = client.clone();
         let state = self.state.clone();
         let state_for_refresh = self.state.clone();
         let config = Arc::clone(&self.config);
         let hub = Arc::clone(&self.hub);
-        let event_obs_version = obs_version.clone();
-        let event_ws_version = ws_version.clone();
+        let event_versions = versions.clone();
 
         spawn_stats_poller(client.clone(), self.state.clone());
 
@@ -233,8 +306,7 @@ impl ObsSupervisor {
                     &config,
                     &state_for_refresh,
                     &event_client,
-                    &event_obs_version,
-                    &event_ws_version,
+                    &event_versions,
                 )
                 .await
                 {
@@ -264,12 +336,7 @@ impl ObsSupervisor {
 
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                let needs_full_refresh = matches!(
-                    event,
-                    ObsEvent::SceneListChanged
-                        | ObsEvent::ProfileListChanged
-                        | ObsEvent::SceneCollectionListChanged
-                );
+                let needs_full_refresh = needs_full_refresh(&event);
 
                 // Log notable remote OBS changes before applying them.
                 log_obs_event(&hub, &event);
@@ -289,7 +356,11 @@ impl ObsSupervisor {
             }
         });
 
-        Ok((client, obs_version, ws_version, disconnect_rx))
+        Ok(ConnectedSession {
+            client,
+            versions,
+            disconnect_rx,
+        })
     }
 
     /// Fetch and publish a full snapshot, retrying while events keep landing
@@ -302,23 +373,34 @@ impl ObsSupervisor {
     async fn fetch_and_publish_snapshot(
         &self,
         client: &ObsClient,
-        obs_version: &str,
-        ws_version: &str,
+        versions: &ObsVersions,
     ) -> Result<()> {
         for _ in 0..MAX_REFRESH_RETRIES {
-            let superseded = fetch_and_publish_snapshot_from(
-                &self.config,
-                &self.state,
-                client,
-                obs_version,
-                ws_version,
-            )
-            .await?;
+            let superseded =
+                fetch_and_publish_snapshot_from(&self.config, &self.state, client, versions)
+                    .await?;
             if !superseded {
                 return Ok(());
             }
             debug!("OBS events landed during the snapshot fetch; refreshing again");
         }
+
+        // Falling out of the loop is "we published a snapshot we already know
+        // is behind, and stopped trying". That is a real, if rare, degraded
+        // state — an operator looking at a stale scene list has no other way to
+        // find out it is stale — so it is said out loud rather than returned as
+        // an indistinguishable `Ok(())`.
+        warn!(
+            "OBS snapshot fetch gave up after {MAX_REFRESH_RETRIES} attempts; \
+             published snapshot may be out of date"
+        );
+        self.publish_log(
+            LogLevel::Warn,
+            format!(
+                "OBS snapshot fetch gave up after {MAX_REFRESH_RETRIES} attempts; \
+                 published snapshot may be out of date"
+            ),
+        );
         Ok(())
     }
 
@@ -343,6 +425,19 @@ impl ObsSupervisor {
         }
     }
 
+    /// Leave a reason behind in the snapshot before supervision ends for good.
+    ///
+    /// Once `run` returns, nothing in the daemon will ever try OBS again, and
+    /// `reconnect` has nobody to ask. Without this the only trace was a log
+    /// line, which is gone by the time anyone looks: `obs-status`,
+    /// `server-status.last_error` and the TUI's connection widget all read the
+    /// snapshot, and it would still be showing whatever the last failed connect
+    /// attempt happened to say. Writing the terminal reason there costs nothing
+    /// on the wire — `last_error` is a field the snapshot already has.
+    async fn stop_supervising(&self, reason: &str) {
+        self.state.mark_disconnected(Some(reason.to_string())).await;
+    }
+
     fn publish_log(&self, level: LogLevel, message: impl AsRef<str>) {
         self.hub.publish_log(
             LogEvent::new(level, message).with_target("obsctl_rs::server::obs_supervisor"),
@@ -350,18 +445,42 @@ impl ObsSupervisor {
     }
 }
 
+/// Why the supervisor will not try OBS again. These are operator diagnostics
+/// that end up in `ObsSnapshot::last_error`, next to the OBS error strings the
+/// connect path already puts there.
+const RECONNECT_DISABLED: &str =
+    "OBS reconnect disabled in config; supervisor stopped (restart the server to retry)";
+const RECONNECT_EXHAUSTED: &str =
+    "OBS reconnect attempts exhausted; supervisor stopped (restart the server to retry)";
+
 enum DisconnectReason {
     Shutdown,
     ReconnectRequested,
     ObsDisconnected,
 }
 
+/// One live OBS connection, everything the supervisor needs to work with it.
+///
+/// This used to be a four-element tuple whose middle two members were bare
+/// `String`s — the OBS Studio version and the obs-websocket version — which
+/// were then carried as two adjacent `&str` parameters through two more
+/// functions before being put back together into the [`ObsVersions`] struct
+/// that already existed. Two adjacent strings of the same type in a positional
+/// list can be swapped without the compiler noticing; naming them once, in the
+/// type that already models them, removes that possibility for the whole path.
+struct ConnectedSession {
+    client: ObsClient,
+    versions: ObsVersions,
+    /// Resolves when the WebSocket task exits, which is how the supervisor
+    /// learns OBS went away rather than the daemon deciding to let go.
+    disconnect_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
 async fn fetch_and_publish_snapshot_from(
     config: &Arc<Mutex<Config>>,
     state: &StateStore,
     client: &ObsClient,
-    obs_version: &str,
-    ws_version: &str,
+    versions: &ObsVersions,
 ) -> Result<bool> {
     // Read before the first round-trip: everything below describes OBS as it
     // was at some point after this, and any event that lands in between is
@@ -372,10 +491,7 @@ async fn fetch_and_publish_snapshot_from(
     let inputs = fetch_input_states(client).await?;
 
     let refreshed = RefreshedObsState {
-        versions: ObsVersions {
-            studio: obs_version.to_string(),
-            websocket: ws_version.to_string(),
-        },
+        versions: versions.clone(),
         scenes,
         inputs,
         profiles: fetch_listing(client, ListingRequest::PROFILES).await,
@@ -672,59 +788,6 @@ fn output_duration_if_active(response: &serde_json::Value) -> Option<u64> {
         return None;
     }
     response.get("outputDuration").and_then(|d| d.as_u64())
-}
-
-fn log_obs_event(hub: &BroadcastHub, event: &ObsEvent) {
-    use crate::obs::client::ObsEvent::*;
-    let msg: Option<String> = match event {
-        CurrentProgramSceneChanged { scene_name } => {
-            Some(format!("OBS: scene changed → {scene_name}"))
-        }
-        SceneListChanged => Some("OBS: scene list changed".to_string()),
-        InputCreated { input_name } => Some(format!("OBS: input created: {input_name}")),
-        InputRemoved { input_name } => Some(format!("OBS: input removed: {input_name}")),
-        InputMuteStateChanged { input_name, muted } => {
-            let state = if *muted { "muted" } else { "unmuted" };
-            Some(format!("OBS: {input_name} {state}"))
-        }
-        InputVolumeChanged {
-            input_name,
-            volume_db,
-            ..
-        } => {
-            let db = if volume_db.is_finite() {
-                format!("{volume_db:.1} dB")
-            } else {
-                "-∞ dB".to_string()
-            };
-            Some(format!("OBS: volume changed: {input_name} → {db}"))
-        }
-        StreamStateChanged { active } => {
-            let state = if *active { "started" } else { "stopped" };
-            Some(format!("OBS: streaming {state}"))
-        }
-        RecordStateChanged { active } => {
-            let state = if *active { "started" } else { "stopped" };
-            Some(format!("OBS: recording {state}"))
-        }
-        CurrentProfileChanged { profile_name } => {
-            Some(format!("OBS: profile changed → {profile_name}"))
-        }
-        ProfileListChanged => Some("OBS: profile list changed".to_string()),
-        CurrentSceneCollectionChanged {
-            scene_collection_name,
-        } => Some(format!(
-            "OBS: scene collection changed → {scene_collection_name}"
-        )),
-        SceneCollectionListChanged => Some("OBS: scene collection list changed".to_string()),
-        // High-frequency or uninteresting — don't flood the log.
-        InputVolumeMeters { .. } | Other { .. } => None,
-    };
-    if let Some(m) = msg {
-        hub.publish_log(
-            LogEvent::new(LogLevel::Info, m).with_target("obsctl_rs::server::obs_supervisor"),
-        );
-    }
 }
 
 #[cfg(test)]

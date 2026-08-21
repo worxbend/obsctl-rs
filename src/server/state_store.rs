@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use time::OffsetDateTime;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockWriteGuard};
 use tracing::debug;
 
 use crate::config::model::{AudioInputConfig, SceneConfig};
@@ -30,7 +30,8 @@ impl StateStore {
         }
     }
 
-    /// How many OBS events have changed the snapshot so far.
+    /// How many times the snapshot has been changed by something other than a
+    /// full refresh.
     ///
     /// A full refresh takes a dozen obs-websocket round-trips and builds its
     /// result from replies gathered over all of them, so by the time it is
@@ -41,6 +42,29 @@ impl StateStore {
     /// Not part of `ObsSnapshot`, so it is not a wire-protocol change.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    /// Record that a write happened: count it, then publish the result.
+    ///
+    /// Every mutation a slow full refresh can silently undo goes through here,
+    /// so that the refresh has one number to compare against rather than a
+    /// per-method guess about which writes matter. It used to be only
+    /// [`apply_event`](Self::apply_event) that counted, which meant a refresh
+    /// finishing just after the connection dropped overwrote
+    /// [`mark_disconnected`](Self::mark_disconnected)'s work — republishing
+    /// `connected: true` with no error for a dead connection — and then
+    /// reported that nothing had overtaken it, so nobody fetched again.
+    ///
+    /// [`update_stats`](Self::update_stats) deliberately does not call this:
+    /// the fields it writes are carried across a refresh by [`PolledMetrics`],
+    /// so a refresh cannot clobber them and there is nothing to re-fetch.
+    ///
+    /// The counter is bumped while the write guard is still held, so a refresh
+    /// comparing generations either sees this write in the snapshot it is
+    /// replacing or sees the bump. It cannot miss both.
+    fn commit(&self, guard: &mut RwLockWriteGuard<'_, ObsSnapshot>) {
+        self.generation.fetch_add(1, Ordering::Release);
+        Self::broadcast(&self.hub, guard);
     }
 
     pub async fn read(&self) -> ObsSnapshot {
@@ -56,18 +80,9 @@ impl StateStore {
     pub async fn replace(&self, snapshot: ObsSnapshot) {
         let mut guard = self.inner.write().await;
         *guard = snapshot;
-        Self::broadcast(&self.hub, &guard);
+        self.commit(&mut guard);
     }
 
-    /// Fold everything a full OBS refresh learned into the cached snapshot and
-    /// broadcast the result.
-    ///
-    /// The refresh is the authority on scenes, inputs, profiles, collections,
-    /// and output flags, but it knows nothing about the metrics the stats
-    /// poller writes on its own schedule, so those are carried over rather than
-    /// reset. Doing the merge here — under one write lock — is what keeps a
-    /// slow refresh (several obs-websocket round-trips) from overwriting events
-    /// that arrived while it was still fetching.
     /// Replace the snapshot with one built from a full OBS fetch.
     ///
     /// `generation_before` is [`StateStore::generation`] as it was when the
@@ -78,6 +93,13 @@ impl StateStore {
     /// Taking the write lock does not prevent that. It makes the swap atomic,
     /// which is a different thing: an event applied at any point between the
     /// first round-trip and this call is simply not represented in `refreshed`.
+    ///
+    /// One group of fields is carried across rather than replaced: the metrics
+    /// the stats poller owns (see [`PolledMetrics`]). A refresh asks OBS about
+    /// scenes, inputs and outputs and never about live statistics, so building
+    /// the new snapshot leaves those fields at their defaults; copying the
+    /// existing values in before the swap is what stops a refresh from blanking
+    /// the live bitrate and durations mid-stream.
     #[must_use = "a superseded refresh leaves stale values in the snapshot until another one runs"]
     pub async fn apply_full_refresh(
         &self,
@@ -99,24 +121,47 @@ impl StateStore {
         self.generation() != generation_before
     }
 
+    /// Record that OBS is reachable, along with the versions the handshake
+    /// reported, and broadcast.
+    ///
+    /// The normal way the snapshot becomes `connected` is
+    /// [`apply_full_refresh`](Self::apply_full_refresh), which sets the flag as
+    /// part of publishing everything it read. This is for the case where that
+    /// read failed but the connection itself is fine: the supervisor still
+    /// installs the client, so `CommandExecutor::require_obs` hands it to
+    /// `scene`, `mute` and `vol` and they work — and a snapshot left saying
+    /// `connected: false` would have `obs-status` and the TUI reporting the
+    /// opposite of what those commands do.
+    ///
+    /// `error` is the reason the snapshot is incomplete, so a client can see
+    /// why the scene and input lists are missing or older than the connection.
+    /// Those lists are left as they are rather than blanked, matching what
+    /// [`mark_disconnected`](Self::mark_disconnected) does: last-known is more
+    /// use to a reader than empty.
+    pub async fn mark_connected(&self, versions: &ObsVersions, error: Option<String>) {
+        let mut guard = self.inner.write().await;
+        guard.connected = true;
+        guard.obs_studio_version = Some(versions.studio.clone());
+        guard.obs_websocket_version = Some(versions.websocket.clone());
+        guard.last_error = error;
+        guard.updated_at = OffsetDateTime::now_utc();
+        self.commit(&mut guard);
+    }
+
     /// Mark OBS as disconnected, record error, and broadcast.
     pub async fn mark_disconnected(&self, error: Option<String>) {
         let mut guard = self.inner.write().await;
         guard.connected = false;
         guard.last_error = error;
         guard.updated_at = OffsetDateTime::now_utc();
-        Self::broadcast(&self.hub, &guard);
+        self.commit(&mut guard);
     }
 
     /// Apply a single OBS event to the cached snapshot and broadcast.
     pub async fn apply_event(&self, event: ObsEvent) {
         let mut guard = self.inner.write().await;
         if apply_to_snapshot(&mut guard, event) {
-            // Bumped under the write lock so a refresh comparing generations
-            // either sees this event in the snapshot it is replacing, or sees
-            // the bump. It cannot miss both.
-            self.generation.fetch_add(1, Ordering::Release);
-            Self::broadcast(&self.hub, &guard);
+            self.commit(&mut guard);
         }
     }
 
@@ -145,6 +190,10 @@ impl StateStore {
     /// Update the polled performance/bitrate/duration metrics and broadcast.
     /// Called periodically by the stats poller; leaves everything else
     /// (scenes, audio, streaming/recording flags) untouched.
+    ///
+    /// Broadcasts without going through [`commit`](Self::commit) on purpose —
+    /// see the note there about why these fields are outside the staleness
+    /// fence.
     pub async fn update_stats(&self, metrics: PolledMetrics) {
         let mut guard = self.inner.write().await;
         metrics.write_into(&mut guard);
@@ -168,7 +217,7 @@ impl StateStore {
             apply_audio_config(input, cfg);
         }
         guard.updated_at = OffsetDateTime::now_utc();
-        Self::broadcast(&self.hub, &guard);
+        self.commit(&mut guard);
     }
 }
 
@@ -552,6 +601,47 @@ mod tests {
         assert_eq!(current.last_error.as_deref(), Some("timeout"));
     }
 
+    /// The supervisor installs the OBS client even when the connect-path
+    /// snapshot fetch fails, so the daemon can serve `scene`/`mute`/`vol`
+    /// against a connection whose scene list it never managed to read. The
+    /// snapshot has to say so, or `obs-status` reports "disconnected" while
+    /// those same commands succeed.
+    #[tokio::test]
+    async fn mark_connected_records_the_connection_and_why_the_snapshot_is_thin() {
+        let store = make_store();
+        store
+            .replace(ObsSnapshot {
+                scenes: vec![SceneState {
+                    name: "Main".to_string(),
+                    ..Default::default()
+                }],
+                ..ObsSnapshot::default()
+            })
+            .await;
+
+        store
+            .mark_connected(
+                &ObsVersions {
+                    studio: "30.1.0".to_string(),
+                    websocket: "5.3.0".to_string(),
+                },
+                Some("initial snapshot fetch failed: timeout".to_string()),
+            )
+            .await;
+
+        let current = store.read().await;
+        assert!(current.connected);
+        assert_eq!(current.obs_studio_version.as_deref(), Some("30.1.0"));
+        assert_eq!(current.obs_websocket_version.as_deref(), Some("5.3.0"));
+        assert_eq!(
+            current.last_error.as_deref(),
+            Some("initial snapshot fetch failed: timeout")
+        );
+        // Last-known lists survive; blanking them would replace "possibly
+        // stale" with "definitely nothing".
+        assert_eq!(current.scenes.len(), 1);
+    }
+
     #[tokio::test]
     async fn apply_event_scene_change() {
         let store = make_store();
@@ -780,6 +870,92 @@ mod tests {
         );
     }
 
+    /// A refresh can be slower than the connection it is reading from. All its
+    /// obs-websocket round-trips can be finished while the socket is closing,
+    /// so `mark_disconnected` runs first and the refresh publishes afterwards —
+    /// and the snapshot a refresh builds always says `connected: true` and
+    /// carries no `last_error`, because it describes an OBS that was answering.
+    ///
+    /// The overwrite itself is unavoidable; being quiet about it is not. Until
+    /// `mark_disconnected` counted as a write, the refresh reported "nothing
+    /// overtook me", nobody fetched again, and the daemon sat there telling
+    /// every client OBS was connected when it was not.
+    #[tokio::test]
+    async fn a_refresh_that_lands_after_a_disconnect_reports_that_it_is_stale() {
+        let store = make_store();
+        store
+            .replace(ObsSnapshot {
+                connected: true,
+                ..ObsSnapshot::default()
+            })
+            .await;
+
+        // The fetch starts here, against a connection that is still up.
+        let generation_before = store.generation();
+
+        // ...and the socket closes while its round-trips are in flight.
+        store
+            .mark_disconnected(Some("OBS disconnected".to_string()))
+            .await;
+
+        let superseded = store
+            .apply_full_refresh(&RefreshedObsState::default(), &[], &[], generation_before)
+            .await;
+
+        assert!(
+            superseded,
+            "a refresh that overwrote a disconnect must ask to be run again"
+        );
+        // Showing what it overwrote, so the reason for the re-fetch is on the
+        // record: the daemon is now claiming a connection that is gone.
+        let current = store.read().await;
+        assert!(current.connected);
+        assert_eq!(current.last_error, None);
+    }
+
+    /// Config reload is the other write a slow refresh can undo: the aliases it
+    /// attaches are not in the snapshot the refresh built, so the refresh has
+    /// to be told to run again and pick them up.
+    #[tokio::test]
+    async fn a_refresh_that_lands_after_a_config_merge_reports_that_it_is_stale() {
+        let store = make_store();
+        store
+            .replace(ObsSnapshot {
+                scenes: vec![SceneState {
+                    name: "Main".to_string(),
+                    ..Default::default()
+                }],
+                ..ObsSnapshot::default()
+            })
+            .await;
+
+        let generation_before = store.generation();
+        store
+            .merge_config(
+                &[SceneConfig {
+                    name: "Main".to_string(),
+                    alias: Some("m".to_string()),
+                    ..Default::default()
+                }],
+                &[],
+            )
+            .await;
+
+        let superseded = store
+            .apply_full_refresh(
+                &RefreshedObsState {
+                    scenes: Listing::new(vec!["Main".to_string()], "Main"),
+                    ..RefreshedObsState::default()
+                },
+                &[],
+                &[],
+                generation_before,
+            )
+            .await;
+
+        assert!(superseded);
+    }
+
     /// Events that change nothing do not force a re-refresh: OBS re-announces
     /// state the daemon already holds, and treating that as a reason to fetch
     /// again would put the refresher in a loop.
@@ -845,9 +1021,6 @@ mod tests {
         }
     }
 
-    /// The supervisor answers list-changed events with a full refresh, which
-    /// broadcasts on its own. Broadcasting here too would push an unchanged
-    /// snapshot — the false positive `CLAUDE.md` warns about.
     /// A scene or input the reloaded config no longer mentions loses the
     /// metadata that config gave it — the same rule `build_snapshot` applies
     /// on the full-refresh path.
@@ -893,6 +1066,9 @@ mod tests {
         assert_eq!(snap.audio_inputs[0].name, "Mic");
     }
 
+    /// The supervisor answers list-changed events with a full refresh, which
+    /// broadcasts on its own. Broadcasting here too would push an unchanged
+    /// snapshot — the false positive `CLAUDE.md` warns about.
     #[tokio::test]
     async fn list_changed_events_do_not_broadcast_unchanged_state() {
         let store = make_store();

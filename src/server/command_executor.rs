@@ -454,8 +454,21 @@ impl CommandExecutor {
         Ok(warnings)
     }
 
+    /// Ask the supervisor to drop the current OBS connection and dial again.
+    ///
+    /// The request travels over a channel whose receiving end lives inside
+    /// `ObsSupervisor::run`. When that function returns, the receiver is
+    /// dropped and nothing will ever act on another request — which is not
+    /// hypothetical: with `reconnect.enabled: false` in the config the
+    /// supervisor stops after its first failed connect, and the daemon cannot
+    /// reach OBS again for the rest of its life. Reporting the failed send as
+    /// success meant every later `obsctl reconnect` printed a confirmation,
+    /// exited 0, and did nothing at all.
     async fn cmd_reconnect_obs(&self) -> Result<Value> {
-        let _ = self.reconnect_tx.send(()).await;
+        self.reconnect_tx
+            .send(())
+            .await
+            .map_err(|_| ObsctlError::ObsUnavailable)?;
         Ok(json!({ "message": "reconnect triggered" }))
     }
 
@@ -467,7 +480,15 @@ impl CommandExecutor {
         drop(config);
         info!("Shutdown requested via IPC");
         self.publish_log(LogLevel::Info, "Shutdown requested via IPC");
-        let _ = self.shutdown_tx.send(true);
+        // Same reasoning as `cmd_reconnect_obs`: a send that nothing is left to
+        // receive means the daemon will not act on this, so the caller must not
+        // be told it worked. `ObsUnavailable` is reused rather than inventing an
+        // error code, because a new one would be a change to the public IPC
+        // contract (error code, exit code, README table, CLI mapping) for a
+        // case that only arises while the daemon is already on its way down.
+        self.shutdown_tx
+            .send(true)
+            .map_err(|_| ObsctlError::ObsUnavailable)?;
         Ok(json!({ "message": "shutdown initiated" }))
     }
 
