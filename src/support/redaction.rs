@@ -40,6 +40,22 @@ fn is_secret_key(key: &str) -> bool {
 
 fn redact_associated_secret_values(message: &str) -> String {
     let message = redact_url_credentials(message);
+    let redacted = replace_found_ranges(&message, secret_value_range);
+    redact_bearer_tokens(&redacted)
+}
+
+/// Walk `message` once, replacing every range `find` points at with the
+/// redaction placeholder and copying everything else through unchanged.
+///
+/// The two redaction passes below differ only in what they look for, so the
+/// walk — which has to respect UTF-8 boundaries and must never drop or
+/// duplicate the text between matches — is written once. Getting that walk
+/// subtly wrong in one copy and not the other is how a redactor ends up
+/// emitting the secret it was meant to hide.
+fn replace_found_ranges(
+    message: &str,
+    find: fn(&str, usize) -> Option<std::ops::Range<usize>>,
+) -> String {
     let mut redacted = String::with_capacity(message.len());
     let mut scan_at = 0;
     let mut copy_from = 0;
@@ -50,7 +66,7 @@ fn redact_associated_secret_values(message: &str) -> String {
             continue;
         }
 
-        let Some(value_range) = secret_value_range(&message, scan_at) else {
+        let Some(value_range) = find(message, scan_at) else {
             scan_at += message[scan_at..]
                 .chars()
                 .next()
@@ -66,7 +82,7 @@ fn redact_associated_secret_values(message: &str) -> String {
     }
 
     redacted.push_str(&message[copy_from..]);
-    redact_bearer_tokens(&redacted)
+    redacted
 }
 
 fn redact_url_credentials(message: &str) -> String {
@@ -103,33 +119,7 @@ fn url_authority_end(message: &str, authority_start: usize) -> usize {
 }
 
 fn redact_bearer_tokens(message: &str) -> String {
-    let mut redacted = String::with_capacity(message.len());
-    let mut scan_at = 0;
-    let mut copy_from = 0;
-
-    while scan_at < message.len() {
-        if !message.is_char_boundary(scan_at) {
-            scan_at += 1;
-            continue;
-        }
-
-        let Some(value_range) = bearer_token_value_range(message, scan_at) else {
-            scan_at += message[scan_at..]
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .unwrap_or(1);
-            continue;
-        };
-
-        redacted.push_str(&message[copy_from..value_range.start]);
-        redacted.push_str(REDACTED_SECRET);
-        scan_at = value_range.end;
-        copy_from = value_range.end;
-    }
-
-    redacted.push_str(&message[copy_from..]);
-    redacted
+    replace_found_ranges(message, bearer_token_value_range)
 }
 
 fn bearer_token_value_range(message: &str, bearer_start: usize) -> Option<std::ops::Range<usize>> {
@@ -151,13 +141,7 @@ fn bearer_token_value_range(message: &str, bearer_start: usize) -> Option<std::o
         return None;
     }
 
-    let value_end = redacted_literal_end(message, cursor)
-        .unwrap_or_else(|| unquoted_value_end(message, cursor));
-    if value_end == cursor {
-        None
-    } else {
-        Some(cursor..value_end)
-    }
+    unquoted_value_range(message, cursor)
 }
 
 fn secret_value_range(message: &str, key_start: usize) -> Option<std::ops::Range<usize>> {
@@ -174,6 +158,18 @@ fn secret_value_range(message: &str, key_start: usize) -> Option<std::ops::Range
         }
     }
     None
+}
+
+/// The span of an unquoted value starting at `cursor`, or `None` if there is
+/// nothing there to redact.
+///
+/// An already-redacted placeholder is matched first so that redacting twice
+/// leaves the text alone rather than redacting the placeholder itself — the
+/// idempotence the rest of the crate relies on.
+fn unquoted_value_range(message: &str, cursor: usize) -> Option<std::ops::Range<usize>> {
+    let value_end = redacted_literal_end(message, cursor)
+        .unwrap_or_else(|| unquoted_value_end(message, cursor));
+    (value_end != cursor).then_some(cursor..value_end)
 }
 
 fn keyword_matches_at(message: &str, start: usize, end: usize, keyword: &str) -> bool {
@@ -209,15 +205,7 @@ fn associated_value_range(message: &str, key_end: usize) -> Option<std::ops::Ran
             let value_end = quoted_value_end(message, value_start, quote);
             Some(value_start..value_end)
         }
-        Some(_) => {
-            let value_end = redacted_literal_end(message, cursor)
-                .unwrap_or_else(|| unquoted_value_end(message, cursor));
-            if value_end == cursor {
-                None
-            } else {
-                Some(cursor..value_end)
-            }
-        }
+        Some(_) => unquoted_value_range(message, cursor),
         None => None,
     }
 }
