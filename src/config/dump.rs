@@ -360,6 +360,31 @@ mod tests {
         assert!(merge(&config, &obs).is_err());
     }
 
+    /// The audio path has the same alias/shortcut collision rule as the scene
+    /// path above. Pinned separately because the two are independent copies of
+    /// the check, so "scenes are covered" does not imply inputs are.
+    #[test]
+    fn rejects_audio_alias_collision_with_obs_input_name() {
+        let mut config = base_config();
+        config.audio.inputs[0].alias = Some("Desktop".to_string());
+        let obs = ObsResources {
+            scenes: vec![],
+            inputs: vec!["Mic".to_string(), "Desktop".to_string()],
+        };
+        assert!(merge(&config, &obs).is_err());
+    }
+
+    #[test]
+    fn rejects_audio_shortcut_collision_with_obs_input_name() {
+        let mut config = base_config();
+        config.audio.inputs[0].shortcut = Some("Desktop".to_string());
+        let obs = ObsResources {
+            scenes: vec![],
+            inputs: vec!["Mic".to_string(), "Desktop".to_string()],
+        };
+        assert!(merge(&config, &obs).is_err());
+    }
+
     #[test]
     fn rejects_duplicate_scene_alias() {
         let mut config = base_config();
