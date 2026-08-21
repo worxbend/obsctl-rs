@@ -1,5 +1,7 @@
 use std::collections::HashSet;
-use tokio::sync::{broadcast, oneshot};
+use std::sync::Arc;
+
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::ipc::protocol::{CommandPayload, LogEvent, ObsEventPayload, ServerMessage, Topic};
 
@@ -78,6 +80,42 @@ pub struct CommandDispatch {
     pub id: String,
     pub payload: CommandPayload,
     pub reply: oneshot::Sender<ServerMessage>,
+}
+
+/// Where a newly accepted IPC session gets the channel it dispatches on.
+///
+/// One connection's commands all travel down the one sender it is handed here,
+/// and a channel delivers what is sent into it in order — so whoever is at the
+/// receiving end of that sender decides the ordering rule for that connection,
+/// and only for that connection. That is the whole point of handing out a
+/// sender per session rather than sharing one: the daemon (see
+/// `server::command_lanes`) gives each session a sender whose receiver is
+/// served by its own task, which makes one client's commands run in the order
+/// it sent them while a slow command from another client is running at the
+/// same time.
+pub trait CommandLanes: Send + Sync {
+    /// Give one session the sender it will dispatch every command on.
+    fn open_lane(&self) -> mpsc::Sender<CommandDispatch>;
+}
+
+/// A single shared channel is a legitimate — if unfair — arrangement of lanes:
+/// every session dispatches into the same queue, so whoever drains that queue
+/// decides the order of *everything*, not just of one connection's commands.
+/// The daemon does not run this way; tests that want one queue they can read
+/// commands off do, and this is what lets them pass a plain sender.
+impl CommandLanes for mpsc::Sender<CommandDispatch> {
+    fn open_lane(&self) -> mpsc::Sender<CommandDispatch> {
+        self.clone()
+    }
+}
+
+/// Shared ownership does not change how lanes are opened, so a lane source
+/// behind an `Arc` is one too — which is what lets the daemon keep a handle on
+/// its lanes (to wait for them at shutdown) while the accept loop uses them.
+impl<T: CommandLanes + ?Sized> CommandLanes for Arc<T> {
+    fn open_lane(&self) -> mpsc::Sender<CommandDispatch> {
+        (**self).open_lane()
+    }
 }
 
 /// Tracks which topics a single IPC client has subscribed to.

@@ -16,8 +16,8 @@ use obsctl_rs::{
     config::model::Config,
     ipc::{
         protocol::{
-            CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS,
-            TOPIC_STATE, Topic, exit_code_for_public_error_code,
+            ClientMessage, CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_EVENTS,
+            TOPIC_LOGS, TOPIC_STATE, Topic, exit_code_for_public_error_code,
         },
         session::BroadcastHub,
         unix_client::IpcClient,
@@ -31,11 +31,12 @@ use obsctl_rs::{
     server::{
         client_registry::ClientRegistry,
         command_executor::{CommandExecutor, CommandExecutorConfig},
+        command_lanes::ExecutorLanes,
         obs_supervisor::{ObsSupervisor, ObsSupervisorConfig},
         state_store::StateStore,
     },
 };
-use support::fake_obs_server::{PreparedResponse, spawn_fake_obs};
+use support::fake_obs_server::{PreparedResponse, spawn_fake_obs, spawn_silent_obs};
 
 #[test]
 fn ipc_protocol_cli_and_tui_do_not_import_obs_client() {
@@ -82,7 +83,6 @@ async fn start_test_server_with_config(
     let registry = ClientRegistry::new();
     let (reconnect_tx, _reconnect_rx) = mpsc::channel::<()>(4);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
     let state_clone = state.clone();
     let executor = CommandExecutor::new(CommandExecutorConfig {
@@ -99,8 +99,7 @@ async fn start_test_server_with_config(
     });
 
     let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
-    tokio::spawn(executor.run(cmd_rx));
-    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+    tokio::spawn(server.run(Arc::new(ExecutorLanes::new(executor)), shutdown_rx));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -121,7 +120,6 @@ async fn start_test_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>) {
     let registry = ClientRegistry::new();
     let (reconnect_tx, _reconnect_rx) = mpsc::channel::<()>(4);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
     let executor = CommandExecutor::new(CommandExecutorConfig {
         state,
@@ -137,8 +135,7 @@ async fn start_test_server(dir: &TempDir) -> (IpcClient, watch::Sender<bool>) {
     });
 
     let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
-    tokio::spawn(executor.run(cmd_rx));
-    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+    tokio::spawn(server.run(Arc::new(ExecutorLanes::new(executor)), shutdown_rx));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -152,6 +149,21 @@ async fn start_test_server_with_obs_client(
     obs_client: ObsClient,
     snapshot: ObsSnapshot,
 ) -> (IpcClient, watch::Sender<bool>) {
+    let (socket_path, shutdown_tx) =
+        spawn_server_with_obs_client(dir, cfg, obs_client, snapshot).await;
+    let client = IpcClient::connect(&socket_path).await.unwrap();
+    (client, shutdown_tx)
+}
+
+/// The same daemon as [`start_test_server_with_obs_client`], handed back by its
+/// socket path instead of by one connected client — which is what a test needs
+/// when it wants two clients talking to the daemon at once.
+async fn spawn_server_with_obs_client(
+    dir: &TempDir,
+    cfg: Config,
+    obs_client: ObsClient,
+    snapshot: ObsSnapshot,
+) -> (PathBuf, watch::Sender<bool>) {
     let socket_path = dir.path().join("server_obs.sock");
 
     let hub = Arc::new(BroadcastHub::new());
@@ -163,7 +175,6 @@ async fn start_test_server_with_obs_client(
     let registry = ClientRegistry::new();
     let (reconnect_tx, _reconnect_rx) = mpsc::channel::<()>(4);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
     let executor = CommandExecutor::new(CommandExecutorConfig {
         state,
@@ -179,13 +190,11 @@ async fn start_test_server_with_obs_client(
     });
 
     let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
-    tokio::spawn(executor.run(cmd_rx));
-    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+    tokio::spawn(server.run(Arc::new(ExecutorLanes::new(executor)), shutdown_rx));
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    wait_for_ipc_available(&socket_path).await;
 
-    let client = IpcClient::connect(&socket_path).await.unwrap();
-    (client, shutdown_tx)
+    (socket_path, shutdown_tx)
 }
 
 async fn start_test_server_with_obs_supervisor(
@@ -202,7 +211,6 @@ async fn start_test_server_with_obs_supervisor(
     let registry = ClientRegistry::new();
     let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(4);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
     let executor = CommandExecutor::new(CommandExecutorConfig {
         state: state.clone(),
@@ -227,8 +235,7 @@ async fn start_test_server_with_obs_supervisor(
     });
 
     let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
-    tokio::spawn(executor.run(cmd_rx));
-    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+    tokio::spawn(server.run(Arc::new(ExecutorLanes::new(executor)), shutdown_rx));
     tokio::spawn(supervisor.run());
 
     wait_for_ipc_available(&socket_path).await;
@@ -977,7 +984,6 @@ async fn socket_file_exists_while_server_runs() {
     let registry = ClientRegistry::new();
     let (reconnect_tx, _reconnect_rx) = mpsc::channel::<()>(4);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
     let executor = CommandExecutor::new(CommandExecutorConfig {
         state,
@@ -993,8 +999,7 @@ async fn socket_file_exists_while_server_runs() {
     });
 
     let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
-    tokio::spawn(executor.run(cmd_rx));
-    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+    tokio::spawn(server.run(Arc::new(ExecutorLanes::new(executor)), shutdown_rx));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(
@@ -1022,7 +1027,6 @@ async fn server_handles_multiple_sequential_clients() {
     let registry = ClientRegistry::new();
     let (reconnect_tx, _reconnect_rx) = mpsc::channel::<()>(4);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let (cmd_tx, cmd_rx) = mpsc::channel(64);
 
     let executor = CommandExecutor::new(CommandExecutorConfig {
         state,
@@ -1038,8 +1042,7 @@ async fn server_handles_multiple_sequential_clients() {
     });
 
     let server = IpcServer::bind_with_registry(&socket_path, Arc::clone(&hub), registry).unwrap();
-    tokio::spawn(executor.run(cmd_rx));
-    tokio::spawn(server.run(cmd_tx, shutdown_rx));
+    tokio::spawn(server.run(Arc::new(ExecutorLanes::new(executor)), shutdown_rx));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -1322,4 +1325,282 @@ async fn toggle_record_returns_recording_stopped_when_inactive() {
     assert_eq!(result.unwrap()["message"], "recording stopped");
 
     fake_obs.shutdown();
+}
+
+#[tokio::test]
+async fn shutdown_ends_the_supervisor_while_a_connection_attempt_is_stalled() {
+    // A fake OBS that accepts the socket and then never sends Hello: the
+    // supervisor gets past the connect step and sits in the handshake.
+    let mut fake_obs = spawn_silent_obs().await;
+
+    let mut cfg = Config::default();
+    cfg.connection.host = "127.0.0.1".to_string();
+    cfg.connection.port = fake_obs.addr.port();
+    cfg.connection.password_env = String::new();
+    // Far longer than the test is willing to wait, so the handshake timeout
+    // cannot be what ends the attempt — only the shutdown signal can.
+    cfg.connection.connect_timeout_ms = 600_000;
+
+    let hub = Arc::new(BroadcastHub::new());
+    let state = StateStore::new(Arc::clone(&hub));
+    let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
+    let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(4);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let supervisor = ObsSupervisor::new(ObsSupervisorConfig {
+        config: Arc::new(Mutex::new(cfg)),
+        state,
+        obs_handle,
+        reconnecting: Arc::new(AtomicBool::new(false)),
+        reconnect_rx,
+        shutdown: shutdown_rx,
+        hub,
+    });
+    let supervising = tokio::spawn(supervisor.run());
+
+    // Deterministic readiness: the attempt is provably in flight once the fake
+    // server has a client on the other end of a completed WebSocket upgrade.
+    fake_obs.wait_for_connection().await;
+    shutdown_tx.send(true).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), supervising)
+        .await
+        .expect("shutdown must interrupt a stalled connection attempt")
+        .expect("supervisor task should not panic");
+
+    drop(reconnect_tx);
+    fake_obs.shutdown();
+}
+
+// --- Issue #6: one client's slow command must not stop another client's ---
+
+/// A daemon whose OBS can be made to hold one command open for as long as a
+/// test likes.
+///
+/// Everything the daemon needs kept alive is parked here, so a test only has to
+/// hold on to this one value: the OBS event channel (whose receiver going away
+/// would end the OBS client's read task), the disconnect signal, and the
+/// shutdown sender the IPC server watches.
+struct HoldableObsDaemon {
+    socket_path: PathBuf,
+    fake_obs: support::fake_obs_server::FakeObsHandle,
+    /// Releases the held `SetCurrentProgramScene`.
+    gate: support::fake_obs_server::ResponseGate,
+    _obs_events: mpsc::Receiver<obsctl_rs::obs::client::ObsEvent>,
+    _obs_disconnected: tokio::sync::oneshot::Receiver<()>,
+    _shutdown: watch::Sender<bool>,
+}
+
+impl HoldableObsDaemon {
+    /// Start a daemon connected to a fake OBS that holds `SetCurrentProgramScene`
+    /// — and therefore the `set_scene` command — until [`Self::gate`] is
+    /// released.
+    async fn start(dir: &TempDir) -> Self {
+        let fake_obs = spawn_fake_obs(false, None).await;
+        let (held, gate) = PreparedResponse::success(Value::Null).gated();
+        fake_obs.set_response("SetCurrentProgramScene", held).await;
+
+        let mut cfg = Config::default();
+        cfg.connection.host = "127.0.0.1".to_string();
+        cfg.connection.port = fake_obs.addr.port();
+        cfg.connection.password_env = String::new();
+        // Comfortably longer than these tests take. The held command has to
+        // stay held until the test says otherwise, rather than until the OBS
+        // client gives up waiting on the reply.
+        cfg.connection.request_timeout_ms = 30_000;
+
+        let params = ObsConnectionParams::from_config(&cfg.connection).unwrap();
+        let (event_tx, obs_events) = mpsc::channel(8);
+        let (obs_client, _, _, obs_disconnected) = connect(&params, event_tx).await.unwrap();
+
+        let snapshot = ObsSnapshot {
+            connected: true,
+            current_scene: Some("Main".to_string()),
+            scenes: vec![SceneState {
+                name: "Main".to_string(),
+                active: true,
+                ..SceneState::default()
+            }],
+            ..ObsSnapshot::default()
+        };
+
+        let (socket_path, shutdown) =
+            spawn_server_with_obs_client(dir, cfg, obs_client, snapshot).await;
+
+        Self {
+            socket_path,
+            fake_obs,
+            gate,
+            _obs_events: obs_events,
+            _obs_disconnected: obs_disconnected,
+            _shutdown: shutdown,
+        }
+    }
+
+    /// The `set_scene` command whose OBS request the gate holds.
+    fn held_command() -> CommandPayload {
+        cmd("set_scene", serde_json::json!({ "target": "Main" }))
+    }
+
+    /// Wait until the held command has actually reached OBS.
+    ///
+    /// This is the readiness handle that makes the tests below deterministic
+    /// rather than timed: once the fake OBS reports the request, the command is
+    /// known to be inside the daemon and stuck there until the gate opens.
+    async fn wait_until_command_is_held(&mut self) {
+        let deadline = Duration::from_secs(5);
+        let request = tokio::time::timeout(deadline, async {
+            loop {
+                let (request_type, _) = self
+                    .fake_obs
+                    .requests
+                    .recv()
+                    .await
+                    .expect("the fake OBS stopped reporting requests");
+                if request_type == "SetCurrentProgramScene" {
+                    return request_type;
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            request.is_ok(),
+            "the slow command never reached OBS, so it was never actually in flight"
+        );
+    }
+}
+
+/// The bug in issue #6: every connection's commands went through one loop that
+/// ran them one at a time, so a command that takes seconds — `dump-config` does
+/// two OBS round trips and rewrites the config file — stopped every other
+/// client for the whole of it, including the TUI's polling.
+///
+/// The slow command here is held open at OBS rather than made slow by a sleep,
+/// so the test does not race anything: the `ping` either comes back while the
+/// other client's command is provably still running, or it does not come back
+/// at all.
+#[tokio::test]
+async fn a_slow_command_does_not_hold_up_another_clients_command() {
+    let dir = TempDir::new().unwrap();
+    let mut daemon = HoldableObsDaemon::start(&dir).await;
+
+    let mut slow_client = IpcClient::connect(&daemon.socket_path).await.unwrap();
+    let mut fast_client = IpcClient::connect(&daemon.socket_path).await.unwrap();
+
+    let slow = tokio::spawn(async move {
+        slow_client
+            .send_command(HoldableObsDaemon::held_command())
+            .await
+    });
+    daemon.wait_until_command_is_held().await;
+
+    let pong = tokio::time::timeout(
+        Duration::from_secs(5),
+        fast_client.send_command(cmd("ping", Value::Null)),
+    )
+    .await
+    .expect("a second client's ping waited for the first client's held command")
+    .expect("ping failed");
+    let (ok, result, _) = extract_response(pong);
+    assert!(ok, "ping should succeed while another client is busy");
+    assert_eq!(result.unwrap()["message"], "pong");
+
+    // Only now is the held command allowed to finish, which shows the ping
+    // really did overtake a command that had not yet returned.
+    daemon.gate.release();
+    let (ok, result, code) = extract_response(slow.await.unwrap().unwrap());
+    assert!(ok, "the held command should still succeed: {code:?}");
+    assert_eq!(result.unwrap()["message"], "scene set: Main");
+
+    daemon.fake_obs.shutdown();
+}
+
+/// The guarantee the fix must not trade away: two commands sent down one
+/// connection run in the order that connection sent them.
+///
+/// `ping` and `get_server_status` never touch OBS, so nothing but the daemon's
+/// own ordering can be keeping them behind the held `set_scene`. Spawning every
+/// command onto its own task would answer both of them immediately and fail
+/// this test.
+#[tokio::test]
+async fn one_clients_commands_run_in_the_order_it_sent_them() {
+    let dir = TempDir::new().unwrap();
+    let mut daemon = HoldableObsDaemon::start(&dir).await;
+
+    let mut client = PipelinedClient::connect(&daemon.socket_path).await;
+    client
+        .send("cmd-1", HoldableObsDaemon::held_command())
+        .await;
+    client.send("cmd-2", cmd("ping", Value::Null)).await;
+    client
+        .send("cmd-3", cmd("get_server_status", Value::Null))
+        .await;
+
+    daemon.wait_until_command_is_held().await;
+
+    let early = tokio::time::timeout(Duration::from_millis(500), client.next_response()).await;
+    assert!(
+        early.is_err(),
+        "a later command from the same connection answered before the earlier one had finished: {early:?}"
+    );
+
+    daemon.gate.release();
+
+    for expected in ["cmd-1", "cmd-2", "cmd-3"] {
+        let answered = tokio::time::timeout(Duration::from_secs(5), client.next_response())
+            .await
+            .unwrap_or_else(|_| panic!("no response for {expected}"));
+        match answered {
+            ServerMessage::Response { id, ok, .. } => {
+                assert_eq!(id, expected, "responses came back out of order");
+                assert!(ok, "{expected} failed");
+            }
+            other => panic!("expected a response, got {other:?}"),
+        }
+    }
+
+    daemon.fake_obs.shutdown();
+}
+
+/// An IPC client that sends commands without waiting for the answers.
+///
+/// `IpcClient` sends one command and reads until that command's response, which
+/// cannot show what order the daemon *ran* things in. This writes all the
+/// requests first and then reads the replies in the order they arrive on the
+/// socket, which is exactly what the ordering test needs to see.
+struct PipelinedClient {
+    reader: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: tokio::net::unix::OwnedWriteHalf,
+}
+
+impl PipelinedClient {
+    async fn connect(socket_path: &Path) -> Self {
+        let stream = tokio::net::UnixStream::connect(socket_path).await.unwrap();
+        let (reader, writer) = stream.into_split();
+        Self {
+            reader: tokio::io::BufReader::new(reader),
+            writer,
+        }
+    }
+
+    async fn send(&mut self, id: &str, command: CommandPayload) {
+        use tokio::io::AsyncWriteExt;
+
+        let frame = obsctl_rs::ipc::codec::encode(&ClientMessage::Command {
+            id: id.to_string(),
+            command,
+        })
+        .unwrap();
+        self.writer.write_all(frame.as_bytes()).await.unwrap();
+    }
+
+    async fn next_response(&mut self) -> ServerMessage {
+        use tokio::io::AsyncBufReadExt;
+
+        let mut line = String::new();
+        let read = self.reader.read_line(&mut line).await.unwrap();
+        assert!(read > 0, "the daemon closed the connection");
+        obsctl_rs::ipc::codec::decode::<ServerMessage>(&line).unwrap()
+    }
 }

@@ -18,6 +18,7 @@ use crate::runtime::shutdown;
 use crate::server::{
     client_registry::ClientRegistry,
     command_executor::{CommandExecutor, CommandExecutorConfig},
+    command_lanes::ExecutorLanes,
     obs_supervisor::{ObsSupervisor, ObsSupervisorConfig},
     options::ServerOptions,
     state_store::StateStore,
@@ -56,7 +57,6 @@ pub async fn run(options: ServerOptions) -> i32 {
 
     let (shutdown_tx, shutdown_rx) = shutdown::channel();
     let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(4);
-    let (cmd_tx, cmd_rx) = mpsc::channel(128);
 
     // Bind IPC server
     let ipc_server =
@@ -103,19 +103,28 @@ pub async fn run(options: ServerOptions) -> i32 {
         hub: Arc::clone(&hub),
     });
 
+    // One executor, reached through one lane per connection: commands from a
+    // single client keep the order that client sent them in, and a slow command
+    // from one client no longer holds up every other client's.
+    let lanes = Arc::new(ExecutorLanes::new(executor));
+
     // Spawn tasks
-    let executor_handle = tokio::spawn(executor.run(cmd_rx));
     let supervisor_handle = tokio::spawn(supervisor.run());
 
     // Run accept loop until shutdown
-    ipc_server.run(cmd_tx, shutdown_rx).await;
+    ipc_server.run(Arc::clone(&lanes), shutdown_rx).await;
     announce(&hub, "IPC accept loop stopped");
+
+    // Nothing opens a lane once the accept loop has stopped, so from here the
+    // set of lanes to wait for is fixed. The wait is spawned only because the
+    // tidy-up below puts one deadline on both it and the supervisor.
+    let lanes_handle = tokio::spawn(async move { lanes.drain().await });
 
     // The exit code stays 0 whether or not every step of the shutdown managed
     // to finish: the daemon was asked to stop and it stopped. An incomplete
     // tidy-up is something to read about in the log, not a failed exit that
     // would have systemd restart the service.
-    let _completed = shut_down(&hub, &socket_path, executor_handle, supervisor_handle).await;
+    let _completed = shut_down(&hub, &socket_path, lanes_handle, supervisor_handle).await;
     0
 }
 
@@ -158,18 +167,19 @@ const TASK_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(
 async fn shut_down(
     hub: &BroadcastHub,
     socket_path: &Path,
-    executor_handle: tokio::task::JoinHandle<()>,
+    lanes_handle: tokio::task::JoinHandle<()>,
     supervisor_handle: tokio::task::JoinHandle<()>,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + TASK_SHUTDOWN_GRACE;
 
-    // The executor is drained first, and awaited rather than abandoned. Its
-    // command receiver closes by itself once the accept loop has dropped the
-    // last sender, so waiting here is not waiting to be told to stop — it is
-    // giving the commands already in flight time to finish their OBS requests
-    // and answer. Dropping the handle instead cut them off mid-request, and the
-    // client that sent one got "command handler dropped" instead of a result.
-    let executor_stopped = join_by(hub, deadline, "command executor", executor_handle).await;
+    // The command lanes are drained first, and awaited rather than abandoned.
+    // A lane's receiver closes by itself once its connection has gone and
+    // dropped the sender, so waiting here is not waiting to be told to stop —
+    // it is giving the commands already in flight time to finish their OBS
+    // requests and answer. Dropping the handle instead cut them off
+    // mid-request, and the client that sent one got "command handler dropped"
+    // instead of a result.
+    let lanes_stopped = join_by(hub, deadline, "command lanes", lanes_handle).await;
     let supervisor_stopped = join_by(hub, deadline, "OBS supervisor", supervisor_handle).await;
 
     let socket_removed = match socket_path::cleanup(socket_path) {
@@ -186,7 +196,7 @@ async fn shut_down(
         }
     };
 
-    let completed = executor_stopped && supervisor_stopped && socket_removed;
+    let completed = lanes_stopped && supervisor_stopped && socket_removed;
     if completed {
         announce(hub, "obsctl server shutdown complete");
     } else {

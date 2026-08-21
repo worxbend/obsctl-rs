@@ -232,3 +232,65 @@ async fn connection_refused_returns_error() {
     let result = IpcClient::connect(path).await;
     assert!(result.is_err());
 }
+
+/// A client that never sends a newline must not be able to make the daemon
+/// buffer whatever it likes.
+///
+/// The daemon owns the only connection to OBS, so its memory is everyone's
+/// memory. This drives the abuse through a real socket and counts the bytes
+/// the daemon was willing to take off it: a reader that stops at the frame
+/// cap refuses the rest of the flood and hangs up, so the writes start
+/// failing almost immediately. A reader that only checks the size once the
+/// line is complete keeps swallowing bytes, and the count runs away to the
+/// ceiling below.
+#[tokio::test]
+async fn a_never_ending_request_line_is_cut_off_near_the_frame_cap() {
+    use obsctl_rs::ipc::protocol::MAX_IPC_LINE_BYTES;
+    use tokio::io::AsyncReadExt;
+
+    // Stop pushing at this point whatever happens, so a daemon that really is
+    // willing to read forever fails the assertion instead of the test machine.
+    const FLOOD_CEILING: usize = 64 * 1024 * 1024;
+    // What a bounded reader may take: the 64 KiB frame cap plus however much
+    // the kernel had already accepted into the socket buffers before the
+    // daemon gave up. Generous, and still nowhere near the ceiling.
+    const ACCEPTED_LIMIT: usize = 8 * 1024 * 1024;
+
+    let dir = TempDir::new().unwrap();
+    let socket_path = dir.path().join("flood.sock");
+    let (_hub, _cmd_rx, _shutdown) = start_test_server(&socket_path).await;
+
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+
+    let chunk = vec![b'a'; MAX_IPC_LINE_BYTES];
+    let mut accepted = 0usize;
+    let flood = async {
+        while accepted < FLOOD_CEILING {
+            if stream.write_all(&chunk).await.is_err() {
+                // The daemon hung up: exactly what should happen.
+                break;
+            }
+            accepted += chunk.len();
+        }
+    };
+
+    // A daemon that stopped reading without hanging up would block this write
+    // forever; the timeout turns that into a reported failure too.
+    timeout(std::time::Duration::from_secs(10), flood)
+        .await
+        .expect("the daemon neither read the flood nor closed the connection");
+
+    assert!(
+        accepted < ACCEPTED_LIMIT,
+        "the daemon accepted {accepted} bytes of a single unterminated line; \
+         the frame cap is {MAX_IPC_LINE_BYTES} bytes"
+    );
+
+    // And the outcome the client sees is unchanged: the session is dropped.
+    let mut buf = [0u8; 1];
+    let read = timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+        .await
+        .expect("the daemon never closed the session")
+        .unwrap_or(0);
+    assert_eq!(read, 0, "expected the daemon to drop the client");
+}

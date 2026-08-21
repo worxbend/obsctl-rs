@@ -60,6 +60,20 @@ pub struct CommandExecutor {
     reconnect_tx: mpsc::Sender<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     hub: Arc<BroadcastHub>,
+    /// Held for as long as a command is reading and rewriting the config file.
+    ///
+    /// The commands that touch that file are not safe to interleave: a dump
+    /// reads the file, merges what OBS reports onto it, writes a backup, and
+    /// replaces the file — and two dumps doing that at once could back up a
+    /// half-written file or write a merge built from a config that no longer
+    /// exists. Nothing used to stop that except the accident that the daemon
+    /// ran every command one after another; now that commands from different
+    /// clients run at the same time, the exclusion has to be asked for.
+    ///
+    /// The value is `()` because the thing being guarded is the file on disk,
+    /// which Rust cannot hand out a reference to. The lock is always taken
+    /// before `config`, never the other way round, so the two cannot deadlock.
+    config_file: Mutex<()>,
 }
 
 impl CommandExecutor {
@@ -76,10 +90,20 @@ impl CommandExecutor {
             reconnect_tx: cfg.reconnect_tx,
             shutdown_tx: cfg.shutdown_tx,
             hub: cfg.hub,
+            config_file: Mutex::new(()),
         }
     }
 
-    pub async fn run(self, mut rx: mpsc::Receiver<CommandDispatch>) {
+    /// Run one IPC connection's commands, one at a time, until that connection
+    /// closes its lane.
+    ///
+    /// The loop is deliberately serial: it finishes a command and answers it
+    /// before it looks at the next one, which is what makes `mute Mic` followed
+    /// by `unmute Mic` from the same client happen in that order. It is *this*
+    /// loop being shared by every connection that used to make one client's
+    /// slow command everybody's wait; `server::command_lanes` now runs one of
+    /// these per connection instead, over the same executor.
+    pub async fn serve(&self, mut rx: mpsc::Receiver<CommandDispatch>) {
         while let Some(dispatch) = rx.recv().await {
             let response = self.handle(dispatch.id.clone(), dispatch.payload).await;
             let _ = dispatch.reply.send(response);
@@ -328,6 +352,13 @@ impl CommandExecutor {
 
         let obs_resources = self.fetch_dumpable_obs_resources().await?;
 
+        // Taken after the OBS round trips and before the first read of the
+        // file: everything from here to the reload is one read-modify-write of
+        // the config file and must not be interleaved with another one. The OBS
+        // requests are left outside it so a dump does not hold the lock while
+        // waiting on the network.
+        let _config_file = self.config_file.lock().await;
+
         let in_memory = self.config.lock().await.clone();
         let base = dump_merge_base(path, &in_memory);
         let merged = dump_config_mod::merge(&base.config, &obs_resources)?;
@@ -435,6 +466,10 @@ impl CommandExecutor {
         let path = self.config_path.as_ref().ok_or_else(|| {
             ObsctlError::ConfigInvalid("no config path configured for reload".to_string())
         })?;
+
+        // The same lock a dump takes: a reload reads the file, so it must not
+        // read it while a dump is part-way through replacing it.
+        let _config_file = self.config_file.lock().await;
 
         let (new_config, warnings) = crate::config::loader::load_with_warnings(path)?;
         self.log_config_warnings(&warnings, "on reload");
