@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{Mutex, mpsc, watch};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::model::Config;
 use crate::domain::errors::ObsctlError;
@@ -24,6 +24,10 @@ use crate::server::state_store::{
     Listing, ObsVersions, OutputFlags, RawInputState, RefreshedObsState, StateStore,
 };
 use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
+
+/// How many times the connect-path snapshot fetch will retry when events keep
+/// landing mid-fetch before settling for the result it has.
+const MAX_REFRESH_RETRIES: usize = 3;
 
 pub struct ObsSupervisor {
     config: Arc<Mutex<Config>>,
@@ -216,11 +220,16 @@ impl ObsSupervisor {
         // exits when the event task drops the sender, so it dies with the
         // connection it belongs to.
         let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel::<()>(1);
+        // The refresher's own handle, so a fetch that was overtaken by events
+        // can queue a follow-up. `Weak` rather than a clone: an ordinary
+        // sender held by this task would keep the channel open forever and the
+        // task would never see the event task drop its end.
+        let refresh_self_tx = refresh_tx.downgrade();
 
         let refresh_hub = Arc::clone(&hub);
         tokio::spawn(async move {
             while refresh_rx.recv().await.is_some() {
-                if let Err(e) = fetch_and_publish_snapshot_from(
+                match fetch_and_publish_snapshot_from(
                     &config,
                     &state_for_refresh,
                     &event_client,
@@ -229,14 +238,26 @@ impl ObsSupervisor {
                 )
                 .await
                 {
-                    warn!("OBS snapshot refresh after list change failed: {e}");
-                    refresh_hub.publish_log(
-                        LogEvent::new(
-                            LogLevel::Warn,
-                            format!("OBS snapshot refresh after list change failed: {e}"),
-                        )
-                        .with_target("obsctl_rs::server::obs_supervisor"),
-                    );
+                    // Events arrived while this fetch was in flight, so it
+                    // published values that are already out of date. Queue one
+                    // more pass; the capacity-1 channel coalesces repeats.
+                    Ok(true) => {
+                        debug!("OBS events landed during a refresh; queueing another");
+                        if let Some(tx) = refresh_self_tx.upgrade() {
+                            let _ = tx.try_send(());
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!("OBS snapshot refresh after list change failed: {e}");
+                        refresh_hub.publish_log(
+                            LogEvent::new(
+                                LogLevel::Warn,
+                                format!("OBS snapshot refresh after list change failed: {e}"),
+                            )
+                            .with_target("obsctl_rs::server::obs_supervisor"),
+                        );
+                    }
                 }
             }
         });
@@ -271,14 +292,34 @@ impl ObsSupervisor {
         Ok((client, obs_version, ws_version, disconnect_rx))
     }
 
+    /// Fetch and publish a full snapshot, retrying while events keep landing
+    /// mid-fetch.
+    ///
+    /// Bounded rather than a `while` loop: this runs on the connect path, and
+    /// a busy OBS must not be able to keep it fetching instead of getting on
+    /// with serving clients. Giving up leaves the same staleness the old code
+    /// always had, so the bound costs nothing that was not already the case.
     async fn fetch_and_publish_snapshot(
         &self,
         client: &ObsClient,
         obs_version: &str,
         ws_version: &str,
     ) -> Result<()> {
-        fetch_and_publish_snapshot_from(&self.config, &self.state, client, obs_version, ws_version)
-            .await
+        for _ in 0..MAX_REFRESH_RETRIES {
+            let superseded = fetch_and_publish_snapshot_from(
+                &self.config,
+                &self.state,
+                client,
+                obs_version,
+                ws_version,
+            )
+            .await?;
+            if !superseded {
+                return Ok(());
+            }
+            debug!("OBS events landed during the snapshot fetch; refreshing again");
+        }
+        Ok(())
     }
 
     async fn wait_for_disconnect(
@@ -321,7 +362,12 @@ async fn fetch_and_publish_snapshot_from(
     client: &ObsClient,
     obs_version: &str,
     ws_version: &str,
-) -> Result<()> {
+) -> Result<bool> {
+    // Read before the first round-trip: everything below describes OBS as it
+    // was at some point after this, and any event that lands in between is
+    // information this fetch does not have.
+    let generation_before = state.generation();
+
     let scenes = fetch_scene_listing(client).await?;
     let inputs = fetch_input_states(client).await?;
 
@@ -355,13 +401,14 @@ async fn fetch_and_publish_snapshot_from(
         (cfg.scenes.clone(), cfg.audio.inputs.clone())
     };
 
-    // `apply_full_refresh` merges under the store's write lock, so the live
-    // metrics the stats poller owns survive and events that arrived during the
-    // round-trips above are not clobbered by this (necessarily stale) fetch.
-    state
-        .apply_full_refresh(&refreshed, &scene_cfgs, &audio_cfgs)
-        .await;
-    Ok(())
+    // The write lock keeps the swap atomic and preserves the metrics the stats
+    // poller owns. It cannot keep this fetch current: an event applied while
+    // the round-trips above were running is not in `refreshed` and has just
+    // been overwritten. `apply_full_refresh` reports that so the caller can
+    // fetch again rather than leave the wrong value in place.
+    Ok(state
+        .apply_full_refresh(&refreshed, &scene_cfgs, &audio_cfgs, generation_before)
+        .await)
 }
 
 /// Every scene OBS knows, plus the one currently on program.

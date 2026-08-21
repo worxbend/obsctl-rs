@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
@@ -17,6 +18,8 @@ use crate::obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState};
 pub struct StateStore {
     inner: Arc<RwLock<ObsSnapshot>>,
     hub: Arc<BroadcastHub>,
+    /// Counts events that changed the snapshot. See [`StateStore::generation`].
+    generation: Arc<AtomicU64>,
 }
 
 impl StateStore {
@@ -24,7 +27,21 @@ impl StateStore {
         Self {
             inner: Arc::new(RwLock::new(ObsSnapshot::default())),
             hub,
+            generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// How many OBS events have changed the snapshot so far.
+    ///
+    /// A full refresh takes a dozen obs-websocket round-trips and builds its
+    /// result from replies gathered over all of them, so by the time it is
+    /// ready to publish, the state it describes may already be out of date.
+    /// Reading this before the fetch and again after tells the refresher
+    /// whether anything it is about to overwrite arrived in the meantime.
+    ///
+    /// Not part of `ObsSnapshot`, so it is not a wire-protocol change.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     pub async fn read(&self) -> ObsSnapshot {
@@ -52,21 +69,37 @@ impl StateStore {
     /// reset. Doing the merge here — under one write lock — is what keeps a
     /// slow refresh (several obs-websocket round-trips) from overwriting events
     /// that arrived while it was still fetching.
+    /// Replace the snapshot with one built from a full OBS fetch.
+    ///
+    /// `generation_before` is [`StateStore::generation`] as it was when the
+    /// fetch started. The return value is `true` when an event changed the
+    /// snapshot while the fetch was in flight, which means this (older) result
+    /// has just overwritten it and the caller should fetch again.
+    ///
+    /// Taking the write lock does not prevent that. It makes the swap atomic,
+    /// which is a different thing: an event applied at any point between the
+    /// first round-trip and this call is simply not represented in `refreshed`.
+    #[must_use = "a superseded refresh leaves stale values in the snapshot until another one runs"]
     pub async fn apply_full_refresh(
         &self,
         refreshed: &RefreshedObsState,
         scene_cfgs: &[SceneConfig],
         audio_cfgs: &[AudioInputConfig],
-    ) {
+        generation_before: u64,
+    ) -> bool {
         let mut snapshot = build_snapshot(refreshed, scene_cfgs, audio_cfgs);
 
         let mut guard = self.inner.write().await;
+        // Metrics belong to the stats poller, not to this fetch.
         snapshot.stats = guard.stats;
         snapshot.stream_bitrate_kbps = guard.stream_bitrate_kbps;
         snapshot.stream_duration_ms = guard.stream_duration_ms;
         snapshot.record_duration_ms = guard.record_duration_ms;
         *guard = snapshot;
         Self::broadcast(&self.hub, &guard);
+        drop(guard);
+
+        self.generation() != generation_before
     }
 
     /// Mark OBS as disconnected, record error, and broadcast.
@@ -82,6 +115,10 @@ impl StateStore {
     pub async fn apply_event(&self, event: ObsEvent) {
         let mut guard = self.inner.write().await;
         if apply_to_snapshot(&mut guard, event) {
+            // Bumped under the write lock so a refresh comparing generations
+            // either sees this event in the snapshot it is replacing, or sees
+            // the bump. It cannot miss both.
+            self.generation.fetch_add(1, Ordering::Release);
             Self::broadcast(&self.hub, &guard);
         }
     }
@@ -621,7 +658,7 @@ mod tests {
             .update_stats(ObsStats::default(), Some(4500.0), Some(12_000), Some(3_000))
             .await;
 
-        store
+        let superseded = store
             .apply_full_refresh(
                 &RefreshedObsState {
                     scenes: Listing::new(vec!["Main".to_string()], "Main"),
@@ -629,8 +666,10 @@ mod tests {
                 },
                 &[],
                 &[],
+                store.generation(),
             )
             .await;
+        assert!(!superseded, "no events landed during this refresh");
 
         let current = store.read().await;
         assert_eq!(current.current_scene.as_deref(), Some("Main"));
@@ -638,6 +677,82 @@ mod tests {
         assert_eq!(current.stream_duration_ms, Some(12_000));
         assert_eq!(current.record_duration_ms, Some(3_000));
         assert!(current.stats.is_some());
+    }
+
+    /// An event that lands while a refresh is in flight is reported, so the
+    /// refresher can fetch again instead of leaving the older value in place.
+    ///
+    /// The write lock makes the swap atomic; it does not make the fetch
+    /// current. This is what the two comments claiming otherwise used to say.
+    #[tokio::test]
+    async fn a_refresh_overtaken_by_an_event_reports_that_it_is_stale() {
+        let store = make_store();
+        store
+            .replace(ObsSnapshot {
+                scenes: vec![SceneState {
+                    name: "Main".to_string(),
+                    active: true,
+                    ..Default::default()
+                }],
+                current_scene: Some("Main".to_string()),
+                ..ObsSnapshot::default()
+            })
+            .await;
+
+        // The fetch starts here, and describes OBS as it was at this moment.
+        let generation_before = store.generation();
+
+        // ...and while its round-trips are in flight, the scene changes.
+        store
+            .apply_event(ObsEvent::CurrentProgramSceneChanged {
+                scene_name: "Second".to_string(),
+            })
+            .await;
+
+        let superseded = store
+            .apply_full_refresh(
+                &RefreshedObsState {
+                    scenes: Listing::new(vec!["Main".to_string(), "Second".to_string()], "Main"),
+                    ..RefreshedObsState::default()
+                },
+                &[],
+                &[],
+                generation_before,
+            )
+            .await;
+
+        // The stale fetch did overwrite the event — that part is unavoidable,
+        // its data predates it — but it says so rather than leaving the wrong
+        // scene showing until the next event of that kind.
+        assert_eq!(store.read().await.current_scene.as_deref(), Some("Main"));
+        assert!(
+            superseded,
+            "a refresh overtaken by an event must ask to be run again"
+        );
+    }
+
+    /// Events that change nothing do not force a re-refresh: OBS re-announces
+    /// state the daemon already holds, and treating that as a reason to fetch
+    /// again would put the refresher in a loop.
+    #[tokio::test]
+    async fn a_no_op_event_does_not_make_a_refresh_look_stale() {
+        let store = make_store();
+        store
+            .replace(ObsSnapshot {
+                streaming: true,
+                ..ObsSnapshot::default()
+            })
+            .await;
+
+        let generation_before = store.generation();
+        store
+            .apply_event(ObsEvent::StreamStateChanged { active: true })
+            .await;
+
+        let superseded = store
+            .apply_full_refresh(&RefreshedObsState::default(), &[], &[], generation_before)
+            .await;
+        assert!(!superseded);
     }
 
     /// Config reload attaches aliases/shortcuts to the cached snapshot, and

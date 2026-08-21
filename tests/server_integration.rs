@@ -500,6 +500,109 @@ async fn obs_command_timeout_returns_request_timeout_ipc_code_and_exit_4() {
     fake_obs.shutdown();
 }
 
+/// A scene change that arrives while a full refresh is in flight must not be
+/// left overwritten by that refresh.
+///
+/// A full refresh is a dozen-plus obs-websocket round-trips, and it builds its
+/// result from replies gathered across all of them. An event applied part-way
+/// through is therefore not represented in it, and publishing it reverts that
+/// event. Holding the store's write lock makes the swap atomic; it does not
+/// make the data current, which is what two comments in the daemon used to
+/// claim.
+///
+/// The delay on `GetInputList` puts a window in the middle of the refresh —
+/// after the current scene has been read, before the refresh completes — and
+/// the event is emitted into it.
+#[tokio::test]
+async fn a_scene_change_during_a_refresh_is_not_left_reverted() {
+    let fake_obs = spawn_fake_obs(false, None).await;
+
+    let mut cfg = Config::default();
+    cfg.connection.host = "127.0.0.1".to_string();
+    cfg.connection.port = fake_obs.addr.port();
+    cfg.connection.password_env = String::new();
+    cfg.connection.request_timeout_ms = 4000;
+
+    let dir = TempDir::new().unwrap();
+    let (_socket_path, state, _hub, shutdown) =
+        start_test_server_with_obs_supervisor(&dir, cfg).await;
+    wait_for_obs_connected(&state).await;
+
+    // Every refresh now stalls here, part-way through, after the scene list
+    // and current scene have been read.
+    fake_obs
+        .set_response(
+            "GetInputList",
+            PreparedResponse::success(serde_json::json!({ "inputs": [] }))
+                .delayed(std::time::Duration::from_millis(400)),
+        )
+        .await;
+    fake_obs
+        .set_response(
+            "GetSceneList",
+            PreparedResponse::success(serde_json::json!({
+                "currentProgramSceneName": "Main",
+                "scenes": [
+                    { "sceneName": "Main", "sceneIndex": 0 },
+                    { "sceneName": "Live", "sceneIndex": 1 }
+                ]
+            })),
+        )
+        .await;
+
+    // Start a full refresh. `SceneCreated` is one of the events the supervisor
+    // answers with a complete re-fetch.
+    fake_obs.emit_event("SceneCreated", serde_json::json!({ "sceneName": "Live" }));
+
+    // Let it get past the scene reads and into the stalled `GetInputList`.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // OBS switches scene mid-refresh. The in-flight fetch already read "Main"
+    // and knows nothing about this.
+    fake_obs
+        .set_response(
+            "GetCurrentProgramScene",
+            PreparedResponse::success(serde_json::json!({
+                "currentProgramSceneName": "Live"
+            })),
+        )
+        .await;
+    fake_obs.emit_event(
+        "CurrentProgramSceneChanged",
+        serde_json::json!({ "sceneName": "Live" }),
+    );
+
+    // The stale refresh lands and reverts the scene to "Main" — unavoidable,
+    // its data predates the event. What must not happen is that it stays that
+    // way: the daemon should notice it was overtaken and fetch again.
+    //
+    // Both halves of the condition matter. "Live" as the current scene alone
+    // is also true for a moment right after the event and before the stale
+    // refresh overwrites it, so it would pass without the fix; "Live" present
+    // in the scene list proves a refresh has since completed. Only the
+    // re-fetch produces both at once.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let snap = state.read().await;
+        let refreshed = snap.scenes.iter().any(|scene| scene.name == "Live");
+        if refreshed && snap.current_scene.as_deref() == Some("Live") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "refresh overtaken by a scene change was never corrected: \
+             current_scene={:?} scenes={:?}",
+            snap.current_scene,
+            snap.scenes.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        drop(snap);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    shutdown.send(true).unwrap();
+    fake_obs.shutdown();
+}
+
 #[tokio::test]
 async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
     let fake_obs = spawn_fake_obs(false, None).await;
