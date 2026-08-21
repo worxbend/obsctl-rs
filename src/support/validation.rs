@@ -21,6 +21,65 @@ pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+/// Setting an environment variable inside a test, done once.
+///
+/// Environment variables belong to the whole process, and Rust's test harness
+/// runs tests on many threads at once, so one test changing `PATH` or
+/// `OBSCTL_CONFIG` is visible to every other test running at that moment.
+/// `std::env::set_var` is `unsafe` in edition 2024 for exactly that reason.
+/// The two helpers below take the process-wide lock, swap the variable, run the
+/// closure, and put the previous value back — including when the variable was
+/// absent, which has to be a *removal* rather than setting an empty string.
+///
+/// This used to be copy-pasted into eight test modules. Getting the restore
+/// step subtly wrong in one copy would have leaked state into unrelated tests,
+/// with the symptom appearing somewhere else entirely, so it lives in one place.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::ffi::OsString;
+
+    /// Run `f` with `name` set to `value` (or removed when `value` is `None`).
+    pub(crate) fn with_env_var<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        with_env_var_os(name, value.map(OsString::from), f)
+    }
+
+    /// Same as [`with_env_var`], for values that are not valid UTF-8 — the
+    /// tests that check how invalid environment content is rejected need to set
+    /// raw bytes that a `&str` cannot hold.
+    pub(crate) fn with_env_var_os<R>(
+        name: &str,
+        value: Option<OsString>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        // A poisoned lock means some other test panicked while holding it. The
+        // data it guards is the environment itself, not a Rust value that could
+        // be left half-updated, so carrying on is correct here: refusing would
+        // turn one failing test into a cascade of unrelated failures.
+        let _lock = super::test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let previous = std::env::var_os(name);
+        set_or_remove(name, value);
+
+        let result = f();
+
+        set_or_remove(name, previous);
+        result
+    }
+
+    fn set_or_remove(name: &str, value: Option<OsString>) {
+        // SAFETY: the caller holds `test_env_lock`, so no other helper in this
+        // module is touching the environment concurrently. Tests that read the
+        // environment without going through these helpers are the remaining
+        // hazard, and there are none in this crate.
+        match value {
+            Some(value) => unsafe { std::env::set_var(name, value) },
+            None => unsafe { std::env::remove_var(name) },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PasswordConfigError {
     ConflictingPasswordSources,
@@ -82,6 +141,12 @@ pub fn password_config_error_message(error: &PasswordConfigError) -> &'static st
         PasswordConfigError::PlaintextPasswordTooLong => {
             "connection.password exceeds maximum length"
         }
+        // Every `ValidationError` variant is spelled out rather than covered by
+        // a `_` arm. An earlier catch-all reported any unlisted variant as a
+        // control-character problem, so a variant added later would have been
+        // described to the user as something it is not, with nothing failing to
+        // say so. Listing them all makes the compiler point at this match the
+        // next time the enum grows.
         PasswordConfigError::PasswordEnvError(error) => match error {
             ValidationError::InvalidUtf8 => "connection.password_env must be valid UTF-8",
             ValidationError::InvalidEnvVarFormat | ValidationError::Blank => {
@@ -90,13 +155,11 @@ pub fn password_config_error_message(error: &PasswordConfigError) -> &'static st
             ValidationError::MaxLengthExceeded(_) => {
                 "connection.password_env value exceeds maximum length"
             }
-            _ => "connection.password_env value must not contain control characters",
+            ValidationError::ControlCharacters | ValidationError::ContainsWhitespace => {
+                "connection.password_env value must not contain control characters"
+            }
         },
     }
-}
-
-pub fn trim_and_validate_token(value: &str) -> Result<String, ValidationError> {
-    trim_and_validate_token_with_max_len(value, usize::MAX)
 }
 
 pub fn trim_and_validate_token_with_max_len(
@@ -168,7 +231,7 @@ pub fn read_password_env_value(name: &str) -> Result<Option<String>, ValidationE
 /// - Missing variable -> `Ok(None)`
 /// - Non-UTF8 value -> `Err(ValidationError::InvalidUtf8)`
 /// - UTF-8 value -> `Ok(Some(value))`
-pub fn read_env_value(name: &str) -> Result<Option<String>, ValidationError> {
+fn read_env_value(name: &str) -> Result<Option<String>, ValidationError> {
     match std::env::var(name) {
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
@@ -264,55 +327,7 @@ pub fn resolve_connection_password(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn with_env_var<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = std::env::var_os(name);
-        if let Some(value) = value {
-            unsafe { std::env::set_var(name, value) };
-        } else {
-            unsafe { std::env::remove_var(name) };
-        }
-
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var(name, previous) },
-            None => unsafe { std::env::remove_var(name) },
-        }
-
-        result
-    }
-
-    #[cfg(unix)]
-    fn with_env_var_os<R>(
-        name: &str,
-        value: Option<std::ffi::OsString>,
-        f: impl FnOnce() -> R,
-    ) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = std::env::var_os(name);
-        if let Some(value) = value {
-            unsafe { std::env::set_var(name, value) };
-        } else {
-            unsafe { std::env::remove_var(name) };
-        }
-
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var(name, previous) },
-            None => unsafe { std::env::remove_var(name) },
-        }
-
-        result
-    }
+    use crate::support::validation::test_env::{with_env_var, with_env_var_os};
 
     #[test]
     fn validates_control_characters() {
@@ -601,6 +616,47 @@ mod tests {
             password_config_error_message(&PasswordConfigError::PlaintextPasswordTooLong),
             "connection.password exceeds maximum length"
         );
+    }
+
+    /// Every `ValidationError` variant, in declaration order.
+    ///
+    /// `password_config_error_message` renders each variant into its own
+    /// sentence. Adding a variant without extending that match used to be
+    /// invisible, because the match ended in a catch-all. This list plus the
+    /// count assertion below is the same guard `domain::errors` and
+    /// `ipc::protocol` use: the compiler rejects a missing arm, and the count
+    /// rejects a variant added without a case here.
+    const ALL_VALIDATION_ERRORS: &[ValidationError] = &[
+        ValidationError::Blank,
+        ValidationError::ControlCharacters,
+        ValidationError::InvalidEnvVarFormat,
+        ValidationError::InvalidUtf8,
+        ValidationError::ContainsWhitespace,
+        ValidationError::MaxLengthExceeded(MAX_PASSWORD_LENGTH),
+    ];
+
+    #[test]
+    fn every_validation_error_has_a_password_env_message() {
+        const VALIDATION_ERROR_VARIANT_COUNT: usize = 6;
+
+        assert_eq!(
+            ALL_VALIDATION_ERRORS.len(),
+            VALIDATION_ERROR_VARIANT_COUNT,
+            "a ValidationError variant was added without a case in ALL_VALIDATION_ERRORS"
+        );
+
+        for error in ALL_VALIDATION_ERRORS {
+            let message = password_config_error_message(&PasswordConfigError::PasswordEnvError(
+                error.clone(),
+            ));
+            assert!(
+                message.starts_with("connection.password_env"),
+                "{error:?} must be reported as a connection.password_env problem"
+            );
+            // The Display text and this table are two separate wordings of the
+            // same failure; both must actually say something.
+            assert!(!error.to_string().is_empty(), "{error:?} has no Display");
+        }
     }
 
     #[test]

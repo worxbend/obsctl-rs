@@ -171,12 +171,7 @@ where
     ensure_private_dir(parent)?;
     ensure_path_not_symlink(path)?;
 
-    let current = match stdfs::symlink_metadata(path) {
-        Ok(current) => current,
-        Err(err) => {
-            return Err(err);
-        }
-    };
+    let current = stdfs::symlink_metadata(path)?;
     if !expected(&current) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -184,53 +179,94 @@ where
         ));
     }
 
-    let (temp_handle, temp_path) =
-        create_secure_temp_file_in(parent, "obsctl-remove-guard", 0o600)?;
+    let (temp_handle, temp) = create_secure_temp_file_in(parent, "obsctl-remove-guard", 0o600)?;
     drop(temp_handle);
+    // From here on every `return` leaves `temp` behind, and dropping it removes
+    // the file. Nothing below has to remember to clean up.
 
-    let cleanup_tmp = |temp_path: &Path| {
-        let _ = stdfs::remove_file(temp_path);
-    };
+    ensure_atomic_target_safe(path, parent)?;
 
-    if let Err(err) = ensure_atomic_target_safe(path, parent) {
-        cleanup_tmp(&temp_path);
-        return Err(err);
-    }
-
-    if let Err(err) = stdfs::rename(path, &temp_path) {
-        cleanup_tmp(&temp_path);
+    if let Err(err) = stdfs::rename(path, temp.path()) {
         return match err.kind() {
             io::ErrorKind::NotFound => Ok(()),
             _ => Err(err),
         };
     }
 
-    let metadata = match stdfs::symlink_metadata(&temp_path) {
-        Ok(metadata) => metadata,
-        Err(err) => {
-            cleanup_tmp(&temp_path);
-            return Err(err);
-        }
-    };
+    let metadata = stdfs::symlink_metadata(temp.path())?;
 
     if !expected(&metadata) {
-        let restore_error = stdfs::rename(&temp_path, path).err();
-        if let Some(error) = restore_error {
-            cleanup_tmp(&temp_path);
+        // The entry is now sitting at the temp path under our control. Put it
+        // back where it came from; only if that fails does the drop guard get
+        // to delete it, which is the same choice the previous code made.
+        if let Some(error) = stdfs::rename(temp.path(), path).err() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("path is not a {what} and could not restore original entry: {error}"),
             ));
         }
 
+        // The entry is back where it belongs, so the temp name is free again.
+        let _ = temp.keep();
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("path is not a {what}"),
         ));
     }
 
-    stdfs::remove_file(&temp_path)?;
+    // The caller asked for the entry to be gone, and a failure to remove it is
+    // the caller's business, so this stays an explicit fallible step rather
+    // than being left to the guard, whose own removal ignores errors.
+    stdfs::remove_file(temp.path())?;
     Ok(())
+}
+
+/// A temporary file that deletes itself when it goes out of scope.
+///
+/// The atomic-write path creates a temp file and then runs several safety
+/// checks before renaming it over the real destination. Every one of those
+/// checks can bail out, and each bail-out has to delete the temp file first.
+/// Spelled out by hand that was four removals in one function and five in the
+/// other — one of them written longhand instead of calling the local helper —
+/// so adding an early return later could silently leave a
+/// `.<prefix>.<random>.tmp` file in the user's config or state directory.
+///
+/// With a guard the deletion happens on every exit from the scope, including a
+/// panic, and the one path that must *not* delete (the successful rename, which
+/// has already moved the file away) opts out by calling [`TempFile::keep`].
+struct TempFile {
+    path: PathBuf,
+    /// `false` once the file is no longer ours to remove.
+    armed: bool,
+}
+
+impl TempFile {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Stop guarding the file and hand its path back.
+    ///
+    /// Called immediately after the rename that turns the temp file into the
+    /// real destination file: at that point nothing exists at the temp path any
+    /// more, and blindly removing that name could delete a file some other
+    /// process has since created there.
+    fn keep(mut self) -> PathBuf {
+        self.armed = false;
+        std::mem::take(&mut self.path)
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = stdfs::remove_file(&self.path);
+        }
+    }
 }
 
 /// Why a file is not safe for this program to execute.
@@ -283,16 +319,25 @@ pub fn secure_permissions(path: &Path, mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// The effective user id of this process.
+///
+/// Two things depend on this being the *real* answer and not a guess:
+/// `is_private_dir_metadata` decides a directory belongs to us by comparing its
+/// owner against this value, and `ipc::socket_path` builds the default socket
+/// path `/tmp/obsctl-{uid}/obsctl.sock` from it. An earlier version inferred the
+/// id by stat-ing `/proc/self` and, when that was unavailable, the *current
+/// working directory* — so a user whose shell sat in a world-owned directory on
+/// a system without procfs was reported as uid 0 (root). Both the ownership
+/// check and the socket path were then computed from the same wrong number, so
+/// they agreed with each other and the guard passed. `geteuid()` is the kernel
+/// answering about this process; it cannot fail and has no fallback path.
 pub fn current_uid() -> u32 {
     #[cfg(unix)]
     {
-        std::fs::metadata("/proc/self")
-            .or_else(|_| std::fs::metadata("."))
-            .map(|m| {
-                use std::os::unix::fs::MetadataExt as _;
-                m.uid()
-            })
-            .unwrap_or(0)
+        // SAFETY: `geteuid` reads a field of the calling process. It takes no
+        // arguments, touches no memory we own, and is documented as always
+        // succeeding, so there is no error case and nothing to invalidate.
+        unsafe { libc::geteuid() }
     }
 
     #[cfg(not(unix))]
@@ -301,11 +346,16 @@ pub fn current_uid() -> u32 {
     }
 }
 
-pub fn create_secure_temp_file_in(
+/// Create a fresh, private temporary file in `dir`.
+///
+/// Returns the open handle together with a [`TempFile`] guard: the file is
+/// removed as soon as the guard is dropped, so a caller only has to remember
+/// the *one* case where it should survive.
+fn create_secure_temp_file_in(
     dir: &Path,
     name_prefix: &str,
     mode: u32,
-) -> io::Result<(File, PathBuf)> {
+) -> io::Result<(File, TempFile)> {
     for _ in 0..1024 {
         let suffix: u64 = rand::random();
         let tmp_path = dir.join(format!(".{name_prefix}.{suffix:016x}.tmp"));
@@ -319,16 +369,18 @@ pub fn create_secure_temp_file_in(
 
         match options.open(&tmp_path) {
             Ok(file) => {
+                let guard = TempFile::new(tmp_path);
+
                 #[cfg(unix)]
-                return Ok((file, tmp_path));
+                return Ok((file, guard));
 
                 #[cfg(not(unix))]
                 {
-                    if let Err(err) = secure_permissions(&tmp_path, mode) {
-                        let _ = stdfs::remove_file(&tmp_path);
-                        return Err(err);
-                    }
-                    return Ok((file, tmp_path));
+                    // On platforms where `OpenOptions::mode` is unavailable the
+                    // permissions are applied after the fact; failing that, the
+                    // guard removes the file as the scope ends.
+                    secure_permissions(guard.path(), mode)?;
+                    return Ok((file, guard));
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -352,19 +404,16 @@ pub fn write_atomic_with_temp_file<F>(
 where
     F: FnMut(&mut File) -> io::Result<()>,
 {
-    let cleanup_tmp = |tmp_path: &Path| {
-        let _ = stdfs::remove_file(tmp_path);
-    };
-
     let parent = path.parent().ok_or_else(no_parent)?;
 
     ensure_private_parent(path)?;
 
-    let (mut tmp, tmp_path) = create_secure_temp_file_in(parent, tmp_prefix, mode)?;
+    // `tmp_guard` removes the temporary file on every path out of this function
+    // except the successful rename below, which disarms it explicitly.
+    let (mut tmp, tmp_guard) = create_secure_temp_file_in(parent, tmp_prefix, mode)?;
 
     if let Err(err) = write(&mut tmp) {
         drop(tmp);
-        let _ = stdfs::remove_file(&tmp_path);
         return Err(err);
     }
     tmp.flush()?;
@@ -372,18 +421,11 @@ where
     drop(tmp);
 
     // Re-check destination safety immediately before the rename.
-    if let Err(err) = ensure_atomic_target_safe(path, parent) {
-        cleanup_tmp(&tmp_path);
-        return Err(err);
-    }
+    ensure_atomic_target_safe(path, parent)?;
 
     match stdfs::symlink_metadata(path) {
-        Ok(metadata) if !metadata.is_file() => {
-            cleanup_tmp(&tmp_path);
-            return Err(not_regular_file());
-        }
+        Ok(metadata) if !metadata.is_file() => return Err(not_regular_file()),
         Ok(_) if !allow_overwrite => {
-            cleanup_tmp(&tmp_path);
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "destination already exists",
@@ -391,16 +433,13 @@ where
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            cleanup_tmp(&tmp_path);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     }
 
-    if let Err(error) = stdfs::rename(&tmp_path, path) {
-        cleanup_tmp(&tmp_path);
-        return Err(error);
-    }
+    stdfs::rename(tmp_guard.path(), path)?;
+    // The temporary file is now the destination file; stop guarding the name it
+    // used to occupy.
+    let _ = tmp_guard.keep();
     Ok(())
 }
 
@@ -495,16 +534,7 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(!path.exists());
 
-        let mut tmp_count = 0usize;
-        for entry in std::fs::read_dir(dir.path()).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(".obsctl-test.") && name.ends_with(".tmp") {
-                tmp_count += 1;
-            }
-        }
-        assert_eq!(tmp_count, 0);
+        assert_eq!(count_temp_files(dir.path(), "obsctl-test"), 0);
     }
 
     #[cfg(unix)]
@@ -513,13 +543,41 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().unwrap();
-        let (tmp, path) = create_secure_temp_file_in(dir.path(), "obsctl-perm", 0o600).unwrap();
+        let (tmp, guard) = create_secure_temp_file_in(dir.path(), "obsctl-perm", 0o600).unwrap();
         let mode = tmp.metadata().unwrap().permissions().mode();
         drop(tmp);
         assert_eq!(mode & 0o777, 0o600);
+        let path = guard.path().to_path_buf();
         assert!(path.exists());
+        drop(guard);
+        assert!(!path.exists(), "dropping the guard must remove the file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kept_temp_file_survives_the_guard() {
+        let dir = tempdir().unwrap();
+        let (tmp, guard) = create_secure_temp_file_in(dir.path(), "obsctl-keep", 0o600).unwrap();
+        drop(tmp);
+
+        let path = guard.keep();
+        assert!(path.exists(), "keep() must disarm the removal");
         let _ = std::fs::remove_file(&path);
-        assert!(!path.exists());
+    }
+
+    /// Count leftover `.<prefix>.<random>.tmp` files in `dir`.
+    ///
+    /// Several tests assert that a failed atomic write leaves nothing behind.
+    /// Each used to spell out the same read_dir/starts_with/ends_with loop.
+    fn count_temp_files(dir: &Path, prefix: &str) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter(|entry| {
+                let name = entry.as_ref().unwrap().file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(&format!(".{prefix}.")) && name.ends_with(".tmp")
+            })
+            .count()
     }
 
     #[cfg(unix)]
@@ -565,16 +623,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-        let mut tmp_count = 0usize;
-        for entry in std::fs::read_dir(dir.path()).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(".obsctl-unsafe-link.") && name.ends_with(".tmp") {
-                tmp_count += 1;
-            }
-        }
-        assert_eq!(tmp_count, 0);
+        assert_eq!(count_temp_files(dir.path(), "obsctl-unsafe-link"), 0);
     }
 
     #[test]
@@ -586,16 +635,7 @@ mod tests {
         })
         .err();
 
-        let mut tmp_count = 0usize;
-        for entry in std::fs::read_dir(dir.path()).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(".obsctl-temp-cleanup.") && name.ends_with(".tmp") {
-                tmp_count += 1;
-            }
-        }
-        assert_eq!(tmp_count, 0);
+        assert_eq!(count_temp_files(dir.path(), "obsctl-temp-cleanup"), 0);
     }
 
     #[cfg(unix)]
@@ -733,16 +773,7 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(path.exists());
 
-        let mut tmp_count = 0usize;
-        for entry in std::fs::read_dir(dir.path()).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(".obsctl-remove-guard.") && name.ends_with(".tmp") {
-                tmp_count += 1;
-            }
-        }
-        assert_eq!(tmp_count, 0);
+        assert_eq!(count_temp_files(dir.path(), "obsctl-remove-guard"), 0);
     }
 
     #[cfg(unix)]

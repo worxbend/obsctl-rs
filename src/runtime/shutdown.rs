@@ -13,7 +13,12 @@ pub fn install_signal_handler(tx: watch::Sender<bool>) {
         {
             Ok(sigterm) => Some(sigterm),
             Err(error) => {
-                eprintln!("warning: failed to listen for SIGTERM: {error}");
+                // The daemon reports everything else through `tracing`, which
+                // reaches both the log file and the `logs` IPC topic. Printing
+                // straight to stderr from this spawned task put the one warning
+                // about a missing signal handler somewhere nobody watching the
+                // daemon would see it.
+                tracing::warn!(%error, "failed to listen for SIGTERM");
                 None
             }
         };
@@ -23,7 +28,7 @@ pub fn install_signal_handler(tx: watch::Sender<bool>) {
                 tokio::select! {
                     _ = async {
                         if let Err(error) = tokio::signal::ctrl_c().await {
-                            eprintln!("warning: failed to listen for Ctrl-C: {error}");
+                            tracing::warn!(%error, "failed to listen for Ctrl-C");
                         }
                     } => {}
                     _ = sigterm.recv() => {}
@@ -31,7 +36,7 @@ pub fn install_signal_handler(tx: watch::Sender<bool>) {
             }
             None => {
                 if let Err(error) = tokio::signal::ctrl_c().await {
-                    eprintln!("warning: failed to listen for Ctrl-C: {error}");
+                    tracing::warn!(%error, "failed to listen for Ctrl-C");
                 }
             }
         }
