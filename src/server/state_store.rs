@@ -134,25 +134,41 @@ impl StateStore {
     /// other mutation is pushed.
     pub async fn merge_config(&self, scenes: &[SceneConfig], audio_inputs: &[AudioInputConfig]) {
         let mut guard = self.inner.write().await;
-        for s in guard.scenes.iter_mut() {
-            if let Some(cfg) = scenes.iter().find(|c| c.name == s.name) {
-                s.alias = cfg.alias.clone();
-                s.shortcut = cfg.shortcut.clone();
-                s.group = cfg.group.clone();
-                s.hidden = cfg.hidden;
-            } else {
-                s.hidden = false;
-            }
+        for scene in guard.scenes.iter_mut() {
+            let cfg = scenes.iter().find(|c| c.name == scene.name);
+            apply_scene_config(scene, cfg);
         }
-        for a in guard.audio_inputs.iter_mut() {
-            if let Some(cfg) = audio_inputs.iter().find(|c| c.name == a.name) {
-                a.alias = cfg.alias.clone();
-                a.shortcut = cfg.shortcut.clone();
-            }
+        for input in guard.audio_inputs.iter_mut() {
+            let cfg = audio_inputs.iter().find(|c| c.name == input.name);
+            apply_audio_config(input, cfg);
         }
         guard.updated_at = OffsetDateTime::now_utc();
         Self::broadcast(&self.hub, &guard);
     }
+}
+
+/// Project a scene's config entry onto its snapshot state.
+///
+/// `None` means the config does not mention this scene, and must clear the
+/// metadata rather than leave it: an alias the user deleted has to stop
+/// resolving, and the alias tables the executor searches are built from this
+/// snapshot. Both the full-refresh path (`build_snapshot`) and the reload path
+/// (`merge_config`) go through here so they cannot disagree about that.
+///
+/// Only config-derived fields are touched. `active` belongs to OBS.
+fn apply_scene_config(scene: &mut SceneState, cfg: Option<&SceneConfig>) {
+    scene.alias = cfg.and_then(|c| c.alias.clone());
+    scene.shortcut = cfg.and_then(|c| c.shortcut.clone());
+    scene.group = cfg.and_then(|c| c.group.clone());
+    scene.hidden = cfg.is_some_and(|c| c.hidden);
+}
+
+/// Project an audio input's config entry onto its snapshot state, with the
+/// same rule as [`apply_scene_config`]. `muted`, the volumes, and `kind`
+/// belong to OBS and are left alone.
+fn apply_audio_config(input: &mut AudioState, cfg: Option<&AudioInputConfig>) {
+    input.alias = cfg.and_then(|c| c.alias.clone());
+    input.shortcut = cfg.and_then(|c| c.shortcut.clone());
 }
 
 /// Fold one OBS event into the cached snapshot, reporting whether anything
@@ -357,15 +373,13 @@ pub fn build_snapshot(
         .names
         .iter()
         .map(|name| {
-            let cfg = scene_cfgs.iter().find(|c| c.name == *name);
-            SceneState {
+            let mut scene = SceneState {
                 name: name.clone(),
-                alias: cfg.and_then(|c| c.alias.clone()),
-                shortcut: cfg.and_then(|c| c.shortcut.clone()),
-                group: cfg.and_then(|c| c.group.clone()),
                 active: name == current_scene,
-                hidden: cfg.map(|c| c.hidden).unwrap_or(false),
-            }
+                ..SceneState::default()
+            };
+            apply_scene_config(&mut scene, scene_cfgs.iter().find(|c| c.name == *name));
+            scene
         })
         .collect();
 
@@ -373,17 +387,17 @@ pub fn build_snapshot(
         .inputs
         .iter()
         .map(|input| {
-            let cfg = audio_cfgs.iter().find(|c| c.name == input.name);
-            AudioState {
+            let mut state = AudioState {
                 name: input.name.clone(),
-                alias: cfg.and_then(|c| c.alias.clone()),
-                shortcut: cfg.and_then(|c| c.shortcut.clone()),
                 kind: None,
                 muted: input.muted,
                 volume_mul: input.volume_mul,
                 volume_db: input.volume_mul.map(mul_to_db),
                 volume_percent: input.volume_mul.map(mul_to_percent),
-            }
+                ..AudioState::default()
+            };
+            apply_audio_config(&mut state, audio_cfgs.iter().find(|c| c.name == input.name));
+            state
         })
         .collect();
 
@@ -670,17 +684,15 @@ mod tests {
     /// The supervisor answers list-changed events with a full refresh, which
     /// broadcasts on its own. Broadcasting here too would push an unchanged
     /// snapshot — the false positive `CLAUDE.md` warns about.
-    /// Characterizes what `merge_config` does with a scene or input the new
-    /// config no longer mentions.
+    /// A scene or input the reloaded config no longer mentions loses the
+    /// metadata that config gave it — the same rule `build_snapshot` applies
+    /// on the full-refresh path.
     ///
-    /// Today it keeps the old alias and shortcut: the scene loop resets only
-    /// `hidden`, and the audio loop has no else-branch at all. That is a
-    /// mismatch with `build_snapshot`, which treats "no config entry" as "no
-    /// metadata", and it means a deleted alias keeps resolving until the next
-    /// full refresh. This test asserts the current behaviour so the commit
-    /// that changes it shows exactly what changed.
+    /// This is what makes `reload-config` able to *remove* an alias. The alias
+    /// tables the executor searches are built from this snapshot, so metadata
+    /// left behind here keeps a deleted alias resolving.
     #[tokio::test]
-    async fn merge_config_currently_keeps_metadata_for_entries_the_config_dropped() {
+    async fn merge_config_clears_metadata_for_entries_the_config_dropped() {
         let store = make_store();
         store
             .replace(ObsSnapshot {
@@ -706,15 +718,15 @@ mod tests {
         store.merge_config(&[], &[]).await;
 
         let snap = store.read().await;
-        assert_eq!(snap.scenes[0].alias.as_deref(), Some("cam"));
-        assert_eq!(snap.scenes[0].shortcut.as_deref(), Some("m"));
-        assert_eq!(snap.scenes[0].group.as_deref(), Some("live"));
-        assert!(
-            !snap.scenes[0].hidden,
-            "hidden is the one field reset today"
-        );
-        assert_eq!(snap.audio_inputs[0].alias.as_deref(), Some("mic"));
-        assert_eq!(snap.audio_inputs[0].shortcut.as_deref(), Some("M"));
+        assert_eq!(snap.scenes[0].alias, None);
+        assert_eq!(snap.scenes[0].shortcut, None);
+        assert_eq!(snap.scenes[0].group, None);
+        assert!(!snap.scenes[0].hidden);
+        assert_eq!(snap.audio_inputs[0].alias, None);
+        assert_eq!(snap.audio_inputs[0].shortcut, None);
+        // The name and OBS-owned state survive; only config metadata is cleared.
+        assert_eq!(snap.scenes[0].name, "Main");
+        assert_eq!(snap.audio_inputs[0].name, "Mic");
     }
 
     #[tokio::test]
