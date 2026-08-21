@@ -670,6 +670,53 @@ mod tests {
     /// The supervisor answers list-changed events with a full refresh, which
     /// broadcasts on its own. Broadcasting here too would push an unchanged
     /// snapshot — the false positive `CLAUDE.md` warns about.
+    /// Characterizes what `merge_config` does with a scene or input the new
+    /// config no longer mentions.
+    ///
+    /// Today it keeps the old alias and shortcut: the scene loop resets only
+    /// `hidden`, and the audio loop has no else-branch at all. That is a
+    /// mismatch with `build_snapshot`, which treats "no config entry" as "no
+    /// metadata", and it means a deleted alias keeps resolving until the next
+    /// full refresh. This test asserts the current behaviour so the commit
+    /// that changes it shows exactly what changed.
+    #[tokio::test]
+    async fn merge_config_currently_keeps_metadata_for_entries_the_config_dropped() {
+        let store = make_store();
+        store
+            .replace(ObsSnapshot {
+                scenes: vec![SceneState {
+                    name: "Main".to_string(),
+                    alias: Some("cam".to_string()),
+                    shortcut: Some("m".to_string()),
+                    group: Some("live".to_string()),
+                    hidden: true,
+                    ..Default::default()
+                }],
+                audio_inputs: vec![AudioState {
+                    name: "Mic".to_string(),
+                    alias: Some("mic".to_string()),
+                    shortcut: Some("M".to_string()),
+                    ..Default::default()
+                }],
+                ..ObsSnapshot::default()
+            })
+            .await;
+
+        // A reloaded config that no longer mentions either of them.
+        store.merge_config(&[], &[]).await;
+
+        let snap = store.read().await;
+        assert_eq!(snap.scenes[0].alias.as_deref(), Some("cam"));
+        assert_eq!(snap.scenes[0].shortcut.as_deref(), Some("m"));
+        assert_eq!(snap.scenes[0].group.as_deref(), Some("live"));
+        assert!(
+            !snap.scenes[0].hidden,
+            "hidden is the one field reset today"
+        );
+        assert_eq!(snap.audio_inputs[0].alias.as_deref(), Some("mic"));
+        assert_eq!(snap.audio_inputs[0].shortcut.as_deref(), Some("M"));
+    }
+
     #[tokio::test]
     async fn list_changed_events_do_not_broadcast_unchanged_state() {
         let store = make_store();
