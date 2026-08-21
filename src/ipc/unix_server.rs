@@ -1,18 +1,18 @@
 use std::{path::Path, sync::Arc};
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     sync::{broadcast::error::RecvError, mpsc, oneshot, watch},
 };
 use tracing::{debug, error, warn};
 
 use crate::ipc::{
-    codec::{decode, encode},
+    codec::{FrameEncodeError, FrameError, FrameReader, decode, encode_framed},
     protocol::{
         ClientMessage, CommandPayload, ErrorPayload, MAX_IPC_LINE_BYTES, PublicErrorCode,
-        ServerCommand, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE, Topic,
-        normalize_subscribe_topics, validate_command_name, validate_ipc_request_id,
+        ServerCommand, ServerMessage, Topic, normalize_subscribe_topics, validate_command_name,
+        validate_ipc_request_id,
     },
     session::{BroadcastHub, CommandDispatch, SessionSubscriptions},
     socket_path::ensure_socket_file,
@@ -27,6 +27,17 @@ pub struct IpcServer {
 }
 
 const STATE_INIT_REQUEST_ID: &str = "state-init";
+
+/// What the read loop should do after handling one client frame.
+///
+/// The handlers below decide both what to answer and whether the connection
+/// survives the answer; this names that second decision so a caller reads
+/// `SessionControl::Close` instead of an unexplained `false`.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionControl {
+    Continue,
+    Close,
+}
 
 impl IpcServer {
     pub fn bind(path: &Path, hub: Arc<BroadcastHub>) -> std::io::Result<Self> {
@@ -103,7 +114,7 @@ async fn run_session(
 ) {
     let _client_guard = registry.register();
     let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    let reader = BufReader::new(reader);
     let (write_tx, mut write_rx) = mpsc::channel::<String>(64);
 
     let write_task = tokio::spawn(async move {
@@ -118,79 +129,50 @@ async fn run_session(
     let mut state_rx = hub.subscribe_state();
     let mut events_rx = hub.subscribe_events();
     let mut logs_rx = hub.subscribe_logs();
-    // Bytes, not a `String`: a frame is only known to be UTF-8 once it is
-    // complete, and it may arrive in pieces.
-    let mut line_buf: Vec<u8> = Vec::new();
+    let mut frames = FrameReader::new(reader);
 
     loop {
-        // How much more of the current frame may be read. The cap is applied
-        // *while* reading rather than after: `read_line` would happily grow its
-        // buffer to whatever a client sent before anyone got to check the size.
-        // One byte over the limit is enough to recognise an oversized frame.
-        let Some(budget) = (MAX_IPC_LINE_BYTES as u64 + 1).checked_sub(line_buf.len() as u64)
-        else {
-            warn!("IPC frame exceeded max size ({MAX_IPC_LINE_BYTES} bytes), dropping client");
-            break;
-        };
-        if budget == 0 {
-            warn!("IPC frame exceeded max size ({MAX_IPC_LINE_BYTES} bytes), dropping client");
-            break;
-        }
-
-        // Bound this read to the frame's remaining budget. Recreated each
-        // iteration so a resumed frame keeps the bytes already in `line_buf`
-        // and the limit still applies to the frame as a whole.
-        let mut limited = (&mut reader).take(budget);
-
         tokio::select! {
-            // `read_until` rather than `read_line` because this sits in a
-            // `select!`: when a broadcast branch wins the race this future is
-            // dropped mid-frame. `read_until` keeps whatever it had read in
-            // `line_buf` and can be resumed; `read_line` is documented as not
-            // cancellation safe and discards it, which silently truncated any
-            // frame unlucky enough to be split across a broadcast.
-            read = limited.read_until(b'\n', &mut line_buf) => {
-                match read {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if !line_buf.ends_with(b"\n") {
-                            // No delimiter and the read stopped: either the
-                            // budget ran out (oversized) or the peer went away
-                            // mid-frame (truncated). Both end the session.
-                            if line_buf.len() > MAX_IPC_LINE_BYTES {
-                                warn!(
-                                    "IPC frame exceeded max size ({MAX_IPC_LINE_BYTES} bytes), dropping client"
-                                );
-                            } else {
-                                warn!("IPC frame missing newline delimiter, dropping client");
-                            }
-                            break;
-                        }
-
-                        let frame = match String::from_utf8(std::mem::take(&mut line_buf)) {
-                            Ok(frame) => frame,
-                            Err(e) => {
-                                debug!("IPC session read error: {e}");
-                                break;
-                            }
-                        };
+            // `FrameReader` owns the bytes of a frame that has not arrived in
+            // full, which is what makes this branch safe to lose the race:
+            // when a broadcast below wins, this future is dropped mid-frame
+            // and the next iteration resumes the same frame.
+            frame = frames.next_frame() => {
+                match frame {
+                    // The peer closed the connection between frames.
+                    Ok(None) => break,
+                    Ok(Some(frame)) => {
+                        // A frame with nothing but whitespace in it is not a
+                        // request; ignore it rather than end the session.
                         let trimmed = frame.trim_end_matches(['\n', '\r']);
                         if !trimmed.is_empty()
-                            && !handle_line(
+                            && handle_line(
                                 trimmed.to_string(), &mut subs, &command_tx, &write_tx,
-                            ).await
+                            ).await == SessionControl::Close
                         {
                             break;
                         }
                     }
-                    Err(e) => {
+                    Err(FrameError::Oversized) => {
+                        warn!("IPC frame exceeded max size ({MAX_IPC_LINE_BYTES} bytes), dropping client");
+                        break;
+                    }
+                    Err(FrameError::MissingDelimiter) => {
+                        warn!("IPC frame missing newline delimiter, dropping client");
+                        break;
+                    }
+                    Err(FrameError::NotUtf8(e)) => {
+                        debug!("IPC session read error: {e}");
+                        break;
+                    }
+                    Err(FrameError::Io(e)) => {
                         debug!("IPC session read error: {e}");
                         break;
                     }
                 }
             }
 
-            res = state_rx.recv(), if subs.contains(TOPIC_STATE) => {
+            res = state_rx.recv(), if subs.contains(Topic::State) => {
                 match res {
                     Ok(msg) => send_encoded(&msg, &write_tx).await,
                     Err(RecvError::Lagged(n)) => warn!("state broadcast lagged {n}"),
@@ -198,7 +180,7 @@ async fn run_session(
                 }
             }
 
-            res = events_rx.recv(), if subs.contains(TOPIC_EVENTS) => {
+            res = events_rx.recv(), if subs.contains(Topic::Events) => {
                 match res {
                     Ok(msg) => send_encoded(&msg, &write_tx).await,
                     Err(RecvError::Lagged(n)) => warn!("events broadcast lagged {n}"),
@@ -206,7 +188,7 @@ async fn run_session(
                 }
             }
 
-            res = logs_rx.recv(), if subs.contains(TOPIC_LOGS) => {
+            res = logs_rx.recv(), if subs.contains(Topic::Logs) => {
                 match res {
                     Ok(msg) => send_encoded(&msg, &write_tx).await,
                     Err(RecvError::Lagged(n)) => warn!("logs broadcast lagged {n}"),
@@ -221,46 +203,54 @@ async fn run_session(
 }
 
 async fn send_encoded(msg: &ServerMessage, write_tx: &mpsc::Sender<String>) {
-    let encoded = match encode(msg) {
+    let encoded = match encode_framed(msg) {
         Ok(encoded) => encoded,
-        Err(error) => {
+        Err(FrameEncodeError::Encode(error)) => {
             warn!("Failed to encode IPC message for client socket: {error}");
+            return;
+        }
+        Err(FrameEncodeError::Oversized { len }) => {
+            send_oversized_fallback(msg, len, write_tx).await;
             return;
         }
     };
 
-    if encoded.len() > MAX_IPC_LINE_BYTES {
-        if let ServerMessage::Response { id, .. } = msg {
-            let fallback = ServerMessage::Response {
-                id: id.clone(),
-                ok: false,
-                result: None,
-                error: Some(ErrorPayload::new(
-                    PublicErrorCode::IpcProtocolError,
-                    "response frame too large",
-                )),
-            };
-            match encode(&fallback) {
-                Ok(fallback_encoded) if fallback_encoded.len() <= MAX_IPC_LINE_BYTES => {
-                    let _ = write_tx.send(fallback_encoded).await;
-                }
-                Ok(fallback_encoded) => warn!(
-                    "Dropping oversized fallback IPC response ({len} > {MAX_IPC_LINE_BYTES} bytes)",
-                    len = fallback_encoded.len()
-                ),
-                Err(error) => warn!("Failed to encode IPC fallback response: {error}"),
-            };
-        } else {
-            warn!(
-                "Dropping oversized IPC message ({len} > {MAX_IPC_LINE_BYTES} bytes)",
-                len = encoded.len()
-            );
-        }
-        return;
-    }
-
     if write_tx.send(encoded).await.is_err() {
         warn!("Failed to queue IPC message for client socket");
+    }
+}
+
+/// Deal with a message that will not fit in one frame.
+///
+/// A client waiting on a response still needs an answer, so the response is
+/// replaced by a small protocol error carrying the same request id. A pushed
+/// event has nobody waiting on it and is dropped instead.
+async fn send_oversized_fallback(msg: &ServerMessage, len: usize, write_tx: &mpsc::Sender<String>) {
+    let ServerMessage::Response { id, .. } = msg else {
+        warn!("Dropping oversized IPC message ({len} > {MAX_IPC_LINE_BYTES} bytes)");
+        return;
+    };
+
+    let fallback = ServerMessage::Response {
+        id: id.clone(),
+        ok: false,
+        result: None,
+        error: Some(ErrorPayload::new(
+            PublicErrorCode::IpcProtocolError,
+            "response frame too large",
+        )),
+    };
+
+    match encode_framed(&fallback) {
+        Ok(fallback_encoded) => {
+            let _ = write_tx.send(fallback_encoded).await;
+        }
+        Err(FrameEncodeError::Oversized { len }) => {
+            warn!("Dropping oversized fallback IPC response ({len} > {MAX_IPC_LINE_BYTES} bytes)")
+        }
+        Err(FrameEncodeError::Encode(error)) => {
+            warn!("Failed to encode IPC fallback response: {error}")
+        }
     }
 }
 
@@ -269,12 +259,12 @@ async fn handle_line(
     subs: &mut SessionSubscriptions,
     command_tx: &mpsc::Sender<CommandDispatch>,
     write_tx: &mpsc::Sender<String>,
-) -> bool {
+) -> SessionControl {
     let msg = match decode::<ClientMessage>(&line) {
         Ok(m) => m,
         Err(e) => {
             warn!("Malformed IPC message: {e}");
-            return false;
+            return SessionControl::Close;
         }
     };
 
@@ -288,31 +278,28 @@ async fn handle_line(
     }
 }
 
-/// Tell the client its request was rejected, and report "do not keep this
-/// session open" to the caller.
+/// Tell the client its request was rejected.
 ///
-/// Every rejection in this module ends the same way, so the `false` that keeps
-/// the connection from continuing is part of this helper rather than a line
-/// each caller has to remember to write after it.
+/// Every rejection in this module also ends the session, so the `Close` that
+/// stops the read loop is part of this helper rather than a line each caller
+/// has to remember to write after it.
 async fn reject(
     id: String,
     code: PublicErrorCode,
     message: &str,
     write_tx: &mpsc::Sender<String>,
-) -> bool {
+) -> SessionControl {
     send_encoded(&err_response(id, code, message), write_tx).await;
-    false
+    SessionControl::Close
 }
 
 /// Hand one command to the executor and answer the client when it replies.
-///
-/// Returns whether the session should continue.
 async fn handle_command(
     id: String,
     command: CommandPayload,
     command_tx: &mpsc::Sender<CommandDispatch>,
     write_tx: &mpsc::Sender<String>,
-) -> bool {
+) -> SessionControl {
     if let Err(error) = validate_ipc_request_id(&id) {
         return reject(id, PublicErrorCode::IpcProtocolError, &error, write_tx).await;
     }
@@ -356,21 +343,19 @@ async fn handle_command(
         send_encoded(&response, &write_tx).await;
     });
 
-    true
+    SessionControl::Continue
 }
 
 /// Record what this session wants pushed to it, acknowledge the request, and —
 /// for a first subscription to `state` — send the current snapshot straight
 /// away so the client has something to draw before any change arrives.
-///
-/// Returns whether the session should continue.
 async fn handle_subscribe(
     id: String,
     topics: Vec<String>,
     subs: &mut SessionSubscriptions,
     command_tx: &mpsc::Sender<CommandDispatch>,
     write_tx: &mpsc::Sender<String>,
-) -> bool {
+) -> SessionControl {
     if let Err(error) = validate_ipc_request_id(&id) {
         return reject(id, PublicErrorCode::IpcProtocolError, &error, write_tx).await;
     }
@@ -379,14 +364,15 @@ async fn handle_subscribe(
         Ok(topics) => topics,
         Err(error) => {
             send_encoded(&error.to_protocol_response(id), write_tx).await;
-            return false;
+            return SessionControl::Close;
         }
     };
 
-    let needs_initial_state =
-        topics.iter().any(|t| t == TOPIC_STATE) && !subs.is_state_subscribed();
-    for t in &topics {
-        subs.insert(t.clone());
+    // Checked before the inserts below: "first subscription to state" means
+    // this session was not already subscribed when the request arrived.
+    let needs_initial_state = topics.contains(&Topic::State) && !subs.contains(Topic::State);
+    for topic in &topics {
+        subs.insert(*topic);
     }
 
     let ack = ServerMessage::Response {
@@ -401,7 +387,7 @@ async fn handle_subscribe(
         send_initial_state(command_tx, write_tx).await;
     }
 
-    true
+    SessionControl::Continue
 }
 
 /// Push the current snapshot to a session that has just subscribed to `state`.
@@ -502,7 +488,7 @@ fn sanitize_response_id(response: ServerMessage, request_id: &str) -> ServerMess
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::protocol::MAX_SUBSCRIBE_TOPICS;
+    use crate::ipc::protocol::{MAX_SUBSCRIBE_TOPICS, TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
@@ -578,7 +564,7 @@ mod tests {
             &write_tx,
         )
         .await;
-        assert!(!handled);
+        assert_eq!(handled, SessionControl::Close);
 
         let resp = write_rx.recv().await.unwrap();
         let msg = decode::<ServerMessage>(&resp).unwrap();
@@ -615,7 +601,7 @@ mod tests {
             &write_tx,
         )
         .await;
-        assert!(!handled);
+        assert_eq!(handled, SessionControl::Close);
 
         let resp = write_rx.recv().await.unwrap();
         let msg = decode::<ServerMessage>(&resp).unwrap();
@@ -655,7 +641,7 @@ mod tests {
             &write_tx,
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, SessionControl::Continue);
 
         let resp = write_rx.recv().await.unwrap();
         let msg = decode::<ServerMessage>(&resp).unwrap();
@@ -679,9 +665,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![TOPIC_STATE, TOPIC_EVENTS, TOPIC_LOGS]
         );
-        assert!(subs.contains(TOPIC_STATE));
-        assert!(subs.contains(TOPIC_EVENTS));
-        assert!(subs.contains(TOPIC_LOGS));
+        assert!(subs.contains(Topic::State));
+        assert!(subs.contains(Topic::Events));
+        assert!(subs.contains(Topic::Logs));
     }
 
     #[tokio::test]
@@ -753,7 +739,7 @@ mod tests {
             &write_tx,
         )
         .await;
-        assert!(!handled);
+        assert_eq!(handled, SessionControl::Close);
 
         let resp = write_rx.recv().await.unwrap();
         let msg = decode::<ServerMessage>(&resp).unwrap();
@@ -790,7 +776,7 @@ mod tests {
             &write_tx,
         )
         .await;
-        assert!(!handled);
+        assert_eq!(handled, SessionControl::Close);
 
         let resp = write_rx.recv().await.unwrap();
         let msg = decode::<ServerMessage>(&resp).unwrap();
@@ -827,7 +813,7 @@ mod tests {
             &write_tx,
         )
         .await;
-        assert!(handled);
+        assert_eq!(handled, SessionControl::Continue);
 
         let dispatch = command_rx.recv().await.expect("expected command dispatch");
         dispatch

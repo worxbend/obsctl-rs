@@ -4,16 +4,13 @@ use std::collections::HashSet;
 use time::OffsetDateTime;
 
 use crate::domain::errors::ObsctlError;
-pub use crate::support::redaction::redact_message as redacted_message;
+use crate::support::redaction::redact_message;
 use crate::support::validation::validate_no_control_or_whitespace;
 
 /// Maximum size of one framed IPC JSON line, including the trailing newline.
 pub const MAX_IPC_LINE_BYTES: usize = 64 * 1024;
 pub const MAX_IPC_REQUEST_ID_BYTES: usize = 64;
 pub const MAX_COMMAND_NAME_BYTES: usize = 64;
-
-/// Client side tolerance for unrelated frames while waiting for a correlated response.
-pub const MAX_UNMATCHED_IPC_RESPONSES: usize = 32;
 
 /// Maximum number of topics accepted in a single subscribe command.
 pub const MAX_SUBSCRIBE_TOPICS: usize = 16;
@@ -274,24 +271,6 @@ fn serialize_payload<T: Serialize>(payload: T, label: &'static str) -> Value {
     })
 }
 
-pub(crate) fn deduplicate_topics<I, S>(topics: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut seen = HashSet::new();
-    let mut deduped = Vec::new();
-
-    for topic in topics {
-        let topic = topic.as_ref();
-        if seen.insert(topic.to_string()) {
-            deduped.push(topic.to_string());
-        }
-    }
-
-    deduped
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubscribeTopicsError {
     EmptyList,
@@ -323,7 +302,15 @@ impl SubscribeTopicsError {
     }
 }
 
-pub fn normalize_subscribe_topics<I, S>(topics: I) -> Result<Vec<String>, SubscribeTopicsError>
+/// Turn the strings a client sent in a subscribe request into the topics the
+/// session should be signed up for.
+///
+/// The request stays string-typed on the wire because that is what the
+/// protocol promised; this is where those strings stop being strings. Topics
+/// repeated in one request collapse to a single subscription, and the order
+/// the client asked for is kept so the acknowledgement echoes something
+/// recognisable back.
+pub fn normalize_subscribe_topics<I, S>(topics: I) -> Result<Vec<Topic>, SubscribeTopicsError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -344,22 +331,32 @@ where
         });
     }
 
-    let deduped = deduplicate_topics(topics);
-    let invalid = deduped
-        .iter()
-        .filter(|topic| has_invalid_topic_chars(topic) || !is_valid_topic(topic))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
 
-    if !invalid.is_empty() {
-        return Err(SubscribeTopicsError::UnknownTopics(invalid));
+    for topic in topics {
+        match Topic::parse(&topic) {
+            Some(parsed) => {
+                if seen.insert(parsed) {
+                    normalized.push(parsed);
+                }
+            }
+            // Report each unrecognised spelling once. A linear scan is
+            // enough: the list was already capped at MAX_SUBSCRIBE_TOPICS.
+            None => {
+                if !unknown.contains(&topic) {
+                    unknown.push(topic);
+                }
+            }
+        }
     }
 
-    Ok(deduped)
-}
+    if !unknown.is_empty() {
+        return Err(SubscribeTopicsError::UnknownTopics(unknown));
+    }
 
-fn has_invalid_topic_chars(topic: &str) -> bool {
-    topic.is_empty() || validate_no_control_or_whitespace(topic).is_err()
+    Ok(normalized)
 }
 
 pub fn validate_ipc_request_id(id: &str) -> Result<(), String> {
@@ -455,7 +452,7 @@ impl LogEvent {
     pub fn new(level: LogLevel, message: impl AsRef<str>) -> Self {
         Self {
             level,
-            message: redacted_message(message),
+            message: redact_message(message),
             target: None,
             timestamp: OffsetDateTime::now_utc(),
         }
@@ -481,10 +478,98 @@ impl ErrorPayload {
     pub fn from_code(code: impl Into<String>, message: impl AsRef<str>) -> Self {
         Self {
             code: code.into(),
-            message: redacted_message(message),
+            message: redact_message(message),
         }
     }
 }
+
+/// One row of the public error taxonomy: the code, the string that goes on
+/// the wire, and the exit status a proxy CLI command ends with after seeing
+/// it. Keeping the three together means a new error cannot be given a wire
+/// name without also being given an exit code.
+pub struct ErrorCodeSpec {
+    pub code: PublicErrorCode,
+    pub wire: &'static str,
+    pub exit_code: i32,
+}
+
+/// Every public error code, in the order they appear in `PublicErrorCode`.
+///
+/// The wire strings and exit codes here are the daemon-reachable public
+/// contract documented in the README; changing a row changes what scripts
+/// calling `obsctl` observe.
+pub const ERROR_CODES: &[ErrorCodeSpec] = &[
+    ErrorCodeSpec {
+        code: PublicErrorCode::ConfigInvalid,
+        wire: "CONFIG_INVALID",
+        exit_code: 2,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::ServerUnavailable,
+        wire: "SERVER_UNAVAILABLE",
+        exit_code: 3,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::ObsUnavailable,
+        wire: "OBS_UNAVAILABLE",
+        exit_code: 4,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::RequestTimeout,
+        wire: "REQUEST_TIMEOUT",
+        exit_code: 4,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::ObsRequestFailed,
+        wire: "OBS_REQUEST_FAILED",
+        exit_code: 4,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::SceneNotFound,
+        wire: "SCENE_NOT_FOUND",
+        exit_code: 4,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::AudioInputNotFound,
+        wire: "AUDIO_INPUT_NOT_FOUND",
+        exit_code: 4,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::ProfileNotFound,
+        wire: "PROFILE_NOT_FOUND",
+        exit_code: 4,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::SceneCollectionNotFound,
+        wire: "SCENE_COLLECTION_NOT_FOUND",
+        exit_code: 4,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::AliasAmbiguous,
+        wire: "ALIAS_AMBIGUOUS",
+        exit_code: 1,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::CommandParseError,
+        wire: "COMMAND_PARSE_ERROR",
+        exit_code: 5,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::IpcProtocolError,
+        wire: "IPC_PROTOCOL_ERROR",
+        exit_code: 6,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::ShutdownDisabled,
+        wire: "SHUTDOWN_DISABLED",
+        exit_code: 1,
+    },
+    ErrorCodeSpec {
+        code: PublicErrorCode::ServerError,
+        wire: "SERVER_ERROR",
+        exit_code: 1,
+    },
+];
 
 /// Canonical public error taxonomy for daemon-reachable IPC responses.
 ///
@@ -512,40 +597,31 @@ pub enum PublicErrorCode {
 }
 
 impl PublicErrorCode {
-    pub const ALL: [Self; 14] = [
-        Self::ConfigInvalid,
-        Self::ServerUnavailable,
-        Self::ObsUnavailable,
-        Self::RequestTimeout,
-        Self::ObsRequestFailed,
-        Self::SceneNotFound,
-        Self::AudioInputNotFound,
-        Self::ProfileNotFound,
-        Self::SceneCollectionNotFound,
-        Self::AliasAmbiguous,
-        Self::CommandParseError,
-        Self::IpcProtocolError,
-        Self::ShutdownDisabled,
-        Self::ServerError,
-    ];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ConfigInvalid => "CONFIG_INVALID",
-            Self::ServerUnavailable => "SERVER_UNAVAILABLE",
-            Self::ObsUnavailable => "OBS_UNAVAILABLE",
-            Self::RequestTimeout => "REQUEST_TIMEOUT",
-            Self::ObsRequestFailed => "OBS_REQUEST_FAILED",
-            Self::SceneNotFound => "SCENE_NOT_FOUND",
-            Self::AudioInputNotFound => "AUDIO_INPUT_NOT_FOUND",
-            Self::ProfileNotFound => "PROFILE_NOT_FOUND",
-            Self::SceneCollectionNotFound => "SCENE_COLLECTION_NOT_FOUND",
-            Self::AliasAmbiguous => "ALIAS_AMBIGUOUS",
-            Self::CommandParseError => "COMMAND_PARSE_ERROR",
-            Self::IpcProtocolError => "IPC_PROTOCOL_ERROR",
-            Self::ShutdownDisabled => "SHUTDOWN_DISABLED",
-            Self::ServerError => "SERVER_ERROR",
+    /// Every code, built from `ERROR_CODES` so the two can never disagree.
+    /// `cli::client_commands` walks this to prove its exit-code mapping
+    /// covers the whole taxonomy.
+    pub const ALL: [Self; ERROR_CODES.len()] = {
+        // A `const` loop rather than `iter().map()`: iterators are not
+        // available in a constant, and the array has to exist at compile
+        // time because callers match on its length.
+        let mut all = [Self::ServerError; ERROR_CODES.len()];
+        let mut index = 0;
+        while index < ERROR_CODES.len() {
+            all[index] = ERROR_CODES[index].code;
+            index += 1;
         }
+        all
+    };
+
+    fn spec(self) -> &'static ErrorCodeSpec {
+        ERROR_CODES
+            .iter()
+            .find(|spec| spec.code == self)
+            .expect("every PublicErrorCode variant has a row in ERROR_CODES")
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.spec().wire
     }
 
     /// CLI exit code used when a proxy command receives this public IPC error.
@@ -554,41 +630,15 @@ impl PublicErrorCode {
     /// commands and startup failures use `ObsctlError::exit_code()` because
     /// their process context can classify failures differently before any IPC
     /// response exists.
-    pub const fn exit_code(self) -> i32 {
-        match self {
-            Self::ConfigInvalid => 2,
-            Self::ServerUnavailable => 3,
-            Self::ObsUnavailable
-            | Self::RequestTimeout
-            | Self::ObsRequestFailed
-            | Self::SceneNotFound
-            | Self::AudioInputNotFound
-            | Self::ProfileNotFound
-            | Self::SceneCollectionNotFound => 4,
-            Self::CommandParseError => 5,
-            Self::IpcProtocolError => 6,
-            Self::AliasAmbiguous | Self::ShutdownDisabled | Self::ServerError => 1,
-        }
+    pub fn exit_code(self) -> i32 {
+        self.spec().exit_code
     }
 
     pub fn parse(code: &str) -> Option<Self> {
-        match code {
-            "CONFIG_INVALID" => Some(Self::ConfigInvalid),
-            "SERVER_UNAVAILABLE" => Some(Self::ServerUnavailable),
-            "OBS_UNAVAILABLE" => Some(Self::ObsUnavailable),
-            "REQUEST_TIMEOUT" => Some(Self::RequestTimeout),
-            "OBS_REQUEST_FAILED" => Some(Self::ObsRequestFailed),
-            "SCENE_NOT_FOUND" => Some(Self::SceneNotFound),
-            "AUDIO_INPUT_NOT_FOUND" => Some(Self::AudioInputNotFound),
-            "PROFILE_NOT_FOUND" => Some(Self::ProfileNotFound),
-            "SCENE_COLLECTION_NOT_FOUND" => Some(Self::SceneCollectionNotFound),
-            "ALIAS_AMBIGUOUS" => Some(Self::AliasAmbiguous),
-            "COMMAND_PARSE_ERROR" => Some(Self::CommandParseError),
-            "IPC_PROTOCOL_ERROR" => Some(Self::IpcProtocolError),
-            "SHUTDOWN_DISABLED" => Some(Self::ShutdownDisabled),
-            "SERVER_ERROR" => Some(Self::ServerError),
-            _ => None,
-        }
+        ERROR_CODES
+            .iter()
+            .find(|spec| spec.wire == code)
+            .map(|spec| spec.code)
     }
 
     /// Convert an internal error into the public daemon IPC error taxonomy.
@@ -638,13 +688,17 @@ pub fn exit_code_for_public_error_code(code: &str) -> i32 {
         .unwrap_or(1)
 }
 
+/// The wire spellings of the three topics. `Topic` is the type to reason
+/// with; these constants exist so callers that hand a topic to a
+/// string-typed API (the subscribe wire field, test fixtures) name the same
+/// literal `Topic::as_str` returns instead of retyping it.
 pub const TOPIC_STATE: &str = "state";
 pub const TOPIC_EVENTS: &str = "events";
 pub const TOPIC_LOGS: &str = "logs";
 
 /// Typed topic discriminant for `ServerMessage::Event`. Serializes as the
 /// lowercase wire string ("state", "events", "logs") to preserve wire compat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Topic {
     State,
@@ -652,8 +706,25 @@ pub enum Topic {
     Logs,
 }
 
-pub fn is_valid_topic(topic: &str) -> bool {
-    matches!(topic, TOPIC_STATE | TOPIC_EVENTS | TOPIC_LOGS)
+impl Topic {
+    /// Every topic, in the order a client normally cares about them. Walking
+    /// this is how callers avoid a fourth place that lists the three topics.
+    pub const ALL: [Self; 3] = [Self::State, Self::Events, Self::Logs];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::State => TOPIC_STATE,
+            Self::Events => TOPIC_EVENTS,
+            Self::Logs => TOPIC_LOGS,
+        }
+    }
+
+    /// Turn a wire string back into a topic. `None` means the string is not
+    /// one of the three topics — including when it is empty or carries
+    /// control characters, because the comparison is exact.
+    pub fn parse(topic: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|known| known.as_str() == topic)
+    }
 }
 
 #[cfg(test)]
@@ -1197,7 +1268,7 @@ mod tests {
 
     #[test]
     fn redacted_message_masks_json_like_secret_values() {
-        let redacted = redacted_message(
+        let redacted = redact_message(
             r#"connect payload {"password":"hunter2","token":"abc.def","safe":"ok"}"#,
         );
 
@@ -1268,7 +1339,7 @@ mod tests {
 
     #[test]
     fn redacted_message_does_not_mask_unassociated_words() {
-        let redacted = redacted_message("password_env=OBS_WEBSOCKET_PASSWORD auth mode disabled");
+        let redacted = redact_message("password_env=OBS_WEBSOCKET_PASSWORD auth mode disabled");
 
         assert_eq!(
             redacted,
@@ -1294,62 +1365,74 @@ mod tests {
         );
     }
 
-    #[test]
-    fn public_error_codes_have_documented_cli_exit_codes() {
-        let expected_codes = [
-            PublicErrorCode::ConfigInvalid,
-            PublicErrorCode::ServerUnavailable,
-            PublicErrorCode::ObsUnavailable,
-            PublicErrorCode::RequestTimeout,
-            PublicErrorCode::ObsRequestFailed,
-            PublicErrorCode::SceneNotFound,
-            PublicErrorCode::AudioInputNotFound,
-            PublicErrorCode::ProfileNotFound,
-            PublicErrorCode::SceneCollectionNotFound,
-            PublicErrorCode::AliasAmbiguous,
-            PublicErrorCode::CommandParseError,
-            PublicErrorCode::IpcProtocolError,
-            PublicErrorCode::ShutdownDisabled,
-            PublicErrorCode::ServerError,
-        ];
-        let cases = [
-            (PublicErrorCode::ConfigInvalid, "CONFIG_INVALID", 2),
-            (PublicErrorCode::ServerUnavailable, "SERVER_UNAVAILABLE", 3),
-            (PublicErrorCode::ObsUnavailable, "OBS_UNAVAILABLE", 4),
-            (PublicErrorCode::RequestTimeout, "REQUEST_TIMEOUT", 4),
-            (PublicErrorCode::ObsRequestFailed, "OBS_REQUEST_FAILED", 4),
-            (PublicErrorCode::SceneNotFound, "SCENE_NOT_FOUND", 4),
-            (
-                PublicErrorCode::AudioInputNotFound,
-                "AUDIO_INPUT_NOT_FOUND",
-                4,
-            ),
-            (PublicErrorCode::ProfileNotFound, "PROFILE_NOT_FOUND", 4),
-            (
-                PublicErrorCode::SceneCollectionNotFound,
-                "SCENE_COLLECTION_NOT_FOUND",
-                4,
-            ),
-            (PublicErrorCode::AliasAmbiguous, "ALIAS_AMBIGUOUS", 1),
-            (PublicErrorCode::CommandParseError, "COMMAND_PARSE_ERROR", 5),
-            (PublicErrorCode::IpcProtocolError, "IPC_PROTOCOL_ERROR", 6),
-            (PublicErrorCode::ShutdownDisabled, "SHUTDOWN_DISABLED", 1),
-            (PublicErrorCode::ServerError, "SERVER_ERROR", 1),
-        ];
-
-        assert_eq!(PublicErrorCode::ALL, expected_codes);
-        assert_eq!(cases.len(), PublicErrorCode::ALL.len());
-
-        for (code, wire, exit_code) in cases {
-            assert!(
-                PublicErrorCode::ALL.contains(&code),
-                "{code:?} missing from ALL"
-            );
-            assert_eq!(code.as_str(), wire);
-            assert_eq!(PublicErrorCode::parse(wire), Some(code));
-            assert_eq!(code.exit_code(), exit_code);
-            assert_eq!(exit_code_for_public_error_code(wire), exit_code);
+    // Compile-time exhaustiveness guard: a new `PublicErrorCode` variant makes
+    // this match fail to compile, which is the reminder to add its row to
+    // `ERROR_CODES` too. `every_public_error_code_has_a_spec` then proves the
+    // row exists.
+    #[allow(dead_code)]
+    fn _public_error_code_variant_guard(c: PublicErrorCode) {
+        match c {
+            PublicErrorCode::ConfigInvalid => {}
+            PublicErrorCode::ServerUnavailable => {}
+            PublicErrorCode::ObsUnavailable => {}
+            PublicErrorCode::RequestTimeout => {}
+            PublicErrorCode::ObsRequestFailed => {}
+            PublicErrorCode::SceneNotFound => {}
+            PublicErrorCode::AudioInputNotFound => {}
+            PublicErrorCode::ProfileNotFound => {}
+            PublicErrorCode::SceneCollectionNotFound => {}
+            PublicErrorCode::AliasAmbiguous => {}
+            PublicErrorCode::CommandParseError => {}
+            PublicErrorCode::IpcProtocolError => {}
+            PublicErrorCode::ShutdownDisabled => {}
+            PublicErrorCode::ServerError => {}
         }
+    }
+
+    #[test]
+    fn every_public_error_code_has_a_spec_and_documented_cli_exit_code() {
+        const PUBLIC_ERROR_CODE_VARIANT_COUNT: usize = 14;
+        assert_eq!(ERROR_CODES.len(), PUBLIC_ERROR_CODE_VARIANT_COUNT);
+        assert_eq!(PublicErrorCode::ALL.len(), ERROR_CODES.len());
+
+        for (index, spec) in ERROR_CODES.iter().enumerate() {
+            // `as_str()` panics if a variant has no row, so this exercises the
+            // lookup in both directions for every code.
+            assert_eq!(spec.code.as_str(), spec.wire);
+            assert_eq!(PublicErrorCode::parse(spec.wire), Some(spec.code));
+            assert_eq!(spec.code.exit_code(), spec.exit_code, "{}", spec.wire);
+            assert_eq!(
+                exit_code_for_public_error_code(spec.wire),
+                spec.exit_code,
+                "{}",
+                spec.wire
+            );
+            assert_eq!(PublicErrorCode::ALL[index], spec.code);
+        }
+
+        let wire_strings: HashSet<&str> = ERROR_CODES.iter().map(|spec| spec.wire).collect();
+        assert_eq!(
+            wire_strings.len(),
+            ERROR_CODES.len(),
+            "duplicate error code wire string"
+        );
+
+        // The documented exit codes, spelled out once so a silent edit to a
+        // row in `ERROR_CODES` shows up as a failing expectation here.
+        assert_eq!(PublicErrorCode::ConfigInvalid.exit_code(), 2);
+        assert_eq!(PublicErrorCode::ServerUnavailable.exit_code(), 3);
+        assert_eq!(PublicErrorCode::ObsUnavailable.exit_code(), 4);
+        assert_eq!(PublicErrorCode::RequestTimeout.exit_code(), 4);
+        assert_eq!(PublicErrorCode::ObsRequestFailed.exit_code(), 4);
+        assert_eq!(PublicErrorCode::SceneNotFound.exit_code(), 4);
+        assert_eq!(PublicErrorCode::AudioInputNotFound.exit_code(), 4);
+        assert_eq!(PublicErrorCode::ProfileNotFound.exit_code(), 4);
+        assert_eq!(PublicErrorCode::SceneCollectionNotFound.exit_code(), 4);
+        assert_eq!(PublicErrorCode::AliasAmbiguous.exit_code(), 1);
+        assert_eq!(PublicErrorCode::CommandParseError.exit_code(), 5);
+        assert_eq!(PublicErrorCode::IpcProtocolError.exit_code(), 6);
+        assert_eq!(PublicErrorCode::ShutdownDisabled.exit_code(), 1);
+        assert_eq!(PublicErrorCode::ServerError.exit_code(), 1);
 
         assert_eq!(exit_code_for_public_error_code("UNKNOWN_CODE"), 1);
     }
@@ -1449,10 +1532,31 @@ mod tests {
     }
 
     #[test]
-    fn deduplicate_topics_removes_duplicates_preserving_order() {
-        let topics = deduplicate_topics(vec!["events", "state", "events", "logs", "state"]);
+    fn normalize_subscribe_topics_removes_duplicates_preserving_order() {
+        let topics =
+            normalize_subscribe_topics(vec!["events", "state", "events", "logs", "state"]).unwrap();
 
-        assert_eq!(topics, vec!["events", "state", "logs"]);
+        assert_eq!(topics, vec![Topic::Events, Topic::State, Topic::Logs]);
+    }
+
+    #[test]
+    fn topic_round_trips_through_its_wire_string() {
+        for topic in Topic::ALL {
+            assert_eq!(Topic::parse(topic.as_str()), Some(topic));
+            assert_eq!(
+                serde_json::to_value(topic).unwrap(),
+                json!(topic.as_str()),
+                "{topic:?} must serialize as its wire string"
+            );
+        }
+
+        assert_eq!(
+            Topic::ALL.map(Topic::as_str),
+            [TOPIC_STATE, TOPIC_EVENTS, TOPIC_LOGS]
+        );
+        assert_eq!(Topic::parse("bad"), None);
+        assert_eq!(Topic::parse(""), None);
+        assert_eq!(Topic::parse("events\t"), None);
     }
 
     #[test]
@@ -1496,11 +1600,7 @@ mod tests {
 
         assert_eq!(
             normalize_subscribe_topics(["state", "state", TOPIC_EVENTS, TOPIC_LOGS]),
-            Ok(vec![
-                TOPIC_STATE.to_string(),
-                TOPIC_EVENTS.to_string(),
-                TOPIC_LOGS.to_string()
-            ])
+            Ok(vec![Topic::State, Topic::Events, Topic::Logs])
         );
     }
 

@@ -1,9 +1,7 @@
 use std::collections::HashSet;
 use tokio::sync::{broadcast, oneshot};
 
-use crate::ipc::protocol::{
-    CommandPayload, LogEvent, ObsEventPayload, ServerMessage, TOPIC_STATE, Topic,
-};
+use crate::ipc::protocol::{CommandPayload, LogEvent, ObsEventPayload, ServerMessage, Topic};
 
 pub const BROADCAST_CAPACITY: usize = 64;
 
@@ -49,16 +47,29 @@ impl BroadcastHub {
         self.publish(Topic::Events, ServerMessage::obs_event(event));
     }
 
+    /// Start receiving everything published on one topic from now on.
+    ///
+    /// The mirror image of `publish`: both pick the channel from the same
+    /// `Topic` value, so a new topic cannot be published to without also
+    /// being subscribable.
+    pub fn subscribe(&self, topic: Topic) -> broadcast::Receiver<ServerMessage> {
+        match topic {
+            Topic::State => self.state_tx.subscribe(),
+            Topic::Events => self.events_tx.subscribe(),
+            Topic::Logs => self.logs_tx.subscribe(),
+        }
+    }
+
     pub fn subscribe_state(&self) -> broadcast::Receiver<ServerMessage> {
-        self.state_tx.subscribe()
+        self.subscribe(Topic::State)
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<ServerMessage> {
-        self.events_tx.subscribe()
+        self.subscribe(Topic::Events)
     }
 
     pub fn subscribe_logs(&self) -> broadcast::Receiver<ServerMessage> {
-        self.logs_tx.subscribe()
+        self.subscribe(Topic::Logs)
     }
 }
 
@@ -71,19 +82,15 @@ pub struct CommandDispatch {
 
 /// Tracks which topics a single IPC client has subscribed to.
 #[derive(Default)]
-pub struct SessionSubscriptions(HashSet<String>);
+pub struct SessionSubscriptions(HashSet<Topic>);
 
 impl SessionSubscriptions {
-    pub fn contains(&self, topic: &str) -> bool {
-        self.0.contains(topic)
+    pub fn contains(&self, topic: Topic) -> bool {
+        self.0.contains(&topic)
     }
 
-    pub fn insert(&mut self, topic: String) {
+    pub fn insert(&mut self, topic: Topic) {
         self.0.insert(topic);
-    }
-
-    pub fn is_state_subscribed(&self) -> bool {
-        self.0.contains(TOPIC_STATE)
     }
 }
 

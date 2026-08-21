@@ -1,6 +1,9 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt as _;
+
 use crate::support;
 use crate::support::validation::read_env_path_token;
 
@@ -37,10 +40,6 @@ pub fn default_socket_path() -> PathBuf {
     }
     let uid = support::fs::current_uid();
     PathBuf::from(format!("/tmp/obsctl-{uid}/obsctl.sock"))
-}
-
-pub fn is_safe_socket_path(path: &Path) -> bool {
-    validate_socket_path(path).is_ok()
 }
 
 /// A relative socket path is refused rather than resolved, because what it
@@ -131,6 +130,178 @@ pub fn resolve_server_socket_path(
 ) -> Result<PathBuf, SocketPathValidationError> {
     parse_optional_server_socket_path(raw_socket_path)
         .map(|path| path.unwrap_or_else(default_socket_path))
+}
+
+/// Get `socket_path` ready for a daemon to bind: a private parent directory
+/// exists, the path itself is one this process is willing to use, and nothing
+/// is left over from a previous run.
+///
+/// The error is the message to log, already written out. That is unusual, and
+/// it is deliberate: the three ways this can fail are three different pieces of
+/// socket-file policy, and the wording that explains each of them belongs
+/// beside the rule it explains rather than in the daemon's startup code, where
+/// it used to sit two hundred lines away from anything that could change it.
+pub async fn prepare(socket_path: &Path) -> Result<(), String> {
+    if let Err(error) = ensure_private_socket_parent(socket_path) {
+        return Err(format!(
+            "Refusing to use socket path {}: {error}",
+            socket_path.display()
+        ));
+    }
+
+    if let Err(error) = validate_socket_path(socket_path) {
+        return Err(format!(
+            "Invalid socket path {}: {error}",
+            socket_path.display()
+        ));
+    }
+
+    // A socket file left behind by a crashed daemon must be cleared, but one
+    // belonging to a daemon that is still running must not be.
+    if socket_path.exists()
+        && let Err(error) = try_remove_stale_socket(socket_path).await
+    {
+        return Err(format!("Socket path occupied by live server: {error}"));
+    }
+
+    Ok(())
+}
+
+/// Remove the socket file a daemon is finished with.
+///
+/// Distinct from [`prepare`]'s stale-socket handling in one respect only: this
+/// runs on the way out, when the socket being ours is not in question, so it
+/// does not probe for a live server first. Everything after that decision is
+/// shared — see [`remove_socket_file_if_stale`].
+pub fn cleanup(path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(parent) => support::fs::ensure_private_dir(parent)?,
+        None => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socket path has no parent",
+            ));
+        }
+    }
+
+    remove_socket_file_if_stale(path)
+}
+
+/// Whether the directory that would hold `path` is one only this user can
+/// write to.
+///
+/// A typed answer to a question the daemon used to ask by searching an
+/// `io::Error`'s message for the words "not a private directory". That wording
+/// belongs to `support::fs::ensure_private_dir`, two modules away, and no test
+/// pinned it, so rewording it would silently have changed whether the daemon
+/// was willing to delete a socket file sitting in a world-writable directory.
+///
+/// A path with no parent at all (`/`) counts as not private: there is no
+/// directory to judge, and refusing is the safe answer.
+fn socket_parent_is_private(path: &Path) -> bool {
+    path.parent()
+        .is_some_and(|parent| support::fs::ensure_private_dir(parent).is_ok())
+}
+
+/// Clear a socket file left behind by a daemon that is no longer running.
+///
+/// The liveness probe is the whole point: a socket file on disk says nothing
+/// about whether anyone is listening on it, and the two cases need opposite
+/// treatment. Connecting is the only way to tell them apart — a connection that
+/// is accepted means a live server owns this path and this process must not
+/// start; a refusal or a timeout means the file outlived its daemon and is safe
+/// to unlink.
+async fn try_remove_stale_socket(path: &Path) -> Result<(), String> {
+    // Checked first, and separately from the rest, so that a relative path is
+    // told it is relative rather than being asked about a parent directory
+    // that means nothing without a working directory to resolve against.
+    require_absolute(path).map_err(|error| error.to_string())?;
+
+    if !socket_parent_is_private(path) {
+        return Err("socket parent is not private".to_string());
+    }
+
+    validate_socket_path(path).map_err(|error| error.to_string())?;
+    validate_socket_file_for_cleanup(path).map_err(|error| error.to_string())?;
+
+    const LIVENESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+    match tokio::time::timeout(
+        LIVENESS_PROBE_TIMEOUT,
+        tokio::net::UnixStream::connect(path),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Err(format!(
+            "live server is already running at {}",
+            path.display()
+        )),
+        _ => remove_socket_file_if_stale(path).map_err(|error| error.to_string()),
+    }
+}
+
+/// Check one more time that `path` is a socket file worth touching, then
+/// unlink it.
+///
+/// The two steps are one function because of the gap between them. However
+/// recently a caller validated this path, another process can replace it in the
+/// meantime, so the check has to sit as close to the delete as it can — and
+/// `remove_with_type_guard` re-reads the metadata a third time for the same
+/// reason. A file that has vanished at either step is success, not an error:
+/// both callers wanted it gone, and something else getting there first counts.
+fn remove_socket_file_if_stale(path: &Path) -> io::Result<()> {
+    match validate_socket_file_for_cleanup(path) {
+        Ok(()) => {}
+        Err(SocketFileValidation::File(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(SocketFileValidation::Path(error)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid socket path for cleanup: {error}"),
+            ));
+        }
+        Err(SocketFileValidation::File(error)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid socket file for cleanup: {error}"),
+            ));
+        }
+    }
+
+    match support::fs::remove_with_type_guard(
+        path,
+        |metadata| metadata.file_type().is_socket(),
+        "socket",
+    ) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// Why a path that should hold a live IPC socket cannot be treated as one.
+///
+/// The two cases are kept apart for [`remove_socket_file_if_stale`], which
+/// tolerates a `File` error meaning "already gone" but not a `Path` error
+/// meaning "this is not a path we are willing to touch". Callers that only need
+/// to report the problem use the `Display` impl.
+enum SocketFileValidation {
+    Path(io::Error),
+    File(io::Error),
+}
+
+impl std::fmt::Display for SocketFileValidation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Path(error) | Self::File(error) => error.fmt(f),
+        }
+    }
+}
+
+fn validate_socket_file_for_cleanup(path: &Path) -> Result<(), SocketFileValidation> {
+    validate_socket_path(path).map_err(SocketFileValidation::Path)?;
+    ensure_socket_file(path).map_err(SocketFileValidation::File)?;
+    Ok(())
 }
 
 fn is_valid_runtime_dir(path: &Path) -> bool {
@@ -293,7 +464,7 @@ mod tests {
         let parent = dir.path().join("parent");
         std::fs::create_dir(&parent).unwrap();
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(!super::is_safe_socket_path(&parent.join("obsctl.sock")));
+        assert!(super::validate_socket_path(&parent.join("obsctl.sock")).is_err());
     }
 
     #[cfg(unix)]
@@ -353,7 +524,7 @@ mod tests {
 
     #[test]
     fn rejects_relative_socket_path() {
-        assert!(!super::is_safe_socket_path(Path::new("relative.sock")));
+        assert!(super::validate_socket_path(Path::new("relative.sock")).is_err());
     }
 
     #[cfg(unix)]
@@ -393,7 +564,7 @@ mod tests {
         symlink(&real_parent, &link_parent).unwrap();
         let socket_path = link_parent.join("obsctl.sock");
 
-        assert!(!super::is_safe_socket_path(&socket_path));
+        assert!(super::validate_socket_path(&socket_path).is_err());
     }
 
     #[test]
@@ -543,6 +714,150 @@ mod tests {
             err.unwrap_err().to_string(),
             "socket path must be an absolute, non-symlink, private filesystem path: socket path contains traversal components"
         );
+    }
+
+    // ---- Socket file lifecycle ----
+    //
+    // These moved here from `server::daemon` along with the code they cover.
+    // They are tests of socket-file policy — what this daemon may delete, and
+    // when — not of the daemon's own lifecycle, and policy and its tests read
+    // better in one place.
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_socket_check_rejects_symlink_paths() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.sock");
+        let link = dir.path().join("link.sock");
+        symlink(&real, &link).unwrap();
+
+        let result = super::try_remove_stale_socket(&link).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "socket path is symbolic link");
+    }
+
+    #[tokio::test]
+    async fn stale_socket_check_rejects_non_socket_files() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let path = file.path().to_path_buf();
+        let mut out = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        out.write_all(b"not a socket").unwrap();
+
+        let result = super::try_remove_stale_socket(&path).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a socket"));
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn stale_socket_check_rejects_relative_paths() {
+        let path = PathBuf::from("relative.sock");
+        let result = super::try_remove_stale_socket(&path).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("absolute"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_socket_check_removes_stale_listener_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale.sock");
+
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        drop(listener);
+
+        let result = super::try_remove_stale_socket(&path).await;
+        assert!(result.is_ok());
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_socket_check_rejects_unsafe_socket_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("unsafe-parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = parent.join("obsctl.sock");
+        std::fs::write(&path, b"payload").unwrap();
+
+        let error = super::try_remove_stale_socket(&path).await.unwrap_err();
+        assert!(error.contains("socket parent is not private"));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn cleanup_rejects_non_socket_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-a-socket.txt");
+        std::fs::write(&path, b"payload").unwrap();
+
+        let error = super::cleanup(&path).unwrap_err();
+        let message = format!("{error}");
+        assert!(message.contains("not a socket"));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn cleanup_noop_when_path_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.sock");
+
+        super::cleanup(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_rejects_broken_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("link.sock");
+        let target = dir.path().join("missing.sock");
+        symlink(&target, &path).unwrap();
+
+        let error = super::cleanup(&path).unwrap_err();
+        let message = format!("{error}");
+        assert!(message.contains("invalid socket path for cleanup"));
+        assert!(std::fs::symlink_metadata(&path).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_rejects_unsafe_socket_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("unsafe-parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = parent.join("obsctl.sock");
+        std::fs::write(&path, b"payload").unwrap();
+
+        let error = super::cleanup(&path).unwrap_err();
+        let message = format!("{error}");
+        assert!(message.contains("not a private directory"));
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_removes_stale_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale.sock");
+
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        drop(listener);
+
+        super::cleanup(&path).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]

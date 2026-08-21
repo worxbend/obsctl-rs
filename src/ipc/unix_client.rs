@@ -4,7 +4,7 @@ use std::{
 };
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncWriteExt, BufReader},
     net::UnixStream,
 };
 
@@ -13,16 +13,23 @@ use crate::{
     ipc::socket_path::ensure_socket_file,
     ipc::socket_path::validate_socket_path,
     ipc::{
-        codec::{decode, encode},
+        codec::{FrameEncodeError, FrameError, FrameReader, decode, encode_framed},
         protocol::{
-            ClientMessage, CommandPayload, MAX_IPC_LINE_BYTES, MAX_UNMATCHED_IPC_RESPONSES,
-            ServerMessage, normalize_subscribe_topics, validate_command_name,
-            validate_ipc_request_id,
+            ClientMessage, CommandPayload, ServerMessage, normalize_subscribe_topics,
+            validate_command_name, validate_ipc_request_id,
         },
     },
 };
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// How many frames this client will skip while waiting for one specific
+/// reply before giving up.
+///
+/// This is one peer's own patience, not part of the protocol: the server
+/// never learns the number and nothing on the wire depends on it, so it lives
+/// here next to the code that spends the budget.
+const MAX_UNMATCHED_IPC_RESPONSES: usize = 32;
 
 /// A budget for frames that arrive while waiting for one specific reply.
 ///
@@ -62,7 +69,7 @@ pub fn next_request_id() -> String {
 }
 
 pub struct IpcClient {
-    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    frames: FrameReader<BufReader<tokio::net::unix::OwnedReadHalf>>,
     writer: tokio::net::unix::OwnedWriteHalf,
 }
 
@@ -89,68 +96,60 @@ impl IpcClient {
             .map_err(|e| ObsctlError::IpcConnectionFailed(e.to_string()))?;
         let (reader, writer) = stream.into_split();
         Ok(Self {
-            reader: BufReader::new(reader),
+            frames: FrameReader::new(BufReader::new(reader)),
             writer,
         })
     }
 
+    /// Read one frame, saying what went wrong in the caller's terms.
+    ///
+    /// The framing itself is `FrameReader`'s job; what this adds is the
+    /// vocabulary the rest of the client speaks. `frame_name` is what the
+    /// caller was waiting for ("response", "event"), and `closed_error`
+    /// describes the peer hanging up at that particular point, which is not a
+    /// framing fault but still leaves the caller with no answer.
     async fn read_frame(
         &mut self,
         closed_error: &'static str,
         frame_name: &'static str,
     ) -> Result<String> {
-        let mut line = Vec::<u8>::new();
-        loop {
-            let byte = match self.reader.read_u8().await {
-                Ok(byte) => byte,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                    continue;
-                }
-                Err(_) => {
-                    if line.is_empty() {
-                        return Err(ObsctlError::IpcProtocolError(closed_error.to_string()));
-                    }
-                    return Err(ObsctlError::IpcProtocolError(format!(
-                        "{frame_name} frame missing newline delimiter",
-                    )));
-                }
-            };
-
-            line.push(byte);
-            if line.len() > MAX_IPC_LINE_BYTES {
-                return Err(ObsctlError::IpcProtocolError(format!(
-                    "{frame_name} frame too large",
-                )));
-            }
-            if byte == b'\n' {
-                break;
-            }
-        }
-
-        let line = String::from_utf8(line).map_err(|_| {
-            ObsctlError::IpcProtocolError(format!("{frame_name} frame is not valid utf-8"))
-        })?;
-        if !line.ends_with('\n') {
-            return Err(ObsctlError::IpcProtocolError(format!(
+        match self.frames.next_frame().await {
+            Ok(Some(frame)) => Ok(frame),
+            Ok(None) => Err(ObsctlError::IpcProtocolError(closed_error.to_string())),
+            Err(FrameError::Oversized) => Err(ObsctlError::IpcProtocolError(format!(
+                "{frame_name} frame too large",
+            ))),
+            Err(FrameError::MissingDelimiter) => Err(ObsctlError::IpcProtocolError(format!(
                 "{frame_name} frame missing newline delimiter",
-            )));
+            ))),
+            Err(FrameError::NotUtf8(_)) => Err(ObsctlError::IpcProtocolError(format!(
+                "{frame_name} frame is not valid utf-8"
+            ))),
+            // A socket that fails part-way through a frame has left behind a
+            // frame that can never be completed; one that fails before any of
+            // it arrived is the peer hanging up between frames.
+            Err(FrameError::Io(_)) if self.frames.has_partial_frame() => {
+                Err(ObsctlError::IpcProtocolError(format!(
+                    "{frame_name} frame missing newline delimiter"
+                )))
+            }
+            Err(FrameError::Io(_)) => Err(ObsctlError::IpcProtocolError(closed_error.to_string())),
         }
-        Ok(line)
     }
 
     /// Encode one client message and write it to the socket.
     ///
-    /// The size check is the client's half of the framing contract: the server
-    /// refuses to read a line longer than `MAX_IPC_LINE_BYTES`, so sending one
-    /// would mean a dropped connection rather than an error the caller can
-    /// report. Both senders below go through here so neither can skip it.
+    /// `encode_framed` applies the size limit shared with the server, which
+    /// refuses to read an over-long line: sending one would mean a dropped
+    /// connection rather than an error the caller can report. Both senders
+    /// below go through here so neither can skip it.
     async fn send_frame(&mut self, msg: &ClientMessage) -> Result<()> {
-        let encoded = encode(msg)?;
-        if encoded.len() > MAX_IPC_LINE_BYTES {
-            return Err(ObsctlError::IpcProtocolError(
-                "request frame too large".to_string(),
-            ));
-        }
+        let encoded = encode_framed(msg).map_err(|error| match error {
+            FrameEncodeError::Encode(error) => error,
+            FrameEncodeError::Oversized { .. } => {
+                ObsctlError::IpcProtocolError("request frame too large".to_string())
+            }
+        })?;
         self.writer
             .write_all(encoded.as_bytes())
             .await
@@ -210,7 +209,12 @@ impl IpcClient {
         let id = next_request_id();
         let msg = ClientMessage::Subscribe {
             id: id.clone(),
-            topics,
+            // Back to strings: the topics were validated as `Topic` values,
+            // but the wire field is a list of names and stays one.
+            topics: topics
+                .into_iter()
+                .map(|topic| topic.as_str().to_string())
+                .collect(),
         };
         self.send_frame(&msg).await?;
 
