@@ -39,11 +39,8 @@ impl Default for Config {
 #[serde(default)]
 pub struct ServerConfig {
     pub socket_path: Option<String>,
-    pub pid_file: Option<String>,
     #[serde(default)]
     pub allow_remote_shutdown: bool,
-    #[serde(default = "default_true")]
-    pub start_embedded_if_missing: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

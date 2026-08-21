@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+
 use super::errors::ObsctlError;
+use super::names::{ResourceKind, normalized_name};
 use super::result::Result;
-use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
 pub struct AliasEntry {
     pub name: String,
@@ -8,16 +10,65 @@ pub struct AliasEntry {
     pub shortcut: Option<String>,
 }
 
+/// The comparison form of a value being matched against an entry, when the
+/// caller has no particular kind of resource in hand.
 fn normalized_token(value: &str) -> Result<String> {
-    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
+    normalized_name(value)
         .map_err(|error| ObsctlError::ConfigInvalid(format!("alias or shortcut {error}")))
-        .map(|value| value.to_ascii_lowercase())
 }
 
-pub fn normalize_alias_or_shortcut(value: &str, kind: &str) -> Result<String> {
-    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
-        .map_err(|error| ObsctlError::ConfigInvalid(format!("{kind} aliases/shortcuts {error}")))
-        .map(|value| value.to_ascii_lowercase())
+/// The comparison form of an alias or shortcut read out of the config file.
+///
+/// Same rule as [`normalized_token`]; only the message differs, because here
+/// the caller knows whether the offending value sits under `scenes:` or under
+/// `audio.inputs:` and saying so is what lets the user find it.
+pub fn normalize_alias_or_shortcut(value: &str, kind: ResourceKind) -> Result<String> {
+    normalized_name(value).map_err(|error| {
+        ObsctlError::ConfigInvalid(format!("{} aliases/shortcuts {error}", kind.label()))
+    })
+}
+
+/// Refuse a set of entries in which two of them answer to the same alias, or
+/// to the same shortcut.
+///
+/// Values are compared in their normalized form, so ` mAIN ` and `main` are
+/// the same alias. Shortcuts are compared that way too: `M` and `m` may mean
+/// different things when *resolving* a target, but two entries claiming them
+/// as shortcuts is still close enough to be a config mistake.
+///
+/// This lives next to [`resolve`] because it is the same rule seen from the
+/// other side. `resolve` refuses to guess between two entries a target could
+/// equally have meant and reports [`ObsctlError::AliasAmbiguous`]; checking
+/// uniqueness when a config is loaded or rewritten is what keeps a user from
+/// ever reaching that error. The check used to exist as two independent
+/// copies — one in config validation, one in the dump-config merge — so
+/// correcting either one left the other unchanged.
+pub fn ensure_unique_aliases_and_shortcuts<'a>(
+    kind: ResourceKind,
+    entries: impl Iterator<Item = (Option<&'a str>, Option<&'a str>)>,
+) -> Result<()> {
+    let label = kind.label();
+    let mut aliases: HashSet<String> = HashSet::new();
+    let mut shortcuts: HashSet<String> = HashSet::new();
+
+    for (alias, shortcut) in entries {
+        if let Some(alias) = alias
+            && !aliases.insert(normalize_alias_or_shortcut(alias, kind)?)
+        {
+            return Err(ObsctlError::ConfigInvalid(format!(
+                "duplicate {label} alias: '{alias}'"
+            )));
+        }
+        if let Some(shortcut) = shortcut
+            && !shortcuts.insert(normalize_alias_or_shortcut(shortcut, kind)?)
+        {
+            return Err(ObsctlError::ConfigInvalid(format!(
+                "duplicate {label} shortcut: '{shortcut}'"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Which spelling of an entry an exact match is tried against, in order: a
@@ -209,7 +260,7 @@ mod tests {
     #[test]
     fn reject_alias_with_control_character() {
         assert!(matches!(
-            normalize_alias_or_shortcut("bad\talias", "scene"),
+            normalize_alias_or_shortcut("bad\talias", ResourceKind::Scene),
             Err(ObsctlError::ConfigInvalid(_))
         ));
     }
@@ -218,7 +269,7 @@ mod tests {
     fn reject_alias_with_excessive_length() {
         let value = "a".repeat(crate::support::validation::MAX_TARGET_TOKEN_LENGTH + 1);
         assert!(matches!(
-            normalize_alias_or_shortcut(&value, "scene"),
+            normalize_alias_or_shortcut(&value, ResourceKind::Scene),
             Err(ObsctlError::ConfigInvalid(_))
         ));
     }
@@ -257,6 +308,49 @@ mod tests {
             Some(ObsctlError::AliasAmbiguous(target)) => assert_eq!(target, " cAm "),
             other => panic!("expected AliasAmbiguous, got {other:?}"),
         }
+    }
+
+    /// The uniqueness rule is shared by config validation and the dump-config
+    /// merge, so it is pinned here at its own level rather than only through
+    /// those two callers.
+    #[test]
+    fn uniqueness_folds_case_and_whitespace() {
+        let entries = [(Some("Main"), None), (Some(" mAIN "), None)];
+        let error = ensure_unique_aliases_and_shortcuts(
+            ResourceKind::Scene,
+            entries.iter().map(|(a, s)| (*a, *s)),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate scene alias"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn uniqueness_reports_the_kind_it_was_given() {
+        let entries = [(None, Some("m")), (None, Some("m"))];
+        let error = ensure_unique_aliases_and_shortcuts(
+            ResourceKind::AudioInput,
+            entries.iter().map(|(a, s)| (*a, *s)),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate audio shortcut"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn uniqueness_accepts_distinct_aliases_and_shortcuts() {
+        let entries = [(Some("main"), Some("m")), (Some("cam"), Some("c"))];
+        assert!(
+            ensure_unique_aliases_and_shortcuts(
+                ResourceKind::Scene,
+                entries.iter().map(|(a, s)| (*a, *s))
+            )
+            .is_ok()
+        );
     }
 
     #[test]

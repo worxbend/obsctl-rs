@@ -1,10 +1,10 @@
-use crate::domain::aliases::normalize_alias_or_shortcut;
+use crate::domain::aliases::ensure_unique_aliases_and_shortcuts;
 use crate::domain::errors::ObsctlError;
+use crate::domain::names::{ResourceKind, checked_name};
 use crate::domain::result::Result;
 use crate::ipc::socket_path::resolve_server_socket_path;
 use crate::support::validation::{
-    MAX_TARGET_TOKEN_LENGTH, password_config_error_message, resolve_connection_password,
-    trim_and_validate_token_with_max_len, validate_no_control_or_whitespace,
+    password_config_error_message, resolve_connection_password, validate_no_control_or_whitespace,
 };
 
 use super::model::{Config, ConnectionConfig};
@@ -196,41 +196,21 @@ pub(crate) fn validate_connection_host(host: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_unique_aliases_shortcuts<'a>(
-    kind: &str,
-    items: impl Iterator<Item = (Option<&'a str>, Option<&'a str>)>,
-) -> Result<()> {
-    let mut aliases = std::collections::HashSet::new();
-    let mut shortcuts = std::collections::HashSet::new();
-
-    for (alias, shortcut) in items {
-        if let Some(a) = alias {
-            let normalized = normalize_alias_or_shortcut(a, kind)?;
-            if !aliases.insert(normalized) {
-                return Err(config_invalid(format!("duplicate {kind} alias: {a}")));
-            }
-        }
-        if let Some(s) = shortcut {
-            let normalized = normalize_alias_or_shortcut(s, kind)?;
-            if !shortcuts.insert(normalized) {
-                return Err(config_invalid(format!("duplicate {kind} shortcut: {s}")));
-            }
-        }
-    }
-
-    Ok(())
-}
-
+/// No two scenes, and no two audio inputs, may answer to the same alias or
+/// shortcut.
+///
+/// The check itself lives in [`crate::domain::aliases`] next to the resolver
+/// that depends on it; this function only decides which entries to feed it.
 fn validate_no_duplicate_aliases(config: &Config) -> Result<()> {
-    check_unique_aliases_shortcuts(
-        "scene",
+    ensure_unique_aliases_and_shortcuts(
+        ResourceKind::Scene,
         config
             .scenes
             .iter()
             .map(|s| (s.alias.as_deref(), s.shortcut.as_deref())),
     )?;
-    check_unique_aliases_shortcuts(
-        "audio",
+    ensure_unique_aliases_and_shortcuts(
+        ResourceKind::AudioInput,
         config
             .audio
             .inputs
@@ -242,13 +222,11 @@ fn validate_no_duplicate_aliases(config: &Config) -> Result<()> {
 
 fn validate_resource_names(config: &Config) -> Result<()> {
     for scene in &config.scenes {
-        trim_and_validate_token_with_max_len(&scene.name, MAX_TARGET_TOKEN_LENGTH)
-            .map_err(|error| config_invalid(format!("scene name {error}")))?;
+        checked_name(&scene.name).map_err(|error| config_invalid(format!("scene name {error}")))?;
     }
 
     for audio in &config.audio.inputs {
-        trim_and_validate_token_with_max_len(&audio.name, MAX_TARGET_TOKEN_LENGTH)
-            .map_err(|error| config_invalid(format!("audio name {error}")))?;
+        checked_name(&audio.name).map_err(|error| config_invalid(format!("audio name {error}")))?;
     }
 
     Ok(())
@@ -258,7 +236,7 @@ fn validate_resource_names(config: &Config) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::model::{AudioInputConfig, SceneConfig};
-    use crate::support::validation::MAX_PASSWORD_LENGTH;
+    use crate::support::validation::{MAX_PASSWORD_LENGTH, MAX_TARGET_TOKEN_LENGTH};
     use tempfile::TempDir;
 
     fn with_env_var<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
@@ -458,7 +436,7 @@ mod tests {
     fn scene_name_rejects_excessive_length() {
         let mut c = valid_config();
         c.scenes = vec![SceneConfig {
-            name: "a".repeat(super::MAX_TARGET_TOKEN_LENGTH + 1),
+            name: "a".repeat(MAX_TARGET_TOKEN_LENGTH + 1),
             ..Default::default()
         }];
         assert!(validate(&c).is_err());
@@ -511,7 +489,7 @@ mod tests {
     fn audio_name_rejects_excessive_length() {
         let mut c = valid_config();
         c.audio.inputs = vec![AudioInputConfig {
-            name: "a".repeat(super::MAX_TARGET_TOKEN_LENGTH + 1),
+            name: "a".repeat(MAX_TARGET_TOKEN_LENGTH + 1),
             ..Default::default()
         }];
         assert!(validate(&c).is_err());

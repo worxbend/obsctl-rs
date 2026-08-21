@@ -4,11 +4,11 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::config::model::{AudioInputConfig, Config, SceneConfig};
-use crate::domain::aliases::normalize_alias_or_shortcut;
+use crate::domain::aliases::{ensure_unique_aliases_and_shortcuts, normalize_alias_or_shortcut};
 use crate::domain::errors::ObsctlError;
+use crate::domain::names::{ResourceKind, normalized_name};
 use crate::domain::result::Result;
 use crate::support::fs;
-use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
 /// Names discovered from OBS (scenes and audio inputs).
 pub struct ObsResources {
@@ -41,8 +41,9 @@ pub fn merge(config: &Config, obs: &ObsResources) -> Result<Config> {
 /// on both, so it is written once in [`merge_entries`] and these are the only
 /// knobs it turns.
 trait MergeableEntry: Clone {
-    /// Names this kind in error messages and alias normalization.
-    const KIND: &'static str;
+    /// Which kind this is, which decides how it is named in error messages
+    /// and which label alias normalization reports against.
+    const KIND: ResourceKind;
     /// What OBS calls this kind, for the collision message.
     const OBS_NOUN: &'static str;
 
@@ -57,7 +58,7 @@ trait MergeableEntry: Clone {
 }
 
 impl MergeableEntry for SceneConfig {
-    const KIND: &'static str = "scene";
+    const KIND: ResourceKind = ResourceKind::Scene;
     const OBS_NOUN: &'static str = "OBS scene name";
 
     fn name(&self) -> &str {
@@ -88,7 +89,7 @@ impl MergeableEntry for SceneConfig {
 }
 
 impl MergeableEntry for AudioInputConfig {
-    const KIND: &'static str = "audio";
+    const KIND: ResourceKind = ResourceKind::AudioInput;
     const OBS_NOUN: &'static str = "OBS input name";
 
     fn name(&self) -> &str {
@@ -149,7 +150,7 @@ fn merge_entries<T: MergeableEntry>(existing: &[T], obs_names: &[String]) -> Res
         }
     }
 
-    validate_no_duplicates(
+    ensure_unique_aliases_and_shortcuts(
         T::KIND,
         merged.iter().map(|entry| (entry.alias(), entry.shortcut())),
     )?;
@@ -174,7 +175,7 @@ fn reject_collision_with_obs_name<T: MergeableEntry>(
         if obs_set.contains(&normalized_value) && normalized_value != entry_name {
             return Err(ObsctlError::ConfigInvalid(format!(
                 "{} {label} '{value}' collides with {}",
-                T::KIND,
+                T::KIND.label(),
                 T::OBS_NOUN
             )));
         }
@@ -183,43 +184,11 @@ fn reject_collision_with_obs_name<T: MergeableEntry>(
     Ok(())
 }
 
-fn validate_no_duplicates<'a>(
-    label: &str,
-    items: impl Iterator<Item = (Option<&'a str>, Option<&'a str>)>,
-) -> Result<()> {
-    let mut aliases: HashSet<String> = HashSet::new();
-    let mut shortcuts: HashSet<String> = HashSet::new();
-    for (alias, shortcut) in items {
-        if let Some(alias) = alias {
-            let normalized_alias = normalize_alias_or_shortcut(alias, label)?;
-            if !aliases.insert(normalized_alias) {
-                return Err(ObsctlError::ConfigInvalid(format!(
-                    "duplicate {label} alias: '{alias}'"
-                )));
-            }
-        }
-        if let Some(shortcut) = shortcut {
-            let normalized_shortcut = normalize_alias_or_shortcut(shortcut, label)?;
-            if !shortcuts.insert(normalized_shortcut) {
-                return Err(ObsctlError::ConfigInvalid(format!(
-                    "duplicate {label} shortcut: '{shortcut}'"
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn normalized(kind: &str, value: &str) -> Result<String> {
-    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
-        .map_err(|error| {
-            let target = match kind {
-                "audio" => "audio input name",
-                _ => "scene name",
-            };
-            ObsctlError::ConfigInvalid(format!("{target} {error}"))
-        })
-        .map(|value| value.to_ascii_lowercase())
+/// The comparison form of a resource name, reported against the kind it
+/// belongs to when it is unusable.
+fn normalized(kind: ResourceKind, value: &str) -> Result<String> {
+    normalized_name(value)
+        .map_err(|error| ObsctlError::ConfigInvalid(format!("{} {error}", kind.name_label())))
 }
 
 /// Write a timestamped backup of the config file.

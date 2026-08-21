@@ -45,49 +45,15 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
 
+    use crate::support::validation::test_env;
+
     fn with_obsctl_config_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = std::env::var_os("OBSCTL_CONFIG");
-        if let Some(value) = value {
-            unsafe { std::env::set_var("OBSCTL_CONFIG", value) };
-        } else {
-            unsafe { std::env::remove_var("OBSCTL_CONFIG") };
-        }
-
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var("OBSCTL_CONFIG", previous) },
-            None => unsafe { std::env::remove_var("OBSCTL_CONFIG") },
-        }
-
-        result
+        test_env::with_env_var("OBSCTL_CONFIG", value, f)
     }
 
     #[cfg(unix)]
     fn with_obsctl_config_env_os<R>(value: Option<std::ffi::OsString>, f: impl FnOnce() -> R) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = std::env::var_os("OBSCTL_CONFIG");
-        if let Some(value) = value {
-            unsafe { std::env::set_var("OBSCTL_CONFIG", value) };
-        } else {
-            unsafe { std::env::remove_var("OBSCTL_CONFIG") };
-        }
-
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var("OBSCTL_CONFIG", previous) },
-            None => unsafe { std::env::remove_var("OBSCTL_CONFIG") },
-        }
-
-        result
+        test_env::with_env_var_os("OBSCTL_CONFIG", value, f)
     }
 
     #[test]

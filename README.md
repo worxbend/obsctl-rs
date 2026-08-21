@@ -155,9 +155,7 @@ Override: `OBSCTL_CONFIG=/path/to/config.yml` or `--config PATH`
 version: 1
 server:
   socket_path:           # optional; defaults to $XDG_RUNTIME_DIR/obsctl/obsctl.sock
-  pid_file:
   allow_remote_shutdown: false
-  start_embedded_if_missing: true
 connection:
   host: "127.0.0.1"
   port: 4455

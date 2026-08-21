@@ -1,7 +1,10 @@
-use super::{command::Command, errors::ObsctlError, result::Result};
-use crate::support::validation::{
-    MAX_TARGET_TOKEN_LENGTH, parse_u8_in_range, trim_and_validate_token_with_max_len,
+use super::{
+    command::Command,
+    errors::ObsctlError,
+    names::{checked_name, normalized_name},
+    result::Result,
 };
+use crate::support::validation::parse_u8_in_range;
 
 /// Command-line prefixes the TUI palette may open with. Both are stripped
 /// before parsing so `:scene Main`, `/scene Main`, and `scene Main` are the
@@ -12,41 +15,234 @@ pub const PALETTE_PREFIXES: [char; 2] = ['/', ':'];
 /// says otherwise. `:` mirrors vim's command prompt.
 pub const DEFAULT_PALETTE_PREFIX: char = ':';
 
+/// One word of the palette's vocabulary: what it is called, what else it
+/// answers to, how many arguments it takes, and what it builds.
+///
+/// The alternative — and what this replaced — was a `match` on the command
+/// name with the alternative spellings written into the arm patterns and the
+/// argument count repeated in every arm. Because the alias list only existed
+/// inside those patterns, nothing could read it: the completion menu and the
+/// `:help` text each kept their own copy of the vocabulary, and all three had
+/// drifted apart. Here the vocabulary is data, so the list the palette offers
+/// is derived from it rather than maintained beside it.
+///
+/// This mirrors the `CommandSpec` table `crate::ipc::protocol` uses for the
+/// IPC command names, deliberately: the two are the same kind of thing seen
+/// from two sides.
+struct PaletteCommandSpec {
+    /// The spelling shown in menus and used in error messages.
+    canonical: &'static str,
+    /// Other spellings accepted for the same command. Not offered by
+    /// completion — see [`CANONICAL_PALETTE_COMMANDS`].
+    aliases: &'static [&'static str],
+    /// How many arguments follow the command name. Checked once, in [`parse`],
+    /// before `build` runs, so `build` can index its arguments directly.
+    arity: usize,
+    /// Turns the already-counted arguments into a [`Command`].
+    build: fn(&[Token]) -> Result<Command>,
+}
+
+/// Every command the palette understands, in the order the completion menu
+/// offers them.
+const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
+    PaletteCommandSpec {
+        canonical: "help",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::Help),
+    },
+    PaletteCommandSpec {
+        canonical: "themes",
+        aliases: &["theme", "settings"],
+        arity: 0,
+        build: |_| Ok(Command::Themes),
+    },
+    PaletteCommandSpec {
+        canonical: "scene",
+        aliases: &["set-scene"],
+        arity: 1,
+        build: |args| {
+            Ok(Command::SetScene {
+                target: target_of(args)?,
+            })
+        },
+    },
+    PaletteCommandSpec {
+        canonical: "profile",
+        aliases: &["set-profile"],
+        arity: 1,
+        build: |args| {
+            Ok(Command::SetProfile {
+                target: target_of(args)?,
+            })
+        },
+    },
+    PaletteCommandSpec {
+        canonical: "collection",
+        aliases: &["set-collection", "scene-collection"],
+        arity: 1,
+        build: |args| {
+            Ok(Command::SetSceneCollection {
+                target: target_of(args)?,
+            })
+        },
+    },
+    PaletteCommandSpec {
+        canonical: "mute",
+        aliases: &[],
+        arity: 1,
+        build: |args| {
+            Ok(Command::Mute {
+                target: target_of(args)?,
+            })
+        },
+    },
+    PaletteCommandSpec {
+        canonical: "unmute",
+        aliases: &[],
+        arity: 1,
+        build: |args| {
+            Ok(Command::Unmute {
+                target: target_of(args)?,
+            })
+        },
+    },
+    PaletteCommandSpec {
+        canonical: "toggle-mute",
+        aliases: &[],
+        arity: 1,
+        build: |args| {
+            Ok(Command::ToggleMute {
+                target: target_of(args)?,
+            })
+        },
+    },
+    PaletteCommandSpec {
+        canonical: "vol",
+        aliases: &["volume"],
+        arity: 2,
+        build: build_set_volume,
+    },
+    PaletteCommandSpec {
+        canonical: "stream",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::ToggleStream),
+    },
+    PaletteCommandSpec {
+        canonical: "rec",
+        aliases: &["record"],
+        arity: 0,
+        build: |_| Ok(Command::ToggleRecord),
+    },
+    PaletteCommandSpec {
+        canonical: "status",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::Status),
+    },
+    PaletteCommandSpec {
+        canonical: "obs-status",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::ObsStatus),
+    },
+    PaletteCommandSpec {
+        canonical: "server-status",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::ServerStatus),
+    },
+    PaletteCommandSpec {
+        canonical: "reload-config",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::ReloadConfig),
+    },
+    PaletteCommandSpec {
+        canonical: "dump-config",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::DumpConfig),
+    },
+    PaletteCommandSpec {
+        canonical: "validate-config",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::ValidateConfig),
+    },
+    PaletteCommandSpec {
+        canonical: "reconnect",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::Reconnect),
+    },
+    PaletteCommandSpec {
+        canonical: "connect",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::Connect),
+    },
+    PaletteCommandSpec {
+        canonical: "shutdown-server",
+        aliases: &[],
+        arity: 0,
+        build: |_| Ok(Command::ShutdownServer),
+    },
+    PaletteCommandSpec {
+        canonical: "quit",
+        aliases: &["exit"],
+        arity: 0,
+        build: |_| Ok(Command::Quit),
+    },
+];
+
+const PALETTE_COMMAND_COUNT: usize = PALETTE_COMMANDS.len();
+
+/// Copies the canonical spelling out of every row of [`PALETTE_COMMANDS`].
+///
+/// Written as a `const fn` with an index loop because iterators are not
+/// available in a constant, and the list has to be a constant: it is published
+/// as [`CANONICAL_PALETTE_COMMANDS`] and read by the TUI at startup.
+const fn canonical_names() -> [&'static str; PALETTE_COMMAND_COUNT] {
+    let mut names = [""; PALETTE_COMMAND_COUNT];
+    let mut index = 0;
+    while index < PALETTE_COMMAND_COUNT {
+        names[index] = PALETTE_COMMANDS[index].canonical;
+        index += 1;
+    }
+    names
+}
+
+const CANONICAL_NAMES: [&str; PALETTE_COMMAND_COUNT] = canonical_names();
+
 /// Every command the palette offers, in the canonical spelling.
 ///
-/// One list, published here next to [`parse`], because three copies of this
-/// vocabulary had already drifted apart: the completion list, the `:help`
-/// text, and the match below. `connect` and `shutdown-server` are real
-/// commands that neither of the other two mentioned, so users had no way to
-/// discover them.
+/// Derived from [`PALETTE_COMMANDS`] rather than written out, because three
+/// copies of this vocabulary had already drifted apart: the completion list,
+/// the `:help` text, and the parser itself. `connect` and `shutdown-server`
+/// are real commands that neither of the other two mentioned, so users had no
+/// way to discover them.
 ///
 /// Aliases (`set-scene`, `theme`, `settings`, `volume`, `record`, `exit`) are
 /// deliberately absent. They stay accepted by [`parse`]; listing them as well
 /// would double the length of every completion menu without offering anything
 /// new.
-pub const CANONICAL_PALETTE_COMMANDS: &[&str] = &[
-    "help",
-    "themes",
-    "scene",
-    "profile",
-    "collection",
-    "mute",
-    "unmute",
-    "toggle-mute",
-    "vol",
-    "stream",
-    "rec",
-    "status",
-    "obs-status",
-    "server-status",
-    "reload-config",
-    "dump-config",
-    "validate-config",
-    "reconnect",
-    "connect",
-    "shutdown-server",
-    "quit",
-];
+pub const CANONICAL_PALETTE_COMMANDS: &[&str] = &CANONICAL_NAMES;
+
+/// One argument as the tokenizer produced it.
+///
+/// `quoted` is kept because one rule depends on it: a volume percentage has to
+/// be a bare number, so `vol mic "70"` is a mistake worth reporting rather
+/// than a target named `70`. The tokenizer used to return plain strings and
+/// that rule was then guessed at from the raw input line — by testing whether
+/// the line ended in a quote — which both missed `vol mic "7"0` (quoted, but
+/// not ending in a quote) and would have misfired on any future command whose
+/// last argument was legitimately quoted.
+struct Token {
+    text: String,
+    quoted: bool,
+}
 
 pub fn parse(input: &str) -> Result<Command> {
     let input = input.trim().trim_start_matches(PALETTE_PREFIXES);
@@ -55,108 +251,79 @@ pub fn parse(input: &str) -> Result<Command> {
     }
 
     let tokens = tokenize(input)?;
-    let (cmd_name, args) = tokens
+    let (head, args) = tokens
         .split_first()
         .ok_or_else(|| ObsctlError::CommandParseError("empty command".to_string()))?;
-    let cmd_key = normalize_command_name(cmd_name)?;
-    match cmd_key.as_str() {
-        "help" => expect_args(args, 0, "help", Command::Help),
-        "quit" | "exit" => expect_args(args, 0, "quit", Command::Quit),
-        "themes" | "theme" | "settings" => expect_args(args, 0, "themes", Command::Themes),
-        "dump-config" => expect_args(args, 0, "dump-config", Command::DumpConfig),
-        "reload-config" => expect_args(args, 0, "reload-config", Command::ReloadConfig),
-        "status" => expect_args(args, 0, "status", Command::Status),
-        "server-status" => expect_args(args, 0, "server-status", Command::ServerStatus),
-        "obs-status" => expect_args(args, 0, "obs-status", Command::ObsStatus),
-        "validate-config" => expect_args(args, 0, "validate-config", Command::ValidateConfig),
-        "reconnect" => expect_args(args, 0, "reconnect", Command::Reconnect),
-        "connect" => expect_args(args, 0, "connect", Command::Connect),
-        "shutdown-server" => expect_args(args, 0, "shutdown-server", Command::ShutdownServer),
-        "stream" => expect_args(args, 0, "stream", Command::ToggleStream),
-        "rec" | "record" => expect_args(args, 0, "rec", Command::ToggleRecord),
-        "scene" | "set-scene" => {
-            expect_target(args, "scene", |target| Command::SetScene { target })
-        }
-        "profile" | "set-profile" => {
-            expect_target(args, "profile", |target| Command::SetProfile { target })
-        }
-        "collection" | "set-collection" | "scene-collection" => {
-            expect_target(args, "collection", |target| Command::SetSceneCollection {
-                target,
-            })
-        }
-        "mute" => expect_target(args, "mute", |target| Command::Mute { target }),
-        "unmute" => expect_target(args, "unmute", |target| Command::Unmute { target }),
-        "toggle-mute" => {
-            expect_target(args, "toggle-mute", |target| Command::ToggleMute { target })
-        }
-        "vol" | "volume" => {
-            if args.len() != 2 {
-                return Err(ObsctlError::CommandParseError(format!(
-                    "vol expects 2 arguments, got {}",
-                    args.len()
-                )));
-            }
-            if input.trim_end().ends_with('"') {
-                return Err(ObsctlError::CommandParseError(
-                    "volume percentage must not be quoted".to_string(),
-                ));
-            }
-            let percent = required_u8_percentage(&args[1])?;
-            Ok(Command::SetVolume {
-                target: sanitize_target(args.first())?,
-                percent,
-            })
-        }
-        _ => Err(ObsctlError::CommandParseError(format!(
-            "unknown command: {cmd_name}"
-        ))),
-    }
-}
 
-fn expect_args(args: &[String], expected: usize, name: &str, cmd: Command) -> Result<Command> {
-    if args.len() != expected {
+    let name = normalize_command_name(&head.text)?;
+    let spec = PALETTE_COMMANDS
+        .iter()
+        .find(|spec| spec.canonical == name || spec.aliases.contains(&name.as_str()))
+        .ok_or_else(|| ObsctlError::CommandParseError(format!("unknown command: {}", head.text)))?;
+
+    if args.len() != spec.arity {
+        // "1 argument", but "0 arguments" and "2 arguments".
+        let noun = if spec.arity == 1 {
+            "argument"
+        } else {
+            "arguments"
+        };
         return Err(ObsctlError::CommandParseError(format!(
-            "{name} expects {expected} arguments, got {}",
+            "{} expects {} {noun}, got {}",
+            spec.canonical,
+            spec.arity,
             args.len()
         )));
     }
-    Ok(cmd)
+
+    (spec.build)(args)
 }
 
-/// The six commands that take exactly one target name. They differ only in
-/// what they are called and which `Command` they build, so the arity check and
-/// the target validation happen here rather than six times over.
-fn expect_target(args: &[String], name: &str, build: fn(String) -> Command) -> Result<Command> {
-    if args.len() != 1 {
-        return Err(ObsctlError::CommandParseError(format!(
-            "{name} expects 1 argument, got {}",
-            args.len()
-        )));
+/// The single target argument of a one-argument command. Safe to index
+/// because [`parse`] has already checked the count.
+fn target_of(args: &[Token]) -> Result<String> {
+    sanitize_target(&args[0].text)
+}
+
+/// `vol <target> <percent>` is the only command with two arguments and the
+/// only one that rejects a quoted argument, so it gets a named builder rather
+/// than an inline one.
+fn build_set_volume(args: &[Token]) -> Result<Command> {
+    if args[1].quoted {
+        return Err(ObsctlError::CommandParseError(
+            "volume percentage must not be quoted".to_string(),
+        ));
     }
-    Ok(build(sanitize_target(args.first())?))
+    let percent = required_u8_percentage(&args[1].text)?;
+    Ok(Command::SetVolume {
+        target: sanitize_target(&args[0].text)?,
+        percent,
+    })
 }
 
-fn sanitize_target(value: Option<&String>) -> Result<String> {
-    let target = value
-        .ok_or_else(|| ObsctlError::CommandParseError("target must not be blank".to_string()))?;
-    trim_and_validate_token_with_max_len(target, MAX_TARGET_TOKEN_LENGTH)
-        .map_err(|error| ObsctlError::CommandParseError(format!("target {error}")))
+fn sanitize_target(value: &str) -> Result<String> {
+    checked_name(value).map_err(|error| ObsctlError::CommandParseError(format!("target {error}")))
 }
 
 fn normalize_command_name(value: &str) -> Result<String> {
-    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
+    normalized_name(value)
         .map_err(|error| ObsctlError::CommandParseError(format!("command {error}")))
-        .map(|value| value.to_ascii_lowercase())
 }
 
 fn required_u8_percentage(value: &str) -> Result<u8> {
     parse_u8_in_range(value, "volume", 0, 100).map_err(ObsctlError::CommandParseError)
 }
 
-fn tokenize(input: &str) -> Result<Vec<String>> {
+/// Split a command line into arguments, honouring double quotes and
+/// backslash escapes inside them.
+///
+/// Each token records whether any quote character took part in producing it,
+/// which is the one thing about the original spelling a later rule needs; see
+/// [`Token`].
+fn tokenize(input: &str) -> Result<Vec<Token>> {
     let mut tokens = Vec::new();
     let mut current = String::new();
+    let mut current_quoted = false;
     let mut chars = input.chars().peekable();
     let mut in_quotes = false;
 
@@ -164,9 +331,11 @@ fn tokenize(input: &str) -> Result<Vec<String>> {
         match c {
             '"' if in_quotes => {
                 in_quotes = false;
+                current_quoted = true;
             }
             '"' => {
                 in_quotes = true;
+                current_quoted = true;
             }
             '\\' if in_quotes => {
                 if let Some(next) = chars.next() {
@@ -175,7 +344,10 @@ fn tokenize(input: &str) -> Result<Vec<String>> {
             }
             ' ' | '\t' if !in_quotes => {
                 if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
+                    tokens.push(Token {
+                        text: std::mem::take(&mut current),
+                        quoted: std::mem::take(&mut current_quoted),
+                    });
                 }
             }
             _ => current.push(c),
@@ -189,7 +361,10 @@ fn tokenize(input: &str) -> Result<Vec<String>> {
     }
 
     if !current.is_empty() {
-        tokens.push(current);
+        tokens.push(Token {
+            text: current,
+            quoted: current_quoted,
+        });
     }
 
     Ok(tokens)
@@ -198,24 +373,56 @@ fn tokenize(input: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
 
+    /// A command line that satisfies `spec`: the name followed by as many
+    /// plausible arguments as its arity calls for. Derived from the table
+    /// rather than written per command, so a new row needs no new case here.
+    fn example_input(name: &str, arity: usize) -> String {
+        match arity {
+            0 => name.to_string(),
+            1 => format!("{name} Main"),
+            // Only `vol` takes two, and its second argument is a percentage.
+            _ => format!("{name} Mic 50"),
+        }
+    }
+
     /// Every name the palette offers must be one `parse` accepts. The two used
-    /// to be separate lists that had already diverged.
+    /// to be separate lists that had already diverged; the list is now derived
+    /// from the parser's own table, and this pins that the derivation holds.
     #[test]
     fn every_canonical_command_parses() {
-        for name in CANONICAL_PALETTE_COMMANDS {
-            // The six commands that need a target get a plausible one; the
-            // rest take no arguments.
-            let input = match *name {
-                "scene" | "profile" | "collection" | "mute" | "unmute" | "toggle-mute" => {
-                    format!("{name} Main")
-                }
-                "vol" => format!("{name} Mic 50"),
-                _ => (*name).to_string(),
-            };
+        for spec in PALETTE_COMMANDS {
+            let input = example_input(spec.canonical, spec.arity);
             assert!(
                 parse(&input).is_ok(),
                 "`{input}` is offered by the palette but rejected by the parser"
             );
+        }
+    }
+
+    /// The published list is exactly the table's canonical names, in the
+    /// table's order. The TUI reads it for completion, so a reordered or
+    /// renamed row is a user-visible change.
+    #[test]
+    fn canonical_commands_match_the_table() {
+        let from_table: Vec<&str> = PALETTE_COMMANDS.iter().map(|spec| spec.canonical).collect();
+        assert_eq!(CANONICAL_PALETTE_COMMANDS, from_table.as_slice());
+    }
+
+    /// An alias is another spelling of the same command, never a different
+    /// one. When aliases lived inside `match` patterns nothing could check
+    /// that; now they are data and this walks all of them.
+    #[test]
+    fn every_alias_parses_to_its_canonical_command() {
+        for spec in PALETTE_COMMANDS {
+            let canonical = parse(&example_input(spec.canonical, spec.arity)).unwrap();
+            for alias in spec.aliases {
+                let aliased = parse(&example_input(alias, spec.arity)).unwrap();
+                assert_eq!(
+                    aliased, canonical,
+                    "`{alias}` should mean the same as `{}`",
+                    spec.canonical
+                );
+            }
         }
     }
 
@@ -229,6 +436,7 @@ mod tests {
     }
     use super::*;
     use crate::domain::command::Command;
+    use crate::support::validation::MAX_TARGET_TOKEN_LENGTH;
 
     #[test]
     fn parse_accepts_either_palette_prefix() {
@@ -400,6 +608,29 @@ mod tests {
         assert!(parse("vol mic 101").is_err());
         assert!(parse("vol mic 50.5").is_err());
         assert!(parse(r#"vol mic "70""#).is_err());
+    }
+
+    /// Both of these spell a quoted percentage; they differ only in where the
+    /// closing quote sits. The rule used to be guessed at from the raw input
+    /// line ending in a quote, so the second one was accepted as `70`.
+    #[test]
+    fn parse_volume_rejects_a_quoted_percentage_wherever_the_quotes_are() {
+        assert!(parse(r#"vol mic "70""#).is_err());
+        assert!(parse(r#"vol mic "7"0"#).is_err());
+        assert!(parse(r#"vol mic 7"0""#).is_err());
+    }
+
+    /// Only the percentage has to be unquoted. A target with spaces in it can
+    /// only be written with quotes, so quoting one must stay allowed.
+    #[test]
+    fn parse_volume_accepts_a_quoted_target() {
+        assert_eq!(
+            parse(r#"vol "Main Mic" 40"#).unwrap(),
+            Command::SetVolume {
+                target: "Main Mic".to_string(),
+                percent: 40
+            }
+        );
     }
 
     #[test]

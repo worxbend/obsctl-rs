@@ -133,6 +133,32 @@ mod tests {
         );
     }
 
+    /// `server.pid_file` and `server.start_embedded_if_missing` used to be
+    /// declared in the config model even though nothing ever read them, and
+    /// they were documented in the README, so config files in the wild carry
+    /// them. They have been removed from the model; this pins that removing
+    /// them does not break those files. It works because only the top-level
+    /// `Config` struct is marked `#[serde(deny_unknown_fields)]` — the nested
+    /// `ServerConfig` is not, so serde's default behaviour of ignoring keys it
+    /// does not recognise applies inside the `server:` section.
+    #[test]
+    fn load_ignores_removed_server_keys() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.yml");
+        std::fs::write(
+            &path,
+            "version: 1\n\
+             server:\n\
+             \x20 pid_file: /run/obsctl.pid\n\
+             \x20 start_embedded_if_missing: true\n\
+             \x20 allow_remote_shutdown: true\n",
+        )
+        .unwrap();
+
+        let config = load(&path).unwrap();
+        assert!(config.server.allow_remote_shutdown);
+    }
+
     #[test]
     fn load_or_default_with_runtime_rejects_invalid_socket_path() {
         let dir = TempDir::new().unwrap();
