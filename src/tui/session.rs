@@ -4,7 +4,7 @@ use crate::{
     domain::result::Result,
     ipc::{
         protocol::{CommandPayload, ServerMessage, TOPIC_EVENTS, TOPIC_LOGS, TOPIC_STATE},
-        unix_client::IpcClient,
+        unix_client::{IpcClient, send_command_within_timeout},
     },
 };
 
@@ -30,5 +30,5 @@ impl TuiEventSession {
 /// Short-lived connection for sending a single command and reading a response.
 pub async fn send_command(path: &Path, payload: CommandPayload) -> Result<ServerMessage> {
     let mut client = IpcClient::connect(path).await?;
-    client.send_command(payload).await
+    send_command_within_timeout(&mut client, payload).await
 }

@@ -68,6 +68,34 @@ pub fn next_request_id() -> String {
     format!("req-{n:06}")
 }
 
+/// How long a client waits for the daemon's answer before giving up.
+///
+/// The daemon can legitimately take a while: `dump-config` performs two OBS
+/// round trips (2500 ms each by default) plus a config-file write and reload,
+/// so a short budget here would abort healthy commands. Thirty seconds is far
+/// above anything the daemon does on purpose and still bounded, which is the
+/// whole point — `obsctl` is built to be scripted from cron jobs, hotkeys and
+/// stream-deck buttons, and a command that never returns gives its caller no
+/// exit code to react to and no way out but an external kill.
+pub const IPC_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run one request/response round trip under [`IPC_RESPONSE_TIMEOUT`].
+///
+/// The timeout lives here, around the whole exchange, rather than around the
+/// individual reads inside it: what a caller cares about is "did this command
+/// finish", not which particular read was outstanding when the daemon wedged.
+pub async fn send_command_within_timeout(
+    client: &mut IpcClient,
+    payload: CommandPayload,
+) -> Result<ServerMessage> {
+    match tokio::time::timeout(IPC_RESPONSE_TIMEOUT, client.send_command(payload)).await {
+        Ok(result) => result,
+        Err(_) => Err(ObsctlError::IpcTimeout {
+            seconds: IPC_RESPONSE_TIMEOUT.as_secs(),
+        }),
+    }
+}
+
 pub struct IpcClient {
     frames: FrameReader<BufReader<tokio::net::unix::OwnedReadHalf>>,
     writer: tokio::net::unix::OwnedWriteHalf,
@@ -449,5 +477,70 @@ mod tests {
         );
 
         server_handle.await.unwrap();
+    }
+
+    /// The regression test for a daemon that accepts the connection and then
+    /// says nothing. Before the timeout existed, this call never returned:
+    /// the response read looped until the process was killed from outside,
+    /// which for a scripted `obsctl mute Mic` meant no exit code and no output.
+    ///
+    /// `start_paused` makes tokio advance its clock as soon as every task is
+    /// idle, so the thirty-second budget elapses instantly and the test asserts
+    /// on the outcome rather than on real elapsed time. There is no sleep and
+    /// nothing to race.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn send_command_gives_up_when_the_daemon_never_replies() {
+        use crate::domain::errors::ObsctlError;
+        use crate::ipc::protocol::CommandPayload;
+        use tokio::net::UnixListener;
+
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("silent.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        // Accept the connection and hold it open without ever answering, which
+        // is what a wedged daemon looks like from the client's side.
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(stream);
+        });
+
+        let mut client = IpcClient::connect(&socket_path).await.unwrap();
+        let err = super::send_command_within_timeout(
+            &mut client,
+            CommandPayload {
+                name: "ping".to_string(),
+                args: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            ObsctlError::IpcTimeout { seconds } => {
+                assert_eq!(seconds, super::IPC_RESPONSE_TIMEOUT.as_secs());
+            }
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+
+        server_handle.abort();
+    }
+
+    /// A timeout has to reach a script as a distinct, non-zero exit code, or
+    /// the caller cannot tell "the daemon is wedged" from "the command failed".
+    #[test]
+    fn the_timeout_error_maps_to_the_ipc_exit_code() {
+        use crate::domain::errors::ObsctlError;
+        use crate::ipc::protocol::{PublicErrorCode, public_error_code};
+
+        let error = ObsctlError::IpcTimeout { seconds: 30 };
+        assert_eq!(error.exit_code(), 6);
+
+        let code = public_error_code(&error);
+        assert_eq!(code, PublicErrorCode::IpcTimeout);
+        assert_eq!(code.as_str(), "IPC_TIMEOUT");
+        assert_eq!(code.exit_code(), 6);
     }
 }

@@ -12,7 +12,7 @@ use crate::{
             CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage,
             exit_code_for_public_error_code, public_error_code, validate_command_name,
         },
-        unix_client::IpcClient,
+        unix_client::{IpcClient, send_command_within_timeout},
     },
     service::systemd_user_service::SYSTEMCTL_ENABLE_HINT,
     support::redaction::redact_message,
@@ -49,7 +49,7 @@ impl ProxyCtx {
                 message: server_unavailable_hint(),
             }
         })?;
-        client.send_command(payload).await
+        send_command_within_timeout(&mut client, payload).await
     }
 
     /// Send `payload`, then hand a successful result to `render`.

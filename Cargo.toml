@@ -37,6 +37,9 @@ ratatui-braille-bar = "0.3.0"
 unicode-width = "0.2"
 
 [dev-dependencies]
+# `test-util` gives tests a pausable clock, so a test for a timeout can let the
+# budget elapse instantly instead of really waiting for it.
+tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"

@@ -555,6 +555,11 @@ pub const ERROR_CODES: &[ErrorCodeSpec] = &[
         exit_code: 5,
     },
     ErrorCodeSpec {
+        code: PublicErrorCode::IpcTimeout,
+        wire: "IPC_TIMEOUT",
+        exit_code: 6,
+    },
+    ErrorCodeSpec {
         code: PublicErrorCode::IpcProtocolError,
         wire: "IPC_PROTOCOL_ERROR",
         exit_code: 6,
@@ -591,6 +596,7 @@ pub enum PublicErrorCode {
     SceneCollectionNotFound,
     AliasAmbiguous,
     CommandParseError,
+    IpcTimeout,
     IpcProtocolError,
     ShutdownDisabled,
     ServerError,
@@ -653,6 +659,7 @@ impl PublicErrorCode {
                 Self::ServerUnavailable
             }
             ObsctlError::IpcProtocolError(_) => Self::IpcProtocolError,
+            ObsctlError::IpcTimeout { .. } => Self::IpcTimeout,
             ObsctlError::ConnectionFailed(_)
             | ObsctlError::AuthenticationFailed
             | ObsctlError::ObsUnavailable => Self::ObsUnavailable,
@@ -836,6 +843,7 @@ mod tests {
             ObsctlError::ServerUnavailable { .. } => {}
             ObsctlError::IpcConnectionFailed(_) => {}
             ObsctlError::IpcProtocolError(_) => {}
+            ObsctlError::IpcTimeout { .. } => {}
             ObsctlError::ConnectionFailed(_) => {}
             ObsctlError::AuthenticationFailed => {}
             ObsctlError::ObsUnavailable => {}
@@ -947,7 +955,7 @@ mod tests {
 
     #[test]
     fn error_response_wire_json_covers_all_public_error_codes() {
-        assert_eq!(PublicErrorCode::ALL.len(), 14);
+        assert_eq!(PublicErrorCode::ALL.len(), 15);
 
         for code in PublicErrorCode::ALL {
             let message = ServerMessage::Response {
@@ -1383,6 +1391,7 @@ mod tests {
             PublicErrorCode::SceneCollectionNotFound => {}
             PublicErrorCode::AliasAmbiguous => {}
             PublicErrorCode::CommandParseError => {}
+            PublicErrorCode::IpcTimeout => {}
             PublicErrorCode::IpcProtocolError => {}
             PublicErrorCode::ShutdownDisabled => {}
             PublicErrorCode::ServerError => {}
@@ -1391,7 +1400,7 @@ mod tests {
 
     #[test]
     fn every_public_error_code_has_a_spec_and_documented_cli_exit_code() {
-        const PUBLIC_ERROR_CODE_VARIANT_COUNT: usize = 14;
+        const PUBLIC_ERROR_CODE_VARIANT_COUNT: usize = 15;
         assert_eq!(ERROR_CODES.len(), PUBLIC_ERROR_CODE_VARIANT_COUNT);
         assert_eq!(PublicErrorCode::ALL.len(), ERROR_CODES.len());
 
@@ -1430,6 +1439,7 @@ mod tests {
         assert_eq!(PublicErrorCode::SceneCollectionNotFound.exit_code(), 4);
         assert_eq!(PublicErrorCode::AliasAmbiguous.exit_code(), 1);
         assert_eq!(PublicErrorCode::CommandParseError.exit_code(), 5);
+        assert_eq!(PublicErrorCode::IpcTimeout.exit_code(), 6);
         assert_eq!(PublicErrorCode::IpcProtocolError.exit_code(), 6);
         assert_eq!(PublicErrorCode::ShutdownDisabled.exit_code(), 1);
         assert_eq!(PublicErrorCode::ServerError.exit_code(), 1);
@@ -1439,7 +1449,7 @@ mod tests {
 
     #[test]
     fn obsctl_errors_map_to_public_ipc_error_codes() {
-        const OBSCTL_ERROR_VARIANT_COUNT: usize = 20;
+        const OBSCTL_ERROR_VARIANT_COUNT: usize = 21;
 
         let cases = [
             (
@@ -1460,6 +1470,10 @@ mod tests {
             (
                 ObsctlError::IpcConnectionFailed("connection refused".to_string()),
                 PublicErrorCode::ServerUnavailable,
+            ),
+            (
+                ObsctlError::IpcTimeout { seconds: 30 },
+                PublicErrorCode::IpcTimeout,
             ),
             (
                 ObsctlError::IpcProtocolError("bad frame".to_string()),

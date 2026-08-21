@@ -20,6 +20,15 @@ pub enum ObsctlError {
     #[error("IPC protocol error: {0}")]
     IpcProtocolError(String),
 
+    /// The daemon accepted the connection but did not answer in time.
+    ///
+    /// Distinct from `IpcConnectionFailed` (no daemon listening) and from
+    /// `RequestTimeout` (OBS did not answer the daemon): here the daemon is
+    /// running and reachable but wedged, so the only thing the client can do
+    /// is give up and say so rather than wait forever.
+    #[error("daemon did not respond within {seconds}s")]
+    IpcTimeout { seconds: u64 },
+
     #[error("connection failed: {0}")]
     ConnectionFailed(String),
 
@@ -88,7 +97,7 @@ impl ObsctlError {
             | Self::ProfileNotFound(_)
             | Self::SceneCollectionNotFound(_) => 4,
             Self::CommandParseError(_) => 5,
-            Self::IpcProtocolError(_) => 6,
+            Self::IpcProtocolError(_) | Self::IpcTimeout { .. } => 6,
             Self::AliasAmbiguous(_)
             | Self::ShutdownDisabled
             | Self::DumpConfigFailed(_)
@@ -112,6 +121,7 @@ mod tests {
             ObsctlError::ServerUnavailable { .. } => {}
             ObsctlError::IpcConnectionFailed(_) => {}
             ObsctlError::IpcProtocolError(_) => {}
+            ObsctlError::IpcTimeout { .. } => {}
             ObsctlError::ConnectionFailed(_) => {}
             ObsctlError::AuthenticationFailed => {}
             ObsctlError::ObsUnavailable => {}
@@ -132,7 +142,7 @@ mod tests {
 
     #[test]
     fn all_obsctl_error_variants_have_intended_local_exit_codes() {
-        const OBSCTL_ERROR_VARIANT_COUNT: usize = 20;
+        const OBSCTL_ERROR_VARIANT_COUNT: usize = 21;
 
         let cases = [
             (
@@ -162,6 +172,11 @@ mod tests {
                 ObsctlError::IpcProtocolError("bad frame".to_string()),
                 6,
                 "IPC protocol error",
+            ),
+            (
+                ObsctlError::IpcTimeout { seconds: 30 },
+                6,
+                "daemon did not respond",
             ),
             (
                 ObsctlError::ConnectionFailed("closed".to_string()),

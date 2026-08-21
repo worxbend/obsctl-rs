@@ -568,9 +568,12 @@ Public error codes are stable and map to CLI exit codes as follows:
 | `SCENE_COLLECTION_NOT_FOUND` | Scene collection target is not one OBS knows | 4 |
 | `ALIAS_AMBIGUOUS` | Target matched more than one configured alias/name | 1 |
 | `COMMAND_PARSE_ERROR` | Command name or arguments are invalid | 5 |
+| `IPC_TIMEOUT` | The daemon accepted the connection but did not answer within 30s | 6 |
 | `IPC_PROTOCOL_ERROR` | IPC frame or response shape is invalid for the protocol | 6 |
 | `SHUTDOWN_DISABLED` | Remote daemon shutdown is disabled in config | 1 |
 | `SERVER_ERROR` | Generic daemon-side failure | 1 |
+
+`IPC_TIMEOUT` and `REQUEST_TIMEOUT` are also distinct, and the difference is which hop stalled. `REQUEST_TIMEOUT` is reported *by* the daemon when OBS did not answer *it*. `IPC_TIMEOUT` is produced by the client itself when the daemon accepted the connection and then did not answer at all — nothing arrives over IPC to report, so the client gives up after 30 seconds and exits 6 rather than blocking forever. The budget is deliberately far above anything the daemon does on purpose (`dump-config`, the slowest command, makes two OBS round trips plus a config write), because it exists to bound a wedged daemon, not to police a slow one.
 
 `REQUEST_TIMEOUT` and `OBS_UNAVAILABLE` are intentionally distinct. `OBS_UNAVAILABLE` means the daemon cannot currently make OBS requests because OBS is disconnected, authentication failed, or the OBS connection is otherwise unavailable. `REQUEST_TIMEOUT` means a request was attempted against OBS, but no matching response arrived before `connection.request_timeout_ms`.
 
