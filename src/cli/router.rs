@@ -61,9 +61,17 @@ struct Startup {
     /// Kept as a `Result` rather than being resolved here because the commands
     /// genuinely disagree about whether an unusable config is fatal: `init`
     /// exists to *write* a config file and has to run without one, while the
-    /// TUI and the proxy commands need the socket path it names. The `String`
-    /// is the message the failing command prints.
-    runtime: Result<StartupRuntime, String>,
+    /// TUI and the proxy commands need the socket path it names.
+    ///
+    /// The failure is kept as an [`ObsctlError`] rather than being flattened
+    /// to a message here, so the classification survives as far as the command
+    /// that reports it. Note that the commands do not agree on what to do with
+    /// it: `run_tui` and `run_proxy` print it and exit 1, while
+    /// `validate-config` (which re-reads the file itself) exits with
+    /// `ObsctlError::exit_code()`, usually 2. That divergence predates this and
+    /// is deliberately left alone — exit codes are a frozen contract (see the
+    /// README's "Exit Codes" table).
+    runtime: Result<StartupRuntime, ObsctlError>,
 }
 
 /// The parts of a loaded config the commands actually use.
@@ -77,20 +85,18 @@ struct StartupRuntime {
 impl Startup {
     fn resolve(config_path: Option<PathBuf>) -> Self {
         let runtime = match config_path.as_deref() {
-            Some(path) => loader::load_or_default_with_runtime(path)
-                .map(
-                    |(config, socket_path, refresh_interval_ms)| StartupRuntime {
-                        config,
-                        socket_path,
-                        refresh_interval_ms,
-                    },
-                )
-                .map_err(|error| format!("failed to load config: {error}")),
+            Some(path) => loader::load_or_default_with_runtime(path).map(
+                |(config, socket_path, refresh_interval_ms)| StartupRuntime {
+                    config,
+                    socket_path,
+                    refresh_interval_ms,
+                },
+            ),
             // No config file could be resolved at all, so the built-in
             // defaults plus the default socket location are the whole
             // configuration.
             None => resolve_server_socket_path(None)
-                .map_err(|error| error.to_string())
+                .map_err(|error| ObsctlError::ConfigInvalid(format!("server.socket_path {error}")))
                 .map(|socket_path| {
                     let config = model::Config::default();
                     let refresh_interval_ms = config.ui.refresh_interval_ms;
@@ -117,8 +123,8 @@ impl Startup {
         self.runtime.as_ref().ok()?.config.ui.locale.as_deref()
     }
 
-    /// The loaded config, or the message explaining why there is none.
-    fn runtime(&self) -> Result<&StartupRuntime, &String> {
+    /// The loaded config, or the error explaining why there is none.
+    fn runtime(&self) -> Result<&StartupRuntime, &ObsctlError> {
         self.runtime.as_ref()
     }
 }
@@ -357,7 +363,7 @@ fn prompt_line(
 fn run_tui(startup: &Startup) -> i32 {
     let runtime = match startup.runtime() {
         Ok(runtime) => runtime,
-        Err(error) => return fail(error),
+        Err(error) => return fail(format!("failed to load config: {error}")),
     };
 
     let mut options = tui_appearance(&runtime.config);
@@ -453,26 +459,26 @@ fn tokio_runtime(context: &str) -> Result<tokio::runtime::Runtime, ObsctlError> 
 
 // ── Service commands ──────────────────────────────────────────────────────────
 
+/// The three systemctl verbs that act on an installed unit and behave alike.
+///
+/// A separate enum from [`ServiceAction`] on purpose. `service_action` used to
+/// take the full `ServiceAction`, which meant carrying an arm for `Install`,
+/// `Uninstall` and `Status` that could never be reached but still had to
+/// invent an error for the day it was. Naming only the three verbs it handles
+/// makes the caller do the choosing, where the compiler can check it.
+enum UnitVerb {
+    Start,
+    Stop,
+    Restart,
+}
+
 /// Run one of the three systemctl verbs that behave alike: do it, then print
 /// either the matching success line or the error.
-///
-/// Takes the `ServiceAction` the caller already has rather than a `"start"` /
-/// `"stop"` / `"restart"` string. The string version needed a catch-all arm
-/// that panicked on any other word; with the enum, the compiler rejects an
-/// unhandled variant instead and there is no panic to reach.
-fn service_action(installer: &ServiceInstaller<'_>, action: ServiceAction) -> i32 {
-    let (result, done_key) = match action {
-        ServiceAction::Start => (installer.start(), "cli.service.action_started"),
-        ServiceAction::Stop => (installer.stop(), "cli.service.action_stopped"),
-        ServiceAction::Restart => (installer.restart(), "cli.service.action_restarted"),
-        // The caller routes the other variants to their own handlers; they
-        // have nothing in common with these three beyond taking a unit name.
-        ServiceAction::Install | ServiceAction::Uninstall | ServiceAction::Status => {
-            return fail(t!(
-                "cli.proxy.unsupported_command",
-                command = format!("{action:?}")
-            ));
-        }
+fn service_action(installer: &ServiceInstaller<'_>, verb: UnitVerb) -> i32 {
+    let (result, done_key) = match verb {
+        UnitVerb::Start => (installer.start(), "cli.service.action_started"),
+        UnitVerb::Stop => (installer.stop(), "cli.service.action_stopped"),
+        UnitVerb::Restart => (installer.restart(), "cli.service.action_restarted"),
     };
 
     match result {
@@ -538,17 +544,19 @@ fn run_service(action: ServiceAction) -> i32 {
             println!("{}", t!("cli.service.uninstalled"));
             0
         }
-        ServiceAction::Status => installer
-            .status()
-            .map(|out| {
+        // Reported through `fail` like every other local failure, so the
+        // stderr line carries the same localized `error:` prefix; the exit
+        // code is the same 1 it always was.
+        ServiceAction::Status => match installer.status() {
+            Ok(out) => {
                 print!("{out}");
-            })
-            .map(|_| 0)
-            .unwrap_or_else(|e| {
-                eprintln!("{e}");
-                1
-            }),
-        start_stop_restart => service_action(&installer, start_stop_restart),
+                0
+            }
+            Err(e) => fail(e),
+        },
+        ServiceAction::Start => service_action(&installer, UnitVerb::Start),
+        ServiceAction::Stop => service_action(&installer, UnitVerb::Stop),
+        ServiceAction::Restart => service_action(&installer, UnitVerb::Restart),
     }
 }
 
@@ -664,7 +672,7 @@ fn run_proxy(startup: &Startup, cmd: Commands, json_output: bool) -> i32 {
     // user hears about that first, whatever they were trying to run.
     let socket_path = match startup.runtime() {
         Ok(runtime) => runtime.socket_path.clone(),
-        Err(error) => return fail(error),
+        Err(error) => return fail(format!("failed to load config: {error}")),
     };
     let ctx = ProxyCtx {
         socket_path,
@@ -1008,7 +1016,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yml");
         std::fs::write(&path, "version: 1\nui:\n  refresh_interval_ms: 0\n").unwrap();
-        let err = startup_for(&path).runtime.unwrap_err();
+        let err = startup_for(&path).runtime.unwrap_err().to_string();
         assert!(err.contains("refresh_interval_ms"));
     }
 
@@ -1022,7 +1030,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = startup_for(&path).runtime.unwrap_err();
+        let err = startup_for(&path).runtime.unwrap_err().to_string();
         assert!(err.contains("config invalid"));
         assert!(err.contains("connection.host"));
     }
@@ -1033,7 +1041,7 @@ mod tests {
         let path = dir.path().join("config.yml");
         std::fs::write(&path, "version: 1\nserver:\n  socket_path: relative.sock\n").unwrap();
 
-        let err = startup_for(&path).runtime.unwrap_err();
+        let err = startup_for(&path).runtime.unwrap_err().to_string();
         assert!(err.contains("server.socket_path"));
     }
 

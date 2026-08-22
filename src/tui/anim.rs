@@ -8,6 +8,16 @@ use ratatui::{
     text::{Line, Span},
 };
 
+/// The beat the "something is happening" chrome shares: the LIVE badge on the
+/// live bar, the broadcast-state pane, the connection notice's border and the
+/// stats verdict.
+///
+/// They are meant to breathe together — a viewer sees the live bar and the
+/// status pane stacked on the same screen — but each file used to carry its
+/// own copy of the number, so nudging one would have quietly desynchronised
+/// the rest. The header deliberately does *not* use this (see its comment).
+pub const PULSE_PERIOD_TICKS: u64 = 24;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AnimClock {
     pub frame: u64,
@@ -34,6 +44,16 @@ impl AnimClock {
         let idx = ((self.frame / ticks_per_frame) as usize) % frames.len();
         frames[idx]
     }
+}
+
+/// A smooth 0..1 pulse expressed as radians advanced per tick, for the
+/// animations whose speed is not a whole number of ticks.
+///
+/// [`AnimClock::pulse`] takes an integer period, which cannot express rates
+/// like the splash screen's 0.18 rad/tick; those call sites wrote the formula
+/// out by hand three times. Same arithmetic, one place.
+pub fn pulse_at(frame: u64, radians_per_tick: f32) -> f32 {
+    ((frame as f32 * radians_per_tick).sin() * 0.5 + 0.5).clamp(0.0, 1.0)
 }
 
 /// Linearly blend two truecolor `Color`s; falls back to `a` for non-Rgb

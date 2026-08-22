@@ -41,7 +41,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph},
 };
 use rust_i18n::t;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -277,15 +277,7 @@ fn render_strip(
     model: &TuiModel,
 ) {
     let theme = model.theme;
-    let focused = model.focus == FocusPanel::Audio;
-
-    let border_color = match (selected, focused) {
-        (true, true) if model.advanced_ui => {
-            anim::blend(theme.border_focus, theme.accent_alt, 0.25)
-        }
-        (true, _) => theme.border_focus,
-        (false, _) => theme.border,
-    };
+    let (border_type, border_color) = chrome::focus_frame(model, selected);
     let mut name_style = Style::default().fg(if selected { theme.accent } else { theme.fg });
     if selected {
         name_style = name_style.add_modifier(Modifier::BOLD);
@@ -297,11 +289,7 @@ fn render_strip(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(if selected {
-            BorderType::Thick
-        } else {
-            BorderType::Rounded
-        })
+        .border_type(border_type)
         .border_style(Style::default().fg(border_color))
         .title_top(Line::from(Span::styled(format!(" {name} "), name_style)).centered())
         .title_bottom(footer_line(input, model).centered());

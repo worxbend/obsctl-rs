@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, ListState},
+    widgets::ListItem,
 };
 
 use rust_i18n::t;
@@ -11,7 +11,7 @@ use rust_i18n::t;
 use crate::tui::{
     anim,
     model::{FocusPanel, TuiModel},
-    widgets::chrome,
+    widgets::{chrome, name_list},
 };
 
 /// How many ticks the just-switched-to scene stays highlighted.
@@ -29,35 +29,21 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
         .iter()
         .enumerate()
         .map(|(index, s)| {
-            let marker = if s.active {
-                model.symbol("▶", ">")
-            } else {
-                model.symbol("◇", " ")
-            };
             let flash_t = flash_intensity(model, &s.name);
             let active_color = if flash_t > 0.0 {
                 anim::blend(theme.success, theme.accent, flash_t)
             } else {
                 theme.success
             };
-            let mut spans = vec![
-                Span::styled(
-                    format!(" {:02} ", index + 1),
-                    Style::default().fg(theme.muted),
-                ),
-                Span::styled(
-                    format!("{marker} "),
-                    Style::default().fg(if s.active { active_color } else { theme.muted }),
-                ),
-                Span::styled(
-                    s.name.as_str(),
-                    Style::default().fg(if flash_t > 0.0 {
-                        active_color
-                    } else {
-                        theme.fg
-                    }),
-                ),
-            ];
+            let mut spans = Vec::from(name_list::row_prefix(model, index, s.active, active_color));
+            spans.push(Span::styled(
+                s.name.as_str(),
+                Style::default().fg(if flash_t > 0.0 {
+                    active_color
+                } else {
+                    theme.fg
+                }),
+            ));
             if let Some(a) = &s.alias {
                 spans.push(Span::styled(
                     format!(" ({a})"),
@@ -101,21 +87,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
         model,
     );
 
-    let highlight_style = theme.selection_style(focused);
-
-    let mut state = ListState::default();
-    if !model.scenes().is_empty() {
-        state.select(Some(model.panel_cursor(FocusPanel::Scenes)));
-    }
-
-    f.render_stateful_widget(
-        List::new(items)
-            .block(block)
-            .highlight_style(highlight_style),
-        area,
-        &mut state,
-    );
-    state.offset()
+    name_list::render_rows(f, area, model, FocusPanel::Scenes, block, items)
 }
 
 /// 1.0 right after `name` becomes active, decaying linearly to 0.0 over

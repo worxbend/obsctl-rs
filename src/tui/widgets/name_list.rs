@@ -9,9 +9,9 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, ListState},
+    widgets::{Block, List, ListItem, ListState},
 };
 
 use rust_i18n::t;
@@ -55,28 +55,14 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, spec: &NameListPanel)
         .enumerate()
         .map(|(index, name)| {
             let active = Some(name.as_str()) == current;
-            let marker = if active {
-                model.symbol("▶", ">")
-            } else {
-                model.symbol("◇", " ")
-            };
             let style = if active {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" {:02} ", index + 1),
-                    Style::default().fg(theme.muted),
-                ),
-                Span::styled(
-                    format!("{marker} "),
-                    Style::default().fg(if active { theme.success } else { theme.muted }),
-                ),
-                Span::styled(name.as_str(), Style::default().fg(theme.fg)),
-            ]))
-            .style(style)
+            let mut spans = Vec::from(row_prefix(model, index, active, theme.success));
+            spans.push(Span::styled(name.as_str(), Style::default().fg(theme.fg)));
+            ListItem::new(Line::from(spans)).style(style)
         })
         .collect();
 
@@ -91,15 +77,65 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, spec: &NameListPanel)
         model,
     );
 
+    render_rows(f, area, model, spec.panel, block, items)
+}
+
+/// The two spans every list row opens with: the muted position badge and the
+/// marker saying whether this row is the one OBS is currently using.
+///
+/// `index` is the row's zero-based position; the badge shows it one-based, the
+/// way the number keys that jump to it are spelled. `active_color` is the
+/// marker's colour when the row is active — the scenes panel tints it while a
+/// freshly switched scene flashes, everything else passes the plain success
+/// colour.
+pub fn row_prefix(
+    model: &TuiModel,
+    index: usize,
+    active: bool,
+    active_color: Color,
+) -> [Span<'static>; 2] {
+    let theme = model.theme;
+    let marker = if active {
+        model.symbol("▶", ">")
+    } else {
+        model.symbol("◇", " ")
+    };
+    [
+        Span::styled(
+            format!(" {:02} ", index + 1),
+            Style::default().fg(theme.muted),
+        ),
+        Span::styled(
+            format!("{marker} "),
+            Style::default().fg(if active { active_color } else { theme.muted }),
+        ),
+    ]
+}
+
+/// Draw `items` into `area` as the panel's list, and hand back the scroll
+/// offset Ratatui settled on so the mouse code can map a click to a row.
+///
+/// The selection is only set when there is something to select: an empty list
+/// with a selected index draws a highlight bar over nothing.
+#[must_use]
+pub fn render_rows<'a>(
+    f: &mut Frame,
+    area: Rect,
+    model: &TuiModel,
+    panel: FocusPanel,
+    block: Block<'a>,
+    items: Vec<ListItem<'a>>,
+) -> usize {
+    let focused = model.focus == panel;
     let mut state = ListState::default();
-    if !names.is_empty() {
-        state.select(Some(model.panel_cursor(spec.panel)));
+    if !items.is_empty() {
+        state.select(Some(model.panel_cursor(panel)));
     }
 
     f.render_stateful_widget(
         List::new(items)
             .block(block)
-            .highlight_style(theme.selection_style(focused)),
+            .highlight_style(model.theme.selection_style(focused)),
         area,
         &mut state,
     );

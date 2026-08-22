@@ -187,8 +187,11 @@ pub struct TuiModel {
     /// cursor past the end of a list.
     cursors: PanelCursors,
     /// Meter state per input name, folded from `InputVolumeMeters` events by
-    /// [`record_meter_level`](TuiModel::record_meter_level).
-    pub meters: HashMap<String, MeterReading>,
+    /// [`record_meter_level`](TuiModel::record_meter_level) and read back
+    /// through [`meter`](TuiModel::meter). Private because the decay and peak
+    /// rules live on that write path — a caller inserting a reading itself
+    /// would sidestep them.
+    meters: HashMap<String, MeterReading>,
     /// Active color theme, chosen via config or the settings view.
     pub theme: Theme,
     /// Whether rich Unicode icons/emoji are enabled. When false, widgets use
@@ -411,15 +414,6 @@ impl From<LogEvent> for TuiLogEntry {
 
 impl TuiModel {
     pub const MAX_LOG_ENTRIES: usize = 200;
-
-    /// Build a model with the given starting theme (used at startup, once
-    /// the configured/custom theme has been resolved).
-    pub fn with_theme(theme: Theme) -> Self {
-        Self {
-            theme,
-            ..Self::default()
-        }
-    }
 
     pub fn with_appearance(theme: Theme, show_icons: bool, advanced_ui: bool) -> Self {
         Self {

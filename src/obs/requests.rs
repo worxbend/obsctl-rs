@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::json;
 
 use crate::domain::errors::ObsctlError;
+use crate::domain::volume::is_valid_multiplier;
 use crate::obs::protocol::RequestData;
 use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
@@ -36,6 +37,13 @@ fn validate_name(name: &str, field: &str) -> RequestResult<String> {
         .map_err(|error| ObsctlError::ObsRequestFailed(format!("{field} must be valid: {error}")))
 }
 
+/// A request whose payload is a single validated name, e.g.
+/// `SetCurrentProfile` with `{"profileName": "Streaming"}`.
+fn named_request(request_type: &str, field: &str, name: &str) -> RequestResult<RequestData> {
+    let name = validate_name(name, field)?;
+    Ok(req_with(request_type, json!({ field: name })))
+}
+
 pub fn get_version() -> RequestData {
     req("GetVersion")
 }
@@ -49,11 +57,7 @@ pub fn get_current_program_scene() -> RequestData {
 }
 
 pub fn set_current_program_scene(scene_name: &str) -> RequestResult<RequestData> {
-    let scene_name = validate_name(scene_name, "sceneName")?;
-    Ok(req_with(
-        "SetCurrentProgramScene",
-        json!({ "sceneName": scene_name }),
-    ))
+    named_request("SetCurrentProgramScene", "sceneName", scene_name)
 }
 
 pub fn get_input_list() -> RequestData {
@@ -61,8 +65,7 @@ pub fn get_input_list() -> RequestData {
 }
 
 pub fn get_input_mute(input_name: &str) -> RequestResult<RequestData> {
-    let input_name = validate_name(input_name, "inputName")?;
-    Ok(req_with("GetInputMute", json!({ "inputName": input_name })))
+    named_request("GetInputMute", "inputName", input_name)
 }
 
 pub fn set_input_mute(input_name: &str, muted: bool) -> RequestResult<RequestData> {
@@ -74,23 +77,15 @@ pub fn set_input_mute(input_name: &str, muted: bool) -> RequestResult<RequestDat
 }
 
 pub fn toggle_input_mute(input_name: &str) -> RequestResult<RequestData> {
-    let input_name = validate_name(input_name, "inputName")?;
-    Ok(req_with(
-        "ToggleInputMute",
-        json!({ "inputName": input_name }),
-    ))
+    named_request("ToggleInputMute", "inputName", input_name)
 }
 
 pub fn get_input_volume(input_name: &str) -> RequestResult<RequestData> {
-    let input_name = validate_name(input_name, "inputName")?;
-    Ok(req_with(
-        "GetInputVolume",
-        json!({ "inputName": input_name }),
-    ))
+    named_request("GetInputVolume", "inputName", input_name)
 }
 
 pub fn set_input_volume(input_name: &str, volume_mul: f64) -> RequestResult<RequestData> {
-    if !volume_mul.is_finite() || volume_mul < 0.0 {
+    if !is_valid_multiplier(volume_mul) {
         return Err(ObsctlError::ObsRequestFailed(
             "inputVolumeMul must be finite and non-negative".to_string(),
         ));
@@ -123,11 +118,7 @@ pub fn get_profile_list() -> RequestData {
 }
 
 pub fn set_current_profile(profile_name: &str) -> RequestResult<RequestData> {
-    let profile_name = validate_name(profile_name, "profileName")?;
-    Ok(req_with(
-        "SetCurrentProfile",
-        json!({ "profileName": profile_name }),
-    ))
+    named_request("SetCurrentProfile", "profileName", profile_name)
 }
 
 pub fn get_scene_collection_list() -> RequestData {
@@ -135,11 +126,11 @@ pub fn get_scene_collection_list() -> RequestData {
 }
 
 pub fn set_current_scene_collection(scene_collection_name: &str) -> RequestResult<RequestData> {
-    let scene_collection_name = validate_name(scene_collection_name, "sceneCollectionName")?;
-    Ok(req_with(
+    named_request(
         "SetCurrentSceneCollection",
-        json!({ "sceneCollectionName": scene_collection_name }),
-    ))
+        "sceneCollectionName",
+        scene_collection_name,
+    )
 }
 
 pub fn toggle_stream() -> RequestData {

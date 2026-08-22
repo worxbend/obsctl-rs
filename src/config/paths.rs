@@ -31,14 +31,6 @@ pub fn locales_dir(config_path: Option<&Path>) -> Option<PathBuf> {
     Some(base.join("locales"))
 }
 
-pub fn default_log_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "obsctl").map(|d| {
-        d.state_dir()
-            .unwrap_or(d.data_local_dir())
-            .join("obsctl.log")
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

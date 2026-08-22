@@ -26,8 +26,6 @@ use crate::tui::{
     widgets::chrome,
 };
 
-const PULSE_PERIOD_TICKS: u64 = 24;
-
 /// Columns between two block-font words when both LIVE and REC are showing.
 const WORD_GAP: usize = 2;
 
@@ -35,14 +33,18 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
     let states = spinner::active_states(model.streaming(), model.recording());
     let broadcasting = states[0] != BroadcastState::Idle;
-    let pulse = model.anim.pulse(PULSE_PERIOD_TICKS);
+    let pulse = model.anim.pulse(anim::PULSE_PERIOD_TICKS);
 
-    let border = if !model.advanced_ui {
-        theme.border
-    } else if broadcasting {
-        anim::blend(theme.border, theme.danger, 0.35 + pulse * 0.55)
+    let border = if broadcasting {
+        // A live pane starts from a tint that is already visible and breathes
+        // on top of it, which the shared 0..amount ramp cannot express.
+        if model.advanced_ui {
+            anim::blend(theme.border, theme.danger, 0.35 + pulse * 0.55)
+        } else {
+            theme.border
+        }
     } else {
-        anim::blend(theme.border, theme.info, pulse * 0.25)
+        chrome::breathing_border(model, theme.border, theme.info, 0.25)
     };
     let title_icon = model.symbol("◉", "*");
     let block = chrome::bordered(
@@ -67,7 +69,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let mut lines = if fits_block_form(&states, inner) {
         block_form(&states, model, pulse)
     } else {
-        vec![compact_line(&states, model, pulse)]
+        vec![state_line(&states, model, pulse, StateLineForm::Standalone)]
     };
 
     // Center vertically so the pane reads as one bold object rather than
@@ -126,47 +128,60 @@ fn block_form(states: &[BroadcastState], model: &TuiModel, pulse: f32) -> Vec<Li
         .into_iter()
         .map(|spans| Line::from(spans).alignment(Alignment::Center))
         .collect();
-    lines.push(detail_line(states, model, pulse));
+    lines.push(state_line(
+        states,
+        model,
+        pulse,
+        StateLineForm::UnderBlockWord,
+    ));
     lines
 }
 
-/// Spinner + elapsed time under the block word, one entry per active state.
-fn detail_line(states: &[BroadcastState], model: &TuiModel, pulse: f32) -> Line<'static> {
+/// Where a [`state_line`] is going, which decides how it is punctuated.
+enum StateLineForm {
+    /// Sitting under the block-font word, which has already said `LIVE`/`REC`:
+    /// the label is left out and entries are divided by the shared rule.
+    UnderBlockWord,
+    /// The whole pane, for sizes too small for the block font: the label is
+    /// spelled out and entries are only spaced apart.
+    Standalone,
+}
+
+/// Spinner + elapsed time for each active state, centred on one row.
+///
+/// The two forms were two functions differing in exactly the two things named
+/// on [`StateLineForm`], which is a lot of duplicated span-building to keep in
+/// step for a divider and a word.
+fn state_line(
+    states: &[BroadcastState],
+    model: &TuiModel,
+    pulse: f32,
+    form: StateLineForm,
+) -> Line<'static> {
     let theme = model.theme;
     let mut spans = Vec::with_capacity(states.len() * 2);
     for (index, state) in states.iter().enumerate() {
         if index > 0 {
-            spans.push(chrome::separator(model));
+            spans.push(match form {
+                StateLineForm::UnderBlockWord => chrome::separator(model),
+                StateLineForm::Standalone => Span::raw(" "),
+            });
         }
-        spans.push(Span::styled(
-            format!(
+        let text = match form {
+            StateLineForm::UnderBlockWord => format!(
                 "{} {}",
                 spinner::frame(*state, model.rich_ui(), model.anim.frame),
                 detail_text(*state, model)
             ),
-            Style::default()
-                .fg(color(*state, theme, pulse))
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    Line::from(spans).alignment(Alignment::Center)
-}
-
-/// Single-line fallback for panes too small for the block font.
-fn compact_line(states: &[BroadcastState], model: &TuiModel, pulse: f32) -> Line<'static> {
-    let theme = model.theme;
-    let mut spans = Vec::with_capacity(states.len() * 2);
-    for (index, state) in states.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::styled(
-            format!(
+            StateLineForm::Standalone => format!(
                 " {} {} {} ",
                 spinner::frame(*state, model.rich_ui(), model.anim.frame),
                 state.label(),
                 detail_text(*state, model)
             ),
+        };
+        spans.push(Span::styled(
+            text,
             Style::default()
                 .fg(color(*state, theme, pulse))
                 .add_modifier(Modifier::BOLD),

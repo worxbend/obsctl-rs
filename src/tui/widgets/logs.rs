@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListItem},
 };
@@ -258,32 +258,35 @@ fn resource_style(kind: ResourceKind, theme: Theme) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
-fn token_style(token: &str, theme: Theme) -> Style {
-    let normalized = token.trim_matches(|ch: char| matches!(ch, '.' | ':' | '/'));
-    let color = if token.starts_with('/') {
-        Some(theme.accent)
-    } else if is_danger_keyword(normalized) {
-        Some(theme.danger)
-    } else if is_warning_keyword(normalized) {
-        Some(theme.warning)
-    } else if is_success_keyword(normalized) {
-        Some(theme.success)
-    } else if is_subject_keyword(normalized) {
-        Some(theme.accent_alt)
-    } else if token.chars().any(|ch| ch.is_ascii_digit()) {
-        Some(theme.info)
-    } else {
-        None
-    };
-    color.map_or_else(
-        || Style::default().fg(theme.fg),
-        |color| Style::default().fg(color).add_modifier(Modifier::BOLD),
-    )
+/// The four families of word the log view tints, in the order they are
+/// tried — a word in more than one list takes the first that claims it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeywordClass {
+    Danger,
+    Warning,
+    Success,
+    Subject,
 }
 
-fn is_danger_keyword(word: &str) -> bool {
-    matches_ci(
-        word,
+impl KeywordClass {
+    fn color(self, theme: Theme) -> Color {
+        match self {
+            KeywordClass::Danger => theme.danger,
+            KeywordClass::Warning => theme.warning,
+            KeywordClass::Success => theme.success,
+            KeywordClass::Subject => theme.accent_alt,
+        }
+    }
+}
+
+/// The word lists, in precedence order. A table rather than four near-identical
+/// predicate functions and the `else if` ladder that called them: adding a word
+/// used to mean finding the right one of five functions, and the order the
+/// classes are tried was spelled out in a place other than where the words
+/// live.
+const KEYWORDS: &[(KeywordClass, &[&str])] = &[
+    (
+        KeywordClass::Danger,
         &[
             "error",
             "failed",
@@ -298,12 +301,9 @@ fn is_danger_keyword(word: &str) -> bool {
             "closed",
             "fatal",
         ],
-    )
-}
-
-fn is_warning_keyword(word: &str) -> bool {
-    matches_ci(
-        word,
+    ),
+    (
+        KeywordClass::Warning,
         &[
             "warning",
             "warn",
@@ -315,12 +315,9 @@ fn is_warning_keyword(word: &str) -> bool {
             "shutdown",
             "stale",
         ],
-    )
-}
-
-fn is_success_keyword(word: &str) -> bool {
-    matches_ci(
-        word,
+    ),
+    (
+        KeywordClass::Success,
         &[
             "connected",
             "ready",
@@ -335,12 +332,9 @@ fn is_success_keyword(word: &str) -> bool {
             "recording",
             "complete",
         ],
-    )
-}
-
-fn is_subject_keyword(word: &str) -> bool {
-    matches_ci(
-        word,
+    ),
+    (
+        KeywordClass::Subject,
         &[
             "obs",
             "scene",
@@ -357,13 +351,37 @@ fn is_subject_keyword(word: &str) -> bool {
             "command",
             "websocket",
         ],
-    )
+    ),
+];
+
+/// Which family `word` belongs to, ignoring case, or `None` for a word no
+/// list claims.
+fn keyword_class(word: &str) -> Option<KeywordClass> {
+    KEYWORDS
+        .iter()
+        .find(|(_, words)| {
+            words
+                .iter()
+                .any(|candidate| word.eq_ignore_ascii_case(candidate))
+        })
+        .map(|(class, _)| *class)
 }
 
-fn matches_ci(candidate: &str, values: &[&str]) -> bool {
-    values
-        .iter()
-        .any(|value| candidate.eq_ignore_ascii_case(value))
+fn token_style(token: &str, theme: Theme) -> Style {
+    let normalized = token.trim_matches(|ch: char| matches!(ch, '.' | ':' | '/'));
+    let color = if token.starts_with('/') {
+        Some(theme.accent)
+    } else if let Some(class) = keyword_class(normalized) {
+        Some(class.color(theme))
+    } else if token.chars().any(|ch| ch.is_ascii_digit()) {
+        Some(theme.info)
+    } else {
+        None
+    };
+    color.map_or_else(
+        || Style::default().fg(theme.fg),
+        |color| Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
 }
 
 fn style_for_level(level: LogLevel, theme: Theme) -> Style {

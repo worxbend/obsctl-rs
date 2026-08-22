@@ -9,7 +9,7 @@ use ratatui::{
 use rust_i18n::t;
 
 use crate::service::systemd_user_service::SYSTEMCTL_ENABLE_HINT;
-use crate::tui::{anim, model::TuiModel, widgets::chrome};
+use crate::tui::{model::TuiModel, widgets::chrome};
 
 pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
@@ -51,27 +51,8 @@ pub fn render_unavailable(f: &mut Frame, area: Rect, model: &TuiModel) {
     ];
 
     let unavailable_title = chrome::typographic(model, &t!("tui.connection.title_unavailable"));
-    let title = if model.advanced_ui {
-        anim::gradient_line(
-            &unavailable_title,
-            theme.danger,
-            theme.warning,
-            model.anim.frame,
-            true,
-        )
-    } else {
-        Line::styled(
-            unavailable_title,
-            Style::default()
-                .fg(theme.danger)
-                .add_modifier(Modifier::BOLD),
-        )
-    };
-    let border_color = if model.advanced_ui {
-        anim::blend(theme.danger, theme.warning, model.anim.pulse(24))
-    } else {
-        theme.danger
-    };
+    let title = chrome::heading(model, unavailable_title, theme.danger, theme.warning);
+    let border_color = chrome::breathing_border(model, theme.danger, theme.warning, 1.0);
     let block = chrome::bordered(model, BorderType::Double, border_color, title);
     let Some(inner) = chrome::frame(f, area, block) else {
         return;

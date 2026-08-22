@@ -16,6 +16,7 @@
 //! config file is a broken config. Each caller therefore keeps its own
 //! mapping — and its own message prefix — and only the rule itself is shared.
 
+use crate::domain::errors::ObsctlError;
 use crate::support::validation::{
     MAX_TARGET_TOKEN_LENGTH, ValidationError, trim_and_validate_token_with_max_len,
 };
@@ -50,9 +51,27 @@ impl ResourceKind {
             ResourceKind::AudioInput => "audio input name",
         }
     }
+
+    /// The error for a `target` of this kind that nothing answered to.
+    ///
+    /// Which variant that is — [`ObsctlError::SceneNotFound`] or
+    /// [`ObsctlError::AudioInputNotFound`] — is the only thing that differs
+    /// between resolving a scene and resolving an audio input, so it is
+    /// recorded here alongside the other per-kind wording rather than being
+    /// passed around as a function pointer.
+    pub fn not_found(self, target: String) -> ObsctlError {
+        match self {
+            ResourceKind::Scene => ObsctlError::SceneNotFound(target),
+            ResourceKind::AudioInput => ObsctlError::AudioInputNotFound(target),
+        }
+    }
 }
 
 /// The trimmed form of `value`, if `value` is usable as a resource name.
+///
+/// This is the single definition of what an acceptable target name is: the
+/// CLI, the TUI and the palette parser all ask this function rather than
+/// re-applying the underlying length and character rules themselves.
 ///
 /// Preserves case, because a scene called `Main Camera` has to be sent to OBS
 /// spelled exactly that way.
@@ -89,6 +108,18 @@ mod tests {
         assert!(checked_name("   ").is_err());
         assert!(checked_name("main\tcam").is_err());
         assert!(checked_name(&"a".repeat(MAX_TARGET_TOKEN_LENGTH + 1)).is_err());
+    }
+
+    #[test]
+    fn not_found_uses_the_variant_for_the_kind() {
+        assert!(matches!(
+            ResourceKind::Scene.not_found("Main".to_string()),
+            ObsctlError::SceneNotFound(_)
+        ));
+        assert!(matches!(
+            ResourceKind::AudioInput.not_found("Mic".to_string()),
+            ObsctlError::AudioInputNotFound(_)
+        ));
     }
 
     #[test]

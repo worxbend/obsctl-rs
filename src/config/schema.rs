@@ -236,30 +236,9 @@ fn validate_resource_names(config: &Config) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::model::{AudioInputConfig, SceneConfig};
+    use crate::support::validation::test_env::with_env_var;
     use crate::support::validation::{MAX_PASSWORD_LENGTH, MAX_TARGET_TOKEN_LENGTH};
     use tempfile::TempDir;
-
-    fn with_env_var<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = std::env::var_os(name);
-        if let Some(value) = value {
-            unsafe { std::env::set_var(name, value) };
-        } else {
-            unsafe { std::env::remove_var(name) };
-        }
-
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var(name, previous) },
-            None => unsafe { std::env::remove_var(name) },
-        }
-
-        result
-    }
 
     fn valid_config() -> Config {
         let mut c = Config::default();

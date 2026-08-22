@@ -274,31 +274,6 @@ pub fn validate_no_control_or_whitespace(value: &str) -> Result<(), ValidationEr
     Ok(())
 }
 
-pub fn parse_u8_in_range(value: &str, field: &str, min: u8, max: u8) -> Result<u8, String> {
-    if min > max {
-        return Err(format!(
-            "{field} must be parseable as integer {min}-{max}, got invalid range"
-        ));
-    }
-
-    if value.trim() != value {
-        return Err(format!(
-            "{field} must be an integer {min}-{max}, got {:?}",
-            value
-        ));
-    }
-
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|_| format!("{field} must be an integer {min}-{max}, got {:?}", value))?;
-
-    if parsed < u64::from(min) || parsed > u64::from(max) {
-        return Err(format!("{field} must be {min}-{max}, got {parsed}"));
-    }
-
-    Ok(parsed as u8)
-}
-
 pub fn resolve_connection_password(
     password: Option<&str>,
     password_env: &str,
@@ -353,18 +328,6 @@ mod tests {
     fn validates_whitespace() {
         assert_eq!(validate_no_control_or_whitespace("topic"), Ok(()));
         assert!(validate_no_control_or_whitespace("bad topic").is_err());
-    }
-
-    #[test]
-    fn parse_u8_in_range_validates_integer_bounds() {
-        assert_eq!(parse_u8_in_range("42", "percent", 0, 100).unwrap(), 42);
-        assert_eq!(parse_u8_in_range("0", "percent", 0, 100).unwrap(), 0);
-        assert_eq!(parse_u8_in_range("100", "percent", 0, 100).unwrap(), 100);
-        assert!(parse_u8_in_range("101", "percent", 0, 100).is_err());
-        assert!(parse_u8_in_range("-1", "percent", 0, 100).is_err());
-        assert!(parse_u8_in_range("50.5", "percent", 0, 100).is_err());
-        assert!(parse_u8_in_range(" 42", "percent", 0, 100).is_err());
-        assert!(parse_u8_in_range("42 ", "percent", 0, 100).is_err());
     }
 
     #[test]

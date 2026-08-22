@@ -3,22 +3,18 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use tokio::sync::{Mutex, mpsc};
-use tracing::{error, info, warn};
+use tracing::error;
 
 use crate::config::loader;
 use crate::domain::errors::ObsctlError;
-use crate::ipc::{
-    protocol::{LogEvent, LogLevel},
-    session::BroadcastHub,
-    socket_path,
-    unix_server::IpcServer,
-};
+use crate::ipc::{session::BroadcastHub, socket_path, unix_server::IpcServer};
 use crate::obs::client::ObsClient;
 use crate::runtime::shutdown;
 use crate::server::{
     client_registry::ClientRegistry,
     command_executor::{CommandExecutor, CommandExecutorConfig},
     command_lanes::ExecutorLanes,
+    log_relay::ServerLog,
     obs_supervisor::{ObsSupervisor, ObsSupervisorConfig},
     options::ServerOptions,
     state_store::StateStore,
@@ -72,10 +68,8 @@ pub async fn run(options: ServerOptions) -> i32 {
                 );
             }
         };
-    announce(
-        &hub,
-        format!("IPC server listening at {}", socket_path.display()),
-    );
+    let log = ServerLog::new(Arc::clone(&hub), "obsctl_rs::server::daemon");
+    log.info(format!("IPC server listening at {}", socket_path.display()));
 
     // Install OS signal handlers
     shutdown::install_signal_handler(shutdown_tx.clone());
@@ -113,7 +107,7 @@ pub async fn run(options: ServerOptions) -> i32 {
 
     // Run accept loop until shutdown
     ipc_server.run(Arc::clone(&lanes), shutdown_rx).await;
-    announce(&hub, "IPC accept loop stopped");
+    log.info("IPC accept loop stopped");
 
     // Nothing opens a lane once the accept loop has stopped, so from here the
     // set of lanes to wait for is fixed. The wait is spawned only because the
@@ -124,7 +118,7 @@ pub async fn run(options: ServerOptions) -> i32 {
     // to finish: the daemon was asked to stop and it stopped. An incomplete
     // tidy-up is something to read about in the log, not a failed exit that
     // would have systemd restart the service.
-    let _completed = shut_down(&hub, &socket_path, lanes_handle, supervisor_handle).await;
+    let _completed = shut_down(&log, &socket_path, lanes_handle, supervisor_handle).await;
     0
 }
 
@@ -165,7 +159,7 @@ const TASK_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(
 /// waiting on OBS and a supervisor that never stopped both produced exactly the
 /// same closing line as a clean stop.
 async fn shut_down(
-    hub: &BroadcastHub,
+    log: &ServerLog,
     socket_path: &Path,
     lanes_handle: tokio::task::JoinHandle<()>,
     supervisor_handle: tokio::task::JoinHandle<()>,
@@ -179,28 +173,25 @@ async fn shut_down(
     // requests and answer. Dropping the handle instead cut them off
     // mid-request, and the client that sent one got "command handler dropped"
     // instead of a result.
-    let lanes_stopped = join_by(hub, deadline, "command lanes", lanes_handle).await;
-    let supervisor_stopped = join_by(hub, deadline, "OBS supervisor", supervisor_handle).await;
+    let lanes_stopped = join_by(log, deadline, "command lanes", lanes_handle).await;
+    let supervisor_stopped = join_by(log, deadline, "OBS supervisor", supervisor_handle).await;
 
     let socket_removed = match socket_path::cleanup(socket_path) {
         Ok(()) => true,
         Err(err) => {
-            report_problem(
-                hub,
-                format!(
-                    "Failed to remove IPC socket file {}: {err}",
-                    socket_path.display()
-                ),
-            );
+            log.warn(format!(
+                "Failed to remove IPC socket file {}: {err}",
+                socket_path.display()
+            ));
             false
         }
     };
 
     let completed = lanes_stopped && supervisor_stopped && socket_removed;
     if completed {
-        announce(hub, "obsctl server shutdown complete");
+        log.info("obsctl server shutdown complete");
     } else {
-        report_problem(hub, "obsctl server shutdown finished with steps incomplete");
+        log.warn("obsctl server shutdown finished with steps incomplete");
     }
     completed
 }
@@ -212,7 +203,7 @@ async fn shut_down(
 /// next person to read the log can act on, and the two tasks fail for entirely
 /// different reasons.
 async fn join_by(
-    hub: &BroadcastHub,
+    log: &ServerLog,
     deadline: tokio::time::Instant,
     task: &str,
     handle: tokio::task::JoinHandle<()>,
@@ -220,42 +211,16 @@ async fn join_by(
     match tokio::time::timeout_at(deadline, handle).await {
         Ok(Ok(())) => true,
         Ok(Err(err)) => {
-            report_problem(hub, format!("The {task} task ended abnormally: {err}"));
+            log.warn(format!("The {task} task ended abnormally: {err}"));
             false
         }
         Err(_) => {
-            report_problem(
-                hub,
-                format!("The {task} did not stop within {TASK_SHUTDOWN_GRACE:?}"),
-            );
+            log.warn(format!(
+                "The {task} did not stop within {TASK_SHUTDOWN_GRACE:?}"
+            ));
             false
         }
     }
-}
-
-/// Report a daemon lifecycle milestone to both places it has to appear: the
-/// process log, and the `logs` topic that connected clients watch.
-///
-/// Each of these used to be written out twice, once per destination, with the
-/// message text repeated — so the operator's terminal and the TUI's log pane
-/// could disagree about what happened after any edit that touched only one.
-fn announce(hub: &BroadcastHub, message: impl Into<String>) {
-    let message = message.into();
-    info!("{message}");
-    hub.publish_log(
-        LogEvent::new(LogLevel::Info, message).with_target("obsctl_rs::server::daemon"),
-    );
-}
-
-/// [`announce`] for something that went wrong, so a problem reaches a watching
-/// client's log pane by the same route a milestone does instead of only
-/// existing in the process log the operator may not be looking at.
-fn report_problem(hub: &BroadcastHub, message: impl Into<String>) {
-    let message = message.into();
-    warn!("{message}");
-    hub.publish_log(
-        LogEvent::new(LogLevel::Warn, message).with_target("obsctl_rs::server::daemon"),
-    );
 }
 
 fn dirs_next_config_path() -> PathBuf {

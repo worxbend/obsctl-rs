@@ -8,7 +8,7 @@ use ratatui::{
 
 use rust_i18n::t;
 
-use crate::tui::{anim, model::TuiModel, theme, theme::Theme, widgets::chrome};
+use crate::tui::{model::TuiModel, theme, theme::Theme, widgets::chrome};
 
 /// Full-screen settings view — currently just the theme picker, styled
 /// after btop's theme switcher: arrow keys live-preview a theme across the
@@ -27,22 +27,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> (Rect, usize) {
         "tui.panels.settings.title_ascii"
     ))
     .into_owned();
-    let title = if model.advanced_ui {
-        anim::gradient_line(
-            &title_text,
-            theme.accent,
-            theme.accent_alt,
-            model.anim.frame,
-            true,
-        )
-    } else {
-        Line::styled(
-            title_text,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-    };
+    let title = chrome::heading(model, title_text, theme.accent, theme.accent_alt);
     let outer = chrome::ascii_aware(
         Block::default()
             .borders(Borders::ALL)
@@ -182,17 +167,15 @@ fn render_preview(f: &mut Frame, area: Rect, model: &TuiModel) {
         "tui.panels.settings.preview_heading_ascii"
     ))
     .into_owned();
-    let mut lines = vec![if model.advanced_ui {
-        anim::gradient_line(
-            &heading_text,
-            theme.accent,
-            theme.accent_alt,
-            model.anim.frame,
-            true,
-        )
-    } else {
-        Line::styled(heading_text, Style::default().fg(theme.accent))
-    }];
+    // Unbolded on purpose or by oversight — this heading's plain fallback has
+    // always been drawn at the lighter weight, unlike every other heading in
+    // the UI. Left as it was rather than changed under cover of a refactor.
+    let mut lines = vec![chrome::heading_unbolded(
+        model,
+        heading_text,
+        theme.accent,
+        theme.accent_alt,
+    )];
     lines.extend(PREVIEW_ROWS.iter().map(|row| {
         Line::from(
             row.iter()

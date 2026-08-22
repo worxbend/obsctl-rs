@@ -17,7 +17,7 @@ use crate::domain::{
     volume::percent_to_mul,
 };
 use crate::ipc::{
-    protocol::{ErrorPayload, LogEvent, LogLevel, ServerCommand, ServerMessage, public_error_code},
+    protocol::{ErrorPayload, ServerCommand, ServerMessage, public_error_code},
     session::{BroadcastHub, CommandDispatch},
 };
 use crate::obs::{
@@ -26,7 +26,9 @@ use crate::obs::{
     state::{ObsSnapshot, ServerStatus},
     validation::extract_resource_names,
 };
-use crate::server::{client_registry::ClientRegistry, state_store::StateStore};
+use crate::server::{
+    client_registry::ClientRegistry, log_relay::ServerLog, state_store::StateStore,
+};
 use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
 /// What happened when a freshly dumped config was read back in.
@@ -59,7 +61,7 @@ pub struct CommandExecutor {
     started_at: Instant,
     reconnect_tx: mpsc::Sender<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
-    hub: Arc<BroadcastHub>,
+    log: ServerLog,
     /// Held for as long as a command is reading and rewriting the config file.
     ///
     /// The commands that touch that file are not safe to interleave: a dump
@@ -89,7 +91,7 @@ impl CommandExecutor {
             started_at: Instant::now(),
             reconnect_tx: cfg.reconnect_tx,
             shutdown_tx: cfg.shutdown_tx,
-            hub: cfg.hub,
+            log: ServerLog::new(cfg.hub, "obsctl_rs::server::command_executor"),
             config_file: Mutex::new(()),
         }
     }
@@ -176,7 +178,12 @@ impl CommandExecutor {
             last_error: snap.last_error.clone(),
         };
         drop(snap);
-        serde_json::to_value(status).map_err(|e| ObsctlError::ObsRequestFailed(e.to_string()))
+        // Not an OBS request at all. The variant is reused deliberately, for
+        // the reason spelled out in `cmd_shutdown_server`: a truthful new one
+        // would be a change to the public IPC contract.
+        serde_json::to_value(status).map_err(|e| {
+            ObsctlError::ObsRequestFailed(format!("failed to serialize server status: {e}"))
+        })
     }
 
     async fn cmd_obs_status(&self) -> Result<Value> {
@@ -192,7 +199,11 @@ impl CommandExecutor {
 
     async fn cmd_get_snapshot(&self) -> Result<Value> {
         let snap = self.state.read().await;
-        serde_json::to_value(snap).map_err(|e| ObsctlError::ObsRequestFailed(e.to_string()))
+        // Reusing `ObsRequestFailed` for a local failure, as in
+        // `cmd_server_status` above.
+        serde_json::to_value(snap).map_err(|e| {
+            ObsctlError::ObsRequestFailed(format!("failed to serialize snapshot: {e}"))
+        })
     }
 
     async fn cmd_set_scene(&self, args: &Value) -> Result<Value> {
@@ -415,11 +426,8 @@ impl CommandExecutor {
                 }
             }
             Err(e) => {
-                warn!("Failed to reload config after dump: {e}");
-                self.publish_log(
-                    LogLevel::Warn,
-                    format!("Config reload after dump failed: {e}"),
-                );
+                self.log
+                    .warn(format!("Config reload after dump failed: {e}"));
                 DumpReloadOutcome {
                     warnings: Vec::new(),
                     error: Some(e.to_string()),
@@ -439,19 +447,16 @@ impl CommandExecutor {
         let result = self.reload_config_from_disk().await;
         match &result {
             Ok(warnings) => {
-                self.publish_log(LogLevel::Info, "Config reloaded");
+                // The wire text stays "Config reloaded" — clients match on it —
+                // even though the process log used to name the path here.
+                self.log.info("Config reloaded");
                 let warning_count = warnings.len();
                 if warning_count > 0 {
-                    self.publish_log(
-                        LogLevel::Info,
-                        format!("Config reloaded with {warning_count} warning(s)"),
-                    );
+                    self.log
+                        .info(format!("Config reloaded with {warning_count} warning(s)"));
                 }
             }
-            Err(e) => {
-                warn!("Config reload failed: {e}");
-                self.publish_log(LogLevel::Warn, format!("Config reload failed: {e}"));
-            }
+            Err(e) => self.log.warn(format!("Config reload failed: {e}")),
         }
 
         let warnings = result?;
@@ -485,7 +490,6 @@ impl CommandExecutor {
         // `merge_config` broadcasts the updated alias/shortcut metadata itself.
         self.state.merge_config(&scenes, &audio_inputs).await;
 
-        info!("Config reloaded from {}", path.display());
         Ok(warnings)
     }
 
@@ -513,8 +517,7 @@ impl CommandExecutor {
             return Err(ObsctlError::ShutdownDisabled);
         }
         drop(config);
-        info!("Shutdown requested via IPC");
-        self.publish_log(LogLevel::Info, "Shutdown requested via IPC");
+        self.log.info("Shutdown requested via IPC");
         // Same reasoning as `cmd_reconnect_obs`: a send that nothing is left to
         // receive means the daemon will not act on this, so the caller must not
         // be told it worked. `ObsUnavailable` is reused rather than inventing an
@@ -527,17 +530,10 @@ impl CommandExecutor {
         Ok(json!({ "message": "shutdown initiated" }))
     }
 
-    fn publish_log(&self, level: LogLevel, message: impl AsRef<str>) {
-        self.hub.publish_log(
-            LogEvent::new(level, message).with_target("obsctl_rs::server::command_executor"),
-        );
-    }
-
     fn log_config_warnings(&self, warnings: &[ValidationWarning], context: &str) {
         for warning in warnings {
-            let message = format!("Config warning {context}: {}", warning.0);
-            warn!("{message}");
-            self.publish_log(LogLevel::Warn, message);
+            self.log
+                .warn(format!("Config warning {context}: {}", warning.0));
         }
     }
 

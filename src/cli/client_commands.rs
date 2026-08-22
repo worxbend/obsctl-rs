@@ -6,7 +6,7 @@ use rust_i18n::t;
 use tokio::runtime::Runtime;
 
 use crate::{
-    domain::errors::ObsctlError,
+    domain::{errors::ObsctlError, names::checked_name},
     ipc::{
         protocol::{
             CommandPayload, ErrorPayload, PublicErrorCode, ServerMessage,
@@ -16,7 +16,6 @@ use crate::{
     },
     service::systemd_user_service::SYSTEMCTL_ENABLE_HINT,
     support::redaction::redact_message,
-    support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len},
 };
 
 fn server_unavailable_hint() -> String {
@@ -221,8 +220,7 @@ pub(crate) fn print_result_message(result: &serde_json::Value) {
 /// Applied by `cli::router::proxy_payload` before a payload is built, so a bad
 /// target is rejected without opening a connection to the daemon.
 pub(crate) fn sanitize_target_arg(value: &str) -> Result<String, ObsctlError> {
-    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
-        .map_err(|error| ObsctlError::CommandParseError(format!("target {error}")))
+    checked_name(value).map_err(|error| ObsctlError::CommandParseError(format!("target {error}")))
 }
 
 /// What `--json` prints when the envelope itself cannot be serialized.
@@ -290,6 +288,7 @@ pub(crate) fn print_status_json(v: &serde_json::Value) {
 mod tests {
     use super::*;
     use crate::ipc::protocol::PublicErrorCode;
+    use crate::support::validation::MAX_TARGET_TOKEN_LENGTH;
     use std::path::PathBuf;
 
     #[test]

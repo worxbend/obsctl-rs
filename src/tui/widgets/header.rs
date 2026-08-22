@@ -11,6 +11,9 @@ use crate::tui::{anim, model::TuiModel, widgets::chrome};
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
+    // A slower beat than `anim::PULSE_PERIOD_TICKS`, deliberately: the header
+    // is always on screen, so it drifts against the live bar and status pane
+    // rather than throbbing in lockstep with them.
     let pulse = model.anim.pulse(30);
     let border = if model.advanced_ui {
         anim::blend(theme.border, theme.accent, pulse * 0.45)
@@ -22,22 +25,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         " ◈ OBSCTL // BROADCAST COMMAND CENTER ",
         " OBSCTL // BROADCAST COMMAND CENTER ",
     );
-    let title = if model.advanced_ui {
-        anim::gradient_line(
-            title_text,
-            theme.accent,
-            theme.accent_alt,
-            model.anim.frame,
-            true,
-        )
-    } else {
-        Line::styled(
-            title_text,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-    };
+    let title = chrome::heading(model, title_text, theme.accent, theme.accent_alt);
     let block = chrome::bordered(model, BorderType::Rounded, border, title);
     let Some(inner) = chrome::frame(f, area, block) else {
         return;

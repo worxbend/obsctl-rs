@@ -17,6 +17,14 @@ const PROGRESS_BAR_WIDTH: usize = 30;
 
 /// Width of the shimmering "preparing" noise band under the boot label.
 const PREPARING_BAND_WIDTH: usize = 44;
+
+/// How fast, in radians per tick, the splash card's border breathes between
+/// the two accent colours.
+const BORDER_PULSE_RATE: f32 = 0.18;
+
+/// The faster beat of the live-identity badge, which is meant to read as a
+/// heartbeat rather than as the same slow swell the border has.
+const IDENTITY_PULSE_RATE: f32 = 0.35;
 const LARGE_LOGO: &[&str] = &[
     " ██████╗ ██████╗ ███████╗ ██████╗████████╗██╗     ",
     "██╔═══██╗██╔══██╗██╔════╝██╔════╝╚══██╔══╝██║     ",
@@ -77,7 +85,7 @@ pub fn render_with_appearance(
 
     let card = centered(area, 60, 13);
 
-    let pulse = ((frame as f32 * 0.18).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+    let pulse = anim::pulse_at(frame, BORDER_PULSE_RATE);
     let border = anim::blend(theme.accent, theme.accent_alt, pulse);
     let orbit = spinner::splash_frame(show_icons, frame);
     let block = Block::default()
@@ -239,7 +247,7 @@ fn render_large(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64, show
         sections[1],
     );
 
-    let pulse = ((frame as f32 * 0.18).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+    let pulse = anim::pulse_at(frame, BORDER_PULSE_RATE);
     let rail_color = anim::blend(theme.accent, theme.accent_alt, pulse);
     let card = Block::default()
         .borders(Borders::LEFT)
@@ -290,7 +298,7 @@ fn live_identity_line(frame: u64, theme: Theme, show_icons: bool) -> Line<'stati
     } else {
         [(">", "<"), ("-", "-"), (".", "."), ("-", "-")][phase]
     };
-    let pulse = ((frame as f32 * 0.35).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+    let pulse = anim::pulse_at(frame, IDENTITY_PULSE_RATE);
     let color = anim::blend(theme.danger, theme.warning, pulse * 0.35);
     let badge_style = if phase.is_multiple_of(2) {
         Style::default()

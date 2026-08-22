@@ -92,13 +92,13 @@ const CASE_INSENSITIVE_MATCH_ORDER: [fn(&AliasEntry) -> Option<&str>; 2] = [
 
 /// Resolve a scene target, reporting an unknown name as [`ObsctlError::SceneNotFound`].
 pub fn resolve<'a>(target: &str, entries: &'a [AliasEntry]) -> Result<&'a AliasEntry> {
-    resolve_with(target, entries, ObsctlError::SceneNotFound)
+    resolve_with(target, entries, ResourceKind::Scene)
 }
 
 /// Resolve an audio input target, reporting an unknown name as
 /// [`ObsctlError::AudioInputNotFound`].
 pub fn resolve_audio<'a>(target: &str, entries: &'a [AliasEntry]) -> Result<&'a AliasEntry> {
-    resolve_with(target, entries, ObsctlError::AudioInputNotFound)
+    resolve_with(target, entries, ResourceKind::AudioInput)
 }
 
 /// Work out which entry the user meant by `target`.
@@ -112,14 +112,15 @@ pub fn resolve_audio<'a>(target: &str, entries: &'a [AliasEntry]) -> Result<&'a 
 /// aliases and then OBS names. There a second match is a genuine ambiguity and
 /// is reported rather than guessed at.
 ///
-/// The caller supplies `not_found` because that is the only thing that differs
-/// between resolving a scene and resolving an audio input; previously this
-/// always reported a missing scene and the audio caller rewrote the error
-/// afterwards.
+/// The caller supplies `kind` because which "not found" error a miss reports
+/// is the only thing that differs between resolving a scene and resolving an
+/// audio input; previously this always reported a missing scene and the audio
+/// caller rewrote the error afterwards. See
+/// [`ResourceKind::not_found`](super::names::ResourceKind::not_found).
 fn resolve_with<'a>(
     target: &str,
     entries: &'a [AliasEntry],
-    not_found: fn(String) -> ObsctlError,
+    kind: ResourceKind,
 ) -> Result<&'a AliasEntry> {
     // Validated up front, before any match is attempted, so that a target
     // containing control characters is rejected even when some entry would
@@ -141,7 +142,7 @@ fn resolve_with<'a>(
         }
     }
 
-    Err(not_found(target.to_string()))
+    Err(kind.not_found(target.to_string()))
 }
 
 /// The one entry whose `read` spelling equals `normalized_target` ignoring

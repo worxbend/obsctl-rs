@@ -8,12 +8,11 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, warn};
 
 use crate::domain::{errors::ObsctlError, result::Result};
+use crate::obs::event_decoder::{EventPayload, translate_event};
 use crate::obs::protocol::{
-    OPCODE_EVENT, OPCODE_IDENTIFY, OPCODE_REQUEST, OPCODE_REQUEST_RESPONSE, ObsMessage,
-    RequestData, RequestResponseData,
+    HelloData, IdentifyData, OPCODE_EVENT, OPCODE_HELLO, OPCODE_IDENTIFIED, OPCODE_IDENTIFY,
+    OPCODE_REQUEST, OPCODE_REQUEST_RESPONSE, ObsMessage, RequestData, RequestResponseData,
 };
-use crate::obs::validation::extract_resource_names;
-use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
 const ES_GENERAL: u32 = 1;
 /// Profile and scene-collection change/list events live under this scope in
@@ -138,53 +137,17 @@ pub async fn handshake(
     String,
     tokio::sync::oneshot::Receiver<()>,
 )> {
-    use crate::obs::protocol::{HelloData, IdentifyData, OPCODE_HELLO, OPCODE_IDENTIFIED};
-
-    // 1. Read Hello
-    let hello_raw = read_ws_message(&mut stream).await?;
-    if hello_raw.op != OPCODE_HELLO {
-        return Err(ObsctlError::ConnectionFailed(format!(
-            "expected Hello (opcode {}), got {}",
-            OPCODE_HELLO, hello_raw.op
-        )));
-    }
-    let hello: HelloData = serde_json::from_value(hello_raw.d)
-        .map_err(|e| ObsctlError::ConnectionFailed(format!("invalid Hello: {e}")))?;
+    let hello = read_hello(&mut stream).await?;
     let obs_ws_version = hello.obs_web_socket_version.clone();
 
-    // 2. Build Identify
-    let authentication = if let Some(auth_cfg) = &hello.authentication {
-        let pw = password.ok_or(ObsctlError::AuthenticationFailed)?;
-        Some(crate::obs::auth::compute_authentication(
-            pw,
-            &auth_cfg.salt,
-            &auth_cfg.challenge,
-        ))
-    } else {
-        None
-    };
-
-    let identify = ObsMessage {
-        op: OPCODE_IDENTIFY,
-        d: serde_json::to_value(IdentifyData {
-            rpc_version: 1,
-            authentication,
-            event_subscriptions: Some(EVENT_SUBSCRIPTIONS),
-        })
-        .map_err(|e| ObsctlError::ConnectionFailed(format!("serialize Identify: {e}")))?,
-    };
-
+    let identify = build_identify(&hello, password)?;
     let identify_json = serde_json::to_string(&identify)
         .map_err(|e| ObsctlError::ConnectionFailed(format!("serialize: {e}")))?;
-    sink.send(Message::Text(identify_json.clone()))
+    sink.send(Message::Text(identify_json))
         .await
         .map_err(|e| ObsctlError::ConnectionFailed(e.to_string()))?;
 
-    // 3. Wait for Identified
-    let identified_raw = read_ws_message(&mut stream).await?;
-    if identified_raw.op != OPCODE_IDENTIFIED {
-        return Err(ObsctlError::AuthenticationFailed);
-    }
+    await_identified(&mut stream).await?;
 
     // Spawn the client task with a cancel channel for timeout cleanup.
     // The disconnect_tx is dropped when the task exits, signalling disconnect_rx.
@@ -217,23 +180,87 @@ pub async fn handshake(
     Ok((client, obs_studio_version, obs_ws_version, disconnect_rx))
 }
 
+/// Read the first frame of the handshake, which obs-websocket guarantees is a
+/// `Hello` describing the server and, when a password is set, the auth challenge.
+async fn read_hello(stream: &mut WsStream) -> Result<HelloData> {
+    let hello_raw = read_ws_message(stream).await?;
+    if hello_raw.op != OPCODE_HELLO {
+        return Err(ObsctlError::ConnectionFailed(format!(
+            "expected Hello (opcode {}), got {}",
+            OPCODE_HELLO, hello_raw.op
+        )));
+    }
+    serde_json::from_value(hello_raw.d)
+        .map_err(|e| ObsctlError::ConnectionFailed(format!("invalid Hello: {e}")))
+}
+
+/// Build the `Identify` reply to a `Hello`.
+///
+/// When the `Hello` carried an `authentication` block, OBS has a password set
+/// and we must answer its challenge; failing to have one configured is an
+/// authentication failure rather than a connection failure. When it did not,
+/// the `authentication` field is sent as null.
+fn build_identify(hello: &HelloData, password: Option<&str>) -> Result<ObsMessage> {
+    let authentication = if let Some(auth_cfg) = &hello.authentication {
+        let pw = password.ok_or(ObsctlError::AuthenticationFailed)?;
+        Some(crate::obs::auth::compute_authentication(
+            pw,
+            &auth_cfg.salt,
+            &auth_cfg.challenge,
+        ))
+    } else {
+        None
+    };
+
+    Ok(ObsMessage {
+        op: OPCODE_IDENTIFY,
+        d: serde_json::to_value(IdentifyData {
+            rpc_version: 1,
+            authentication,
+            event_subscriptions: Some(EVENT_SUBSCRIPTIONS),
+        })
+        .map_err(|e| ObsctlError::ConnectionFailed(format!("serialize Identify: {e}")))?,
+    })
+}
+
+/// Wait for OBS to accept the `Identify`. Anything other than `Identified`
+/// means the credentials were not accepted.
+async fn await_identified(stream: &mut WsStream) -> Result<()> {
+    let identified_raw = read_ws_message(stream).await?;
+    if identified_raw.op != OPCODE_IDENTIFIED {
+        return Err(ObsctlError::AuthenticationFailed);
+    }
+    Ok(())
+}
+
+/// Decode one WebSocket frame into an OBS message.
+///
+/// `None` means the frame carried no OBS payload at all (a keep-alive Ping or
+/// Pong, or a raw frame), so the caller should simply read the next one.
+/// `Some(Err(..))` means the connection is unusable — it closed, or the payload
+/// was not a parsable OBS message.
+fn decode_frame(msg: Message) -> Option<Result<ObsMessage>> {
+    let parsed = match msg {
+        Message::Text(text) => serde_json::from_str::<ObsMessage>(&text),
+        Message::Binary(bin) => serde_json::from_slice::<ObsMessage>(&bin),
+        Message::Close(_) => {
+            return Some(Err(ObsctlError::ConnectionFailed(
+                "WebSocket closed during handshake".to_string(),
+            )));
+        }
+        Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => return None,
+    };
+    Some(parsed.map_err(|e| ObsctlError::ConnectionFailed(format!("parse obs message: {e}"))))
+}
+
 pub(crate) async fn read_ws_message(stream: &mut WsStream) -> Result<ObsMessage> {
     while let Some(msg) = stream.next().await {
         match msg {
-            Ok(Message::Text(text)) => {
-                return serde_json::from_str::<ObsMessage>(&text)
-                    .map_err(|e| ObsctlError::ConnectionFailed(format!("parse obs message: {e}")));
+            Ok(frame) => {
+                if let Some(decoded) = decode_frame(frame) {
+                    return decoded;
+                }
             }
-            Ok(Message::Binary(bin)) => {
-                return serde_json::from_slice::<ObsMessage>(&bin)
-                    .map_err(|e| ObsctlError::ConnectionFailed(format!("parse obs message: {e}")));
-            }
-            Ok(Message::Close(_)) => {
-                return Err(ObsctlError::ConnectionFailed(
-                    "WebSocket closed during handshake".to_string(),
-                ));
-            }
-            Ok(_) => {}
             Err(e) => return Err(ObsctlError::ConnectionFailed(e.to_string())),
         }
     }
@@ -317,21 +344,13 @@ async fn dispatch_message(
     pending: &mut HashMap<String, oneshot::Sender<Result<Value>>>,
     event_tx: &mpsc::Sender<ObsEvent>,
 ) {
-    let text = match msg {
-        Message::Text(t) => t,
-        Message::Binary(b) => match String::from_utf8(b) {
-            Ok(s) => s,
-            Err(_) => return,
-        },
-        _ => return,
-    };
-
-    let obs_msg: ObsMessage = match serde_json::from_str(&text) {
-        Ok(m) => m,
-        Err(e) => {
+    let obs_msg = match decode_frame(msg) {
+        Some(Ok(m)) => m,
+        Some(Err(e)) => {
             warn!("Failed to parse OBS message: {e}");
             return;
         }
+        None => return,
     };
 
     match obs_msg.op {
@@ -364,135 +383,6 @@ async fn dispatch_message(
     }
 }
 
-/// One OBS event payload, with the field lookups that every arm of the event
-/// switch needs.
-///
-/// OBS sends `{"eventType": "...", "eventData": {...}}`. Every field read has
-/// the same shape: pull the field, check its type (and, for strings, that it is
-/// a safe token), and log exactly which field of which event was malformed
-/// before giving up. Keeping that in one place is what lets the switch below
-/// read as a list of event shapes instead of a wall of error handling.
-struct EventPayload {
-    event_type: String,
-    data: Value,
-}
-
-impl EventPayload {
-    /// Returns `None` — after logging — when the message has no usable
-    /// `eventType`, which is the only field we cannot recover from.
-    fn parse(message: Value) -> Option<Self> {
-        let raw_type = message
-            .get("eventType")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                warn!("Malformed OBS event: missing or invalid eventType");
-                None
-            })?;
-        let event_type = trim_and_validate_token_with_max_len(raw_type, MAX_TARGET_TOKEN_LENGTH)
-            .map_err(|error| {
-                warn!(
-                    event_type = %raw_type,
-                    message = %error,
-                    "Malformed OBS event payload: invalid eventType"
-                );
-            })
-            .ok()?;
-        let data = message.get("eventData").cloned().unwrap_or(Value::Null);
-        Some(Self { event_type, data })
-    }
-
-    fn warn_field(&self, field: &str, message: &str) {
-        warn!(
-            event_type = %self.event_type,
-            field = %field,
-            "{message}"
-        );
-    }
-
-    fn required_str(&self, field: &str) -> Option<String> {
-        let raw = self.data.get(field).and_then(|v| v.as_str()).or_else(|| {
-            self.warn_field(
-                field,
-                "Malformed OBS event payload: missing or invalid string field",
-            );
-            None
-        })?;
-        trim_and_validate_token_with_max_len(raw, MAX_TARGET_TOKEN_LENGTH)
-            .map_err(|error| {
-                warn!(
-                    event_type = %self.event_type,
-                    field = %field,
-                    message = %error,
-                    "Malformed OBS event payload: string field invalid"
-                );
-            })
-            .ok()
-    }
-
-    fn required_bool(&self, field: &str) -> Option<bool> {
-        self.data.get(field).and_then(|v| v.as_bool()).or_else(|| {
-            self.warn_field(
-                field,
-                "Malformed OBS event payload: missing or invalid boolean field",
-            );
-            None
-        })
-    }
-
-    fn required_f64(&self, field: &str) -> Option<f64> {
-        self.data.get(field).and_then(|v| v.as_f64()).or_else(|| {
-            self.warn_field(
-                field,
-                "Malformed OBS event payload: missing or invalid number field",
-            );
-            None
-        })
-    }
-
-    fn required_array(&self, field: &str) -> Option<&Vec<Value>> {
-        self.data.get(field).and_then(|v| v.as_array()).or_else(|| {
-            self.warn_field(
-                field,
-                "Malformed OBS event payload: missing or invalid array field",
-            );
-            None
-        })
-    }
-
-    /// A number that is neither NaN nor an infinity.
-    ///
-    /// This is defence in depth rather than input validation — `serde_json`
-    /// already rejects out-of-range numbers while parsing, so a NaN or
-    /// infinity can only reach here from a payload built in-process.
-    fn required_finite_f64(&self, field: &str) -> Option<f64> {
-        let value = self.required_f64(field)?;
-        if !value.is_finite() {
-            self.warn_field(field, "Malformed OBS event payload: level is not finite");
-            return None;
-        }
-        Some(value)
-    }
-
-    /// A decibel level: any finite number, since audio dB is normally negative.
-    fn required_decibels(&self, field: &str) -> Option<f64> {
-        self.required_finite_f64(field)
-    }
-
-    /// A linear volume multiplier: finite and at or above zero, because a
-    /// negative multiplier would invert the waveform rather than attenuate it.
-    fn required_volume_multiplier(&self, field: &str) -> Option<f64> {
-        let value = self.required_finite_f64(field)?;
-        if value < 0.0 {
-            self.warn_field(
-                field,
-                "Malformed OBS event payload: volume multiplier must not be negative",
-            );
-            return None;
-        }
-        Some(value)
-    }
-}
-
 async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
     let Some(payload) = EventPayload::parse(data) else {
         return;
@@ -503,127 +393,6 @@ async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
     let _ = event_tx.send(event).await;
 }
 
-/// Turns a validated payload into the internal event, or `None` when a field
-/// the event cannot do without was malformed (already logged by the lookup).
-fn translate_event(payload: EventPayload) -> Option<ObsEvent> {
-    let event = match payload.event_type.as_str() {
-        "CurrentProgramSceneChanged" => ObsEvent::CurrentProgramSceneChanged {
-            scene_name: payload.required_str("sceneName")?,
-        },
-        "SceneCreated" | "SceneRemoved" | "SceneNameChanged" | "SceneListReindexed" => {
-            ObsEvent::SceneListChanged
-        }
-        "InputCreated" => ObsEvent::InputCreated {
-            input_name: payload.required_str("inputName")?,
-        },
-        "InputRemoved" => ObsEvent::InputRemoved {
-            input_name: payload.required_str("inputName")?,
-        },
-        "InputMuteStateChanged" => ObsEvent::InputMuteStateChanged {
-            input_name: payload.required_str("inputName")?,
-            muted: payload.required_bool("inputMuted")?,
-        },
-        "InputVolumeChanged" => ObsEvent::InputVolumeChanged {
-            input_name: payload.required_str("inputName")?,
-            volume_mul: payload.required_volume_multiplier("inputVolumeMul")?,
-            volume_db: payload.required_decibels("inputVolumeDb")?,
-        },
-        "InputVolumeMeters" => ObsEvent::InputVolumeMeters {
-            inputs: parse_volume_meters(&payload)?,
-        },
-        "StreamStateChanged" => ObsEvent::StreamStateChanged {
-            active: payload.required_bool("outputActive")?,
-        },
-        "RecordStateChanged" => ObsEvent::RecordStateChanged {
-            active: payload.required_bool("outputActive")?,
-        },
-        "CurrentProfileChanged" => ObsEvent::CurrentProfileChanged {
-            profile_name: payload.required_str("profileName")?,
-        },
-        "ProfileListChanged" => ObsEvent::ProfileListChanged,
-        "CurrentSceneCollectionChanged" => ObsEvent::CurrentSceneCollectionChanged {
-            scene_collection_name: payload.required_str("sceneCollectionName")?,
-        },
-        "SceneCollectionListChanged" => ObsEvent::SceneCollectionListChanged,
-        _ => ObsEvent::Other {
-            event_type: payload.event_type.clone(),
-            data: payload.data.clone(),
-        },
-    };
-    Some(event)
-}
-
-/// Reduces the `InputVolumeMeters` payload to one peak level per input.
-///
-/// OBS emits a `[magnitude, peak, inputPeak]` tuple per audio channel, so the
-/// level shown for an input is the loudest magnitude across its channels. A
-/// meter with no channels yet — an input that has not run its first audio
-/// capture callback — is a valid silent reading, not a malformed entry.
-///
-/// Any genuinely invalid entry discards the whole event rather than reporting a
-/// partial set of levels that would look like some inputs went silent.
-fn parse_volume_meters(payload: &EventPayload) -> Option<Vec<(String, f32)>> {
-    let inputs = payload.required_array("inputs")?;
-    let input_names = extract_resource_names(&payload.data, "inputs", "inputName")
-        .map_err(|error| {
-            warn!(
-                event_type = %payload.event_type,
-                message = %error,
-                "Malformed OBS InputVolumeMeters payload: invalid inputName list"
-            );
-        })
-        .ok()?;
-
-    let mut had_invalid_entry = false;
-    let mut levels_by_input: Vec<(String, f32)> = Vec::new();
-
-    for (name, input) in input_names.into_iter().zip(inputs.iter()) {
-        let channels = match input.get("inputLevelsMul") {
-            Some(Value::Array(channels)) => channels,
-            None => {
-                had_invalid_entry = true;
-                continue;
-            }
-            Some(invalid) => {
-                warn!(
-                    event_type = %payload.event_type,
-                    input = %name,
-                    data = %invalid,
-                    "Malformed OBS InputVolumeMeters payload: inputLevelsMul must be an array"
-                );
-                had_invalid_entry = true;
-                continue;
-            }
-        };
-
-        let mut peak = 0.0_f32;
-        for channel in channels {
-            match channel
-                .as_array()
-                .and_then(|values| values.first())
-                .and_then(|value| value.as_f64())
-                .map(|value| value as f32)
-            {
-                Some(magnitude) if magnitude.is_finite() && magnitude >= 0.0 => {
-                    peak = peak.max(magnitude);
-                }
-                _ => had_invalid_entry = true,
-            }
-        }
-
-        levels_by_input.push((name, peak));
-    }
-
-    if had_invalid_entry {
-        warn!(
-            event_type = %payload.event_type,
-            "Malformed OBS InputVolumeMeters payload: discarding event due to invalid entries"
-        );
-        return None;
-    }
-    Some(levels_by_input)
-}
-
 /// Probe a WebSocket message without error – used in fake server tests.
 pub fn parse_ws_message(text: &str) -> Option<ObsMessage> {
     serde_json::from_str(text).ok()
@@ -632,7 +401,49 @@ pub fn parse_ws_message(text: &str) -> Option<ObsMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::obs::protocol::HelloAuthentication;
     use tokio::time::{Duration, timeout};
+
+    fn hello(authentication: Option<HelloAuthentication>) -> HelloData {
+        HelloData {
+            obs_web_socket_version: "5.4.2".to_string(),
+            rpc_version: 1,
+            authentication,
+        }
+    }
+
+    #[test]
+    fn identify_omits_authentication_when_obs_has_no_password() {
+        let identify = build_identify(&hello(None), None).unwrap();
+        assert_eq!(identify.op, OPCODE_IDENTIFY);
+        assert_eq!(identify.d["authentication"], Value::Null);
+        assert_eq!(identify.d["rpcVersion"], 1);
+        assert_eq!(identify.d["eventSubscriptions"], EVENT_SUBSCRIPTIONS);
+    }
+
+    #[test]
+    fn identify_answers_the_challenge_when_obs_has_a_password() {
+        let challenge = HelloAuthentication {
+            challenge: "challenge".to_string(),
+            salt: "salt".to_string(),
+        };
+        let expected = crate::obs::auth::compute_authentication("hunter2", "salt", "challenge");
+
+        let identify = build_identify(&hello(Some(challenge)), Some("hunter2")).unwrap();
+        assert_eq!(identify.d["authentication"], Value::String(expected));
+    }
+
+    #[test]
+    fn identify_fails_when_obs_wants_a_password_and_none_is_configured() {
+        let challenge = HelloAuthentication {
+            challenge: "challenge".to_string(),
+            salt: "salt".to_string(),
+        };
+        assert!(matches!(
+            build_identify(&hello(Some(challenge)), None),
+            Err(ObsctlError::AuthenticationFailed)
+        ));
+    }
 
     #[test]
     fn obs_event_dispatches_scene_change() {

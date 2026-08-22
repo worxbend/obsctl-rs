@@ -8,10 +8,7 @@ use tracing::{debug, info, warn};
 use crate::config::model::{Config, ReconnectConfig};
 use crate::domain::errors::ObsctlError;
 use crate::domain::result::Result;
-use crate::ipc::{
-    protocol::{LogEvent, LogLevel},
-    session::BroadcastHub,
-};
+use crate::ipc::{protocol::LogLevel, session::BroadcastHub};
 use crate::obs::{
     client::{ObsClient, ObsEvent},
     connection::{ObsConnectionParams, connect},
@@ -20,6 +17,7 @@ use crate::obs::{
     validation::extract_resource_names,
 };
 use crate::runtime::reconnect_policy::ReconnectPolicy;
+use crate::server::log_relay::ServerLog;
 use crate::server::obs_event_adapter::{log_obs_event, needs_full_refresh, normalize_obs_event};
 use crate::server::state_store::{
     Listing, ObsVersions, OutputFlags, PolledMetrics, RawInputState, RefreshedObsState, StateStore,
@@ -38,6 +36,7 @@ pub struct ObsSupervisor {
     reconnect_rx: mpsc::Receiver<()>,
     shutdown: watch::Receiver<bool>,
     hub: Arc<BroadcastHub>,
+    log: ServerLog,
 }
 
 /// Everything the supervisor needs to be handed at startup.
@@ -66,6 +65,7 @@ impl ObsSupervisor {
             reconnecting: cfg.reconnecting,
             reconnect_rx: cfg.reconnect_rx,
             shutdown: cfg.shutdown,
+            log: ServerLog::new(Arc::clone(&cfg.hub), "obsctl_rs::server::obs_supervisor"),
             hub: cfg.hub,
         }
     }
@@ -146,11 +146,8 @@ impl ObsSupervisor {
         };
         let studio = &session.versions.studio;
         let websocket = &session.versions.websocket;
-        info!("OBS connected: studio={studio} ws={websocket}");
-        self.publish_log(
-            LogLevel::Info,
-            format!("OBS connected: studio={studio} ws={websocket}"),
-        );
+        self.log
+            .info(format!("OBS connected: studio={studio} ws={websocket}"));
         policy.reset();
         self.reconnecting.store(false, Ordering::Relaxed);
         ConnectOutcome::Connected(session)
@@ -187,7 +184,7 @@ impl ObsSupervisor {
     /// why rather than only seeing `connected: false`.
     async fn record_connect_failure(&self, error: &ObsctlError) {
         warn!("OBS connection failed: {error}");
-        self.publish_log(LogLevel::Warn, format!("OBS unavailable: {error}"));
+        self.log.warn(format!("OBS unavailable: {error}"));
         self.state.mark_disconnected(Some(error.to_string())).await;
     }
 
@@ -207,12 +204,9 @@ impl ObsSupervisor {
             disconnect_rx,
         } = session;
 
-        if let Err(e) = self.fetch_and_publish_snapshot(&client, &versions).await {
-            warn!("Initial OBS snapshot fetch failed: {e}");
-            self.publish_log(
-                LogLevel::Warn,
-                format!("Initial OBS snapshot fetch failed: {e}"),
-            );
+        if let Err(e) = self.publish_initial_snapshot(&client, &versions).await {
+            self.log
+                .warn(format!("Initial OBS snapshot fetch failed: {e}"));
             // The fetch is what normally marks the snapshot connected, and it
             // did not run. The client below is installed either way, so leaving
             // the snapshot saying "disconnected" would have `obs-status` and
@@ -230,24 +224,14 @@ impl ObsSupervisor {
         let reason = self.wait_for_disconnect(disconnect_rx).await;
         *self.obs_handle.lock().await = None;
 
-        match reason {
-            DisconnectReason::Shutdown => {
-                self.publish_log(LogLevel::Info, "OBS disconnected during shutdown");
-                self.state.mark_disconnected(None).await;
-            }
-            DisconnectReason::ReconnectRequested => {
-                self.publish_log(LogLevel::Warn, "OBS disconnected: reconnect requested");
-                self.state
-                    .mark_disconnected(Some("reconnect requested".to_string()))
-                    .await;
-            }
-            DisconnectReason::ObsDisconnected => {
-                self.publish_log(LogLevel::Warn, "OBS WebSocket closed");
-                self.state
-                    .mark_disconnected(Some("OBS disconnected".to_string()))
-                    .await;
-            }
+        let (level, message, last_error) = reason.report();
+        match level {
+            LogLevel::Info => self.log.info(message),
+            _ => self.log.warn(message),
         }
+        self.state
+            .mark_disconnected(last_error.map(str::to_string))
+            .await;
         reason
     }
 
@@ -260,33 +244,22 @@ impl ObsSupervisor {
     /// reconnect` does not have to wait out a ten-second backoff.
     async fn wait_before_retry(&mut self, policy: &mut ReconnectPolicy) -> ControlFlow<()> {
         if !policy.enabled() {
-            info!("Reconnect disabled; supervisor stopping");
-            self.reconnecting.store(false, Ordering::Relaxed);
-            self.publish_log(
-                LogLevel::Info,
-                "OBS reconnect disabled; supervisor stopping",
-            );
-            self.stop_supervising(RECONNECT_DISABLED).await;
-            return ControlFlow::Break(());
+            return self
+                .stop_supervising(SupervisionEnd::ReconnectDisabled)
+                .await;
         }
 
         loop {
             let Some(delay) = policy.next_delay() else {
-                info!("Reconnect exhausted; supervisor stopping");
-                self.reconnecting.store(false, Ordering::Relaxed);
-                self.publish_log(
-                    LogLevel::Warn,
-                    "OBS reconnect exhausted; supervisor stopping",
-                );
-                self.stop_supervising(RECONNECT_EXHAUSTED).await;
-                return ControlFlow::Break(());
+                return self
+                    .stop_supervising(SupervisionEnd::ReconnectExhausted)
+                    .await;
             };
             info!("Reconnecting in {delay:?}");
             tokio::select! {
                 _ = tokio::time::sleep(delay) => break,
                 _ = self.reconnect_rx.recv() => {
-                    info!("Reconnect requested immediately");
-                    self.publish_log(LogLevel::Info, "OBS reconnect requested immediately");
+                    self.log.info("OBS reconnect requested immediately");
                     break;
                 }
                 // A shutdown signal that is not yet `true` (the initial value
@@ -294,6 +267,10 @@ impl ObsSupervisor {
                 // over — which draws a fresh, longer delay from the policy.
                 _ = self.shutdown.changed() => {
                     if *self.shutdown.borrow() {
+                        // Deliberately no reason written to the snapshot: the
+                        // daemon is stopping, so there is nothing an operator
+                        // could act on, and `serve`'s shutdown branch already
+                        // covers the case where a connection was live.
                         self.reconnecting.store(false, Ordering::Relaxed);
                         return ControlFlow::Break(());
                     }
@@ -309,89 +286,25 @@ impl ObsSupervisor {
     }
 
     async fn attempt_connect(&self, params: &ObsConnectionParams) -> Result<ConnectedSession> {
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ObsEvent>(64);
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel::<ObsEvent>(64);
         let (client, obs_version, ws_version, disconnect_rx) = connect(params, event_tx).await?;
         let versions = ObsVersions {
             studio: obs_version,
             websocket: ws_version,
         };
-        let event_client = client.clone();
-        let state = self.state.clone();
-        let state_for_refresh = self.state.clone();
-        let config = Arc::clone(&self.config);
-        let hub = Arc::clone(&self.hub);
-        let event_versions = versions.clone();
 
         spawn_stats_poller(client.clone(), self.state.clone());
 
-        // Capacity 1, and the event task uses `try_send`: while a refresh is
-        // running, a burst of list-changed events coalesces into exactly one
-        // follow-up rather than queueing a refresh per event. The refresher
-        // exits when the event task drops the sender, so it dies with the
-        // connection it belongs to.
-        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel::<()>(1);
-        // The refresher's own handle, so a fetch that was overtaken by events
-        // can queue a follow-up. `Weak` rather than a clone: an ordinary
-        // sender held by this task would keep the channel open forever and the
-        // task would never see the event task drop its end.
-        let refresh_self_tx = refresh_tx.downgrade();
-
-        let refresh_hub = Arc::clone(&hub);
-        tokio::spawn(async move {
-            while refresh_rx.recv().await.is_some() {
-                match fetch_and_publish_snapshot_from(
-                    &config,
-                    &state_for_refresh,
-                    &event_client,
-                    &event_versions,
-                )
-                .await
-                {
-                    // Events arrived while this fetch was in flight, so it
-                    // published values that are already out of date. Queue one
-                    // more pass; the capacity-1 channel coalesces repeats.
-                    Ok(true) => {
-                        debug!("OBS events landed during a refresh; queueing another");
-                        if let Some(tx) = refresh_self_tx.upgrade() {
-                            let _ = tx.try_send(());
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        warn!("OBS snapshot refresh after list change failed: {e}");
-                        refresh_hub.publish_log(
-                            LogEvent::new(
-                                LogLevel::Warn,
-                                format!("OBS snapshot refresh after list change failed: {e}"),
-                            )
-                            .with_target("obsctl_rs::server::obs_supervisor"),
-                        );
-                    }
-                }
-            }
-        });
-
-        tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                let needs_full_refresh = needs_full_refresh(&event);
-
-                // Log notable remote OBS changes before applying them.
-                log_obs_event(&hub, &event);
-                state.apply_event(event.clone()).await;
-                if let Some(payload) = normalize_obs_event(&event) {
-                    hub.publish_obs_event(payload);
-                }
-
-                // Refreshing inline would block this loop for a dozen-plus
-                // obs-websocket round-trips, back-pressuring the bounded event
-                // channel and delaying every mute, volume, and scene change
-                // queued behind it. A full channel means a refresh is already
-                // pending, which is all the signal we need.
-                if needs_full_refresh {
-                    let _ = refresh_tx.try_send(());
-                }
-            }
-        });
+        let refresh_tx = spawn_refresh_worker(
+            self.snapshot_refresher(&client, &versions),
+            Arc::clone(&self.hub),
+        );
+        spawn_event_pump(
+            event_rx,
+            self.state.clone(),
+            Arc::clone(&self.hub),
+            refresh_tx,
+        );
 
         Ok(ConnectedSession {
             client,
@@ -400,45 +313,25 @@ impl ObsSupervisor {
         })
     }
 
-    /// Fetch and publish a full snapshot, retrying while events keep landing
-    /// mid-fetch.
-    ///
-    /// Bounded rather than a `while` loop: this runs on the connect path, and
-    /// a busy OBS must not be able to keep it fetching instead of getting on
-    /// with serving clients. Giving up leaves the same staleness the old code
-    /// always had, so the bound costs nothing that was not already the case.
-    async fn fetch_and_publish_snapshot(
+    fn snapshot_refresher(&self, client: &ObsClient, versions: &ObsVersions) -> SnapshotRefresher {
+        SnapshotRefresher {
+            config: Arc::clone(&self.config),
+            state: self.state.clone(),
+            client: client.clone(),
+            versions: versions.clone(),
+        }
+    }
+
+    /// Publish the snapshot a freshly opened connection is supposed to start
+    /// life with.
+    async fn publish_initial_snapshot(
         &self,
         client: &ObsClient,
         versions: &ObsVersions,
     ) -> Result<()> {
-        for _ in 0..MAX_REFRESH_RETRIES {
-            let superseded =
-                fetch_and_publish_snapshot_from(&self.config, &self.state, client, versions)
-                    .await?;
-            if !superseded {
-                return Ok(());
-            }
-            debug!("OBS events landed during the snapshot fetch; refreshing again");
-        }
-
-        // Falling out of the loop is "we published a snapshot we already know
-        // is behind, and stopped trying". That is a real, if rare, degraded
-        // state — an operator looking at a stale scene list has no other way to
-        // find out it is stale — so it is said out loud rather than returned as
-        // an indistinguishable `Ok(())`.
-        warn!(
-            "OBS snapshot fetch gave up after {MAX_REFRESH_RETRIES} attempts; \
-             published snapshot may be out of date"
-        );
-        self.publish_log(
-            LogLevel::Warn,
-            format!(
-                "OBS snapshot fetch gave up after {MAX_REFRESH_RETRIES} attempts; \
-                 published snapshot may be out of date"
-            ),
-        );
-        Ok(())
+        self.snapshot_refresher(client, versions)
+            .refresh_until_current(&self.log)
+            .await
     }
 
     async fn wait_for_disconnect(
@@ -471,24 +364,66 @@ impl ObsSupervisor {
     /// snapshot, and it would still be showing whatever the last failed connect
     /// attempt happened to say. Writing the terminal reason there costs nothing
     /// on the wire — `last_error` is a field the snapshot already has.
-    async fn stop_supervising(&self, reason: &str) {
-        self.state.mark_disconnected(Some(reason.to_string())).await;
-    }
-
-    fn publish_log(&self, level: LogLevel, message: impl AsRef<str>) {
-        self.hub.publish_log(
-            LogEvent::new(level, message).with_target("obsctl_rs::server::obs_supervisor"),
-        );
+    ///
+    /// [`ControlFlow::Break`] is returned so each of the two endings in
+    /// `wait_before_retry` is a single line.
+    async fn stop_supervising(&self, end: SupervisionEnd) -> ControlFlow<()> {
+        self.reconnecting.store(false, Ordering::Relaxed);
+        match end.log_level() {
+            LogLevel::Info => self.log.info(end.announcement()),
+            _ => self.log.warn(end.announcement()),
+        }
+        self.state
+            .mark_disconnected(Some(end.reason().to_string()))
+            .await;
+        ControlFlow::Break(())
     }
 }
 
-/// Why the supervisor will not try OBS again. These are operator diagnostics
-/// that end up in `ObsSnapshot::last_error`, next to the OBS error strings the
-/// connect path already puts there.
-const RECONNECT_DISABLED: &str =
-    "OBS reconnect disabled in config; supervisor stopped (restart the server to retry)";
-const RECONNECT_EXHAUSTED: &str =
-    "OBS reconnect attempts exhausted; supervisor stopped (restart the server to retry)";
+/// Why the supervisor will not try OBS again.
+///
+/// Both endings are announced to clients and then written into
+/// `ObsSnapshot::last_error`, next to the OBS error strings the connect path
+/// already puts there — so which one happened, how loudly to say it, and what an
+/// operator is left looking at afterwards all live together here rather than
+/// being re-assembled at each of the two call sites.
+enum SupervisionEnd {
+    /// The config says not to reconnect, so the first failure was the last.
+    ReconnectDisabled,
+    /// The backoff policy ran out of attempts.
+    ReconnectExhausted,
+}
+
+impl SupervisionEnd {
+    /// Configured behaviour is not a fault; running out of attempts is.
+    fn log_level(&self) -> LogLevel {
+        match self {
+            Self::ReconnectDisabled => LogLevel::Info,
+            Self::ReconnectExhausted => LogLevel::Warn,
+        }
+    }
+
+    /// What is said on the `logs` topic as supervision ends.
+    fn announcement(&self) -> &'static str {
+        match self {
+            Self::ReconnectDisabled => "OBS reconnect disabled; supervisor stopping",
+            Self::ReconnectExhausted => "OBS reconnect exhausted; supervisor stopping",
+        }
+    }
+
+    /// The operator diagnostic left in `ObsSnapshot::last_error`, which outlives
+    /// the log line.
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::ReconnectDisabled => {
+                "OBS reconnect disabled in config; supervisor stopped (restart the server to retry)"
+            }
+            Self::ReconnectExhausted => {
+                "OBS reconnect attempts exhausted; supervisor stopped (restart the server to retry)"
+            }
+        }
+    }
+}
 
 /// How one pass through the connect step ended.
 ///
@@ -505,6 +440,29 @@ enum DisconnectReason {
     Shutdown,
     ReconnectRequested,
     ObsDisconnected,
+}
+
+impl DisconnectReason {
+    /// How `serve` should report this ending: at what level, in what words, and
+    /// with which `last_error` (if any) left behind in the snapshot.
+    ///
+    /// A planned shutdown gets `None`: the daemon is going away on purpose, so
+    /// there is nothing for an operator to read about later.
+    fn report(&self) -> (LogLevel, &'static str, Option<&'static str>) {
+        match self {
+            Self::Shutdown => (LogLevel::Info, "OBS disconnected during shutdown", None),
+            Self::ReconnectRequested => (
+                LogLevel::Warn,
+                "OBS disconnected: reconnect requested",
+                Some("reconnect requested"),
+            ),
+            Self::ObsDisconnected => (
+                LogLevel::Warn,
+                "OBS WebSocket closed",
+                Some("OBS disconnected"),
+            ),
+        }
+    }
 }
 
 /// One live OBS connection, everything the supervisor needs to work with it.
@@ -524,55 +482,166 @@ struct ConnectedSession {
     disconnect_rx: tokio::sync::oneshot::Receiver<()>,
 }
 
-async fn fetch_and_publish_snapshot_from(
-    config: &Arc<Mutex<Config>>,
-    state: &StateStore,
-    client: &ObsClient,
-    versions: &ObsVersions,
-) -> Result<bool> {
-    // Read before the first round-trip: everything below describes OBS as it
-    // was at some point after this, and any event that lands in between is
-    // information this fetch does not have.
-    let generation_before = state.generation();
+/// One connection's ability to fetch OBS's whole state and publish it.
+///
+/// The connect path and the event-driven refresh worker do exactly the same
+/// thing, so they hold one of these rather than each passing the same four
+/// values around as four parameters.
+struct SnapshotRefresher {
+    config: Arc<Mutex<Config>>,
+    state: StateStore,
+    client: ObsClient,
+    versions: ObsVersions,
+}
 
-    let scenes = fetch_scene_listing(client).await?;
-    let inputs = fetch_input_states(client).await?;
+impl SnapshotRefresher {
+    /// Fetch a full snapshot and publish it, reporting whether events landed
+    /// while it was in flight — which means what was just published is already
+    /// known to be behind and the caller should go round again.
+    async fn refresh_once(&self) -> Result<bool> {
+        // Read before the first round-trip: everything below describes OBS as it
+        // was at some point after this, and any event that lands in between is
+        // information this fetch does not have.
+        let generation_before = self.state.generation();
 
-    let refreshed = RefreshedObsState {
-        versions: versions.clone(),
-        scenes,
-        inputs,
-        profiles: fetch_listing(client, ListingRequest::PROFILES).await,
-        collections: fetch_listing(client, ListingRequest::SCENE_COLLECTIONS).await,
-        outputs: OutputFlags {
-            streaming: fetch_output_active(
-                client,
-                requests::get_stream_status(),
-                "GetStreamStatus",
-            )
-            .await,
-            recording: fetch_output_active(
-                client,
-                requests::get_record_status(),
-                "GetRecordStatus",
-            )
-            .await,
-        },
-    };
+        let scenes = fetch_scene_listing(&self.client).await?;
+        let inputs = fetch_input_states(&self.client).await?;
 
-    let (scene_cfgs, audio_cfgs) = {
-        let cfg = config.lock().await;
-        (cfg.scenes.clone(), cfg.audio.inputs.clone())
-    };
+        let refreshed = RefreshedObsState {
+            versions: self.versions.clone(),
+            scenes,
+            inputs,
+            profiles: fetch_listing(&self.client, ListingRequest::PROFILES).await,
+            collections: fetch_listing(&self.client, ListingRequest::SCENE_COLLECTIONS).await,
+            outputs: OutputFlags {
+                streaming: fetch_output_active(
+                    &self.client,
+                    requests::get_stream_status(),
+                    "GetStreamStatus",
+                )
+                .await,
+                recording: fetch_output_active(
+                    &self.client,
+                    requests::get_record_status(),
+                    "GetRecordStatus",
+                )
+                .await,
+            },
+        };
 
-    // The write lock keeps the swap atomic and preserves the metrics the stats
-    // poller owns. It cannot keep this fetch current: an event applied while
-    // the round-trips above were running is not in `refreshed` and has just
-    // been overwritten. `apply_full_refresh` reports that so the caller can
-    // fetch again rather than leave the wrong value in place.
-    Ok(state
-        .apply_full_refresh(&refreshed, &scene_cfgs, &audio_cfgs, generation_before)
-        .await)
+        let (scene_cfgs, audio_cfgs) = {
+            let cfg = self.config.lock().await;
+            (cfg.scenes.clone(), cfg.audio.inputs.clone())
+        };
+
+        // The write lock keeps the swap atomic and preserves the metrics the stats
+        // poller owns. It cannot keep this fetch current: an event applied while
+        // the round-trips above were running is not in `refreshed` and has just
+        // been overwritten. `apply_full_refresh` reports that so the caller can
+        // fetch again rather than leave the wrong value in place.
+        Ok(self
+            .state
+            .apply_full_refresh(&refreshed, &scene_cfgs, &audio_cfgs, generation_before)
+            .await)
+    }
+
+    /// Fetch and publish a full snapshot, retrying while events keep landing
+    /// mid-fetch.
+    ///
+    /// Bounded rather than a `while` loop: this runs on the connect path, and
+    /// a busy OBS must not be able to keep it fetching instead of getting on
+    /// with serving clients. Giving up leaves the same staleness the old code
+    /// always had, so the bound costs nothing that was not already the case.
+    async fn refresh_until_current(&self, log: &ServerLog) -> Result<()> {
+        for _ in 0..MAX_REFRESH_RETRIES {
+            if !self.refresh_once().await? {
+                return Ok(());
+            }
+            debug!("OBS events landed during the snapshot fetch; refreshing again");
+        }
+
+        // Falling out of the loop is "we published a snapshot we already know
+        // is behind, and stopped trying". That is a real, if rare, degraded
+        // state — an operator looking at a stale scene list has no other way to
+        // find out it is stale — so it is said out loud rather than returned as
+        // an indistinguishable `Ok(())`.
+        log.warn(format!(
+            "OBS snapshot fetch gave up after {MAX_REFRESH_RETRIES} attempts; \
+             published snapshot may be out of date"
+        ));
+        Ok(())
+    }
+}
+
+/// Run one refresh per nudge on the returned channel, for as long as the
+/// connection lives.
+///
+/// The channel has capacity 1 and senders use `try_send`: while a refresh is
+/// running, a burst of list-changed events coalesces into exactly one follow-up
+/// rather than queueing a refresh per event. The worker exits when the event
+/// pump drops its sender, so it dies with the connection it belongs to.
+///
+/// The worker keeps a `Weak` handle on that same sender so a fetch that was
+/// overtaken by events can queue a follow-up for itself. `Weak` rather than a
+/// clone: an ordinary sender held here would keep the channel open forever and
+/// the worker would never see the event pump let go.
+fn spawn_refresh_worker(refresher: SnapshotRefresher, hub: Arc<BroadcastHub>) -> mpsc::Sender<()> {
+    let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let refresh_self_tx = refresh_tx.downgrade();
+    let log = ServerLog::new(hub, "obsctl_rs::server::obs_supervisor");
+
+    tokio::spawn(async move {
+        while refresh_rx.recv().await.is_some() {
+            match refresher.refresh_once().await {
+                // Events arrived while this fetch was in flight, so it
+                // published values that are already out of date. Queue one
+                // more pass; the capacity-1 channel coalesces repeats.
+                Ok(true) => {
+                    debug!("OBS events landed during a refresh; queueing another");
+                    if let Some(tx) = refresh_self_tx.upgrade() {
+                        let _ = tx.try_send(());
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => log.warn(format!(
+                    "OBS snapshot refresh after list change failed: {e}"
+                )),
+            }
+        }
+    });
+
+    refresh_tx
+}
+
+/// Fold every OBS event into the cached snapshot and fan it out to clients,
+/// asking for a full refresh when an event says a list has changed.
+fn spawn_event_pump(
+    mut event_rx: mpsc::Receiver<ObsEvent>,
+    state: StateStore,
+    hub: Arc<BroadcastHub>,
+    refresh_tx: mpsc::Sender<()>,
+) {
+    tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            let needs_full_refresh = needs_full_refresh(&event);
+
+            // Log notable remote OBS changes before applying them.
+            log_obs_event(&hub, &event);
+            state.apply_event(event.clone()).await;
+            if let Some(payload) = normalize_obs_event(&event) {
+                hub.publish_obs_event(payload);
+            }
+
+            // Refreshing inline would block this loop for a dozen-plus
+            // obs-websocket round-trips, back-pressuring the bounded event
+            // channel and delaying every mute, volume, and scene change
+            // queued behind it. A full channel means a refresh is already
+            // pending, which is all the signal we need.
+            if needs_full_refresh {
+                let _ = refresh_tx.try_send(());
+            }
+        }
+    });
 }
 
 /// Every scene OBS knows, plus the one currently on program.

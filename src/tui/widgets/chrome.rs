@@ -113,6 +113,121 @@ pub fn ascii_aware<'a>(block: Block<'a>, model: &TuiModel) -> Block<'a> {
     }
 }
 
+/// A panel or view heading: an animated per-character gradient when the model
+/// is drawing the advanced UI, and a plain bold line in `from` when it is not.
+///
+/// Six headings — the panel titles, the live bar, the settings view, the
+/// header and the connection notice — each wrote this `if` out themselves,
+/// with only the two colours differing. Writing it once means a change to how
+/// a heading looks lands on all of them instead of on whichever five the
+/// author remembered.
+pub fn heading(model: &TuiModel, text: impl Into<String>, from: Color, to: Color) -> Line<'static> {
+    heading_inner(model, text.into(), from, to, true)
+}
+
+/// [`heading`] without the bold on the non-animated fallback.
+///
+/// This exists for exactly one caller — the settings preview heading — which
+/// has always drawn its fallback at the lighter weight. Whether that was
+/// intended or an oversight is not recorded anywhere, so it is preserved
+/// rather than quietly normalised; see the comment at that call site.
+pub fn heading_unbolded(
+    model: &TuiModel,
+    text: impl Into<String>,
+    from: Color,
+    to: Color,
+) -> Line<'static> {
+    heading_inner(model, text.into(), from, to, false)
+}
+
+fn heading_inner(
+    model: &TuiModel,
+    text: String,
+    from: Color,
+    to: Color,
+    bold: bool,
+) -> Line<'static> {
+    if model.advanced_ui {
+        anim::gradient_line(&text, from, to, model.anim.frame, true)
+    } else {
+        let mut style = Style::default().fg(from);
+        if bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        // A span rather than a styled `Line`, so callers that take the line
+        // apart — `panel` appends its count badge to these spans — carry the
+        // styling with them. Both render identically.
+        Line::from(Span::styled(text, style))
+    }
+}
+
+/// How far a focused border is tinted toward the theme's secondary accent, so
+/// the focused panel reads as warmer rather than merely brighter.
+const FOCUS_ACCENT_MIX: f32 = 0.25;
+
+/// The border weight and colour that say "this is the panel the keyboard is
+/// talking to": a thick frame tinted toward the accent, against the rounded
+/// plain frame everything else gets.
+///
+/// The panel chrome and the audio strips each decided this themselves, which
+/// is how the two ended up one edit away from disagreeing about what focus
+/// looks like.
+pub fn focus_frame(model: &TuiModel, focused: bool) -> (BorderType, Color) {
+    let border_type = if focused {
+        BorderType::Thick
+    } else {
+        BorderType::Rounded
+    };
+    let color = if focused && model.advanced_ui {
+        anim::blend(
+            model.theme.border_focus,
+            model.theme.accent_alt,
+            FOCUS_ACCENT_MIX,
+        )
+    } else if focused {
+        model.theme.border_focus
+    } else {
+        model.theme.border
+    };
+    (border_type, color)
+}
+
+/// A border colour that breathes on the shared pulse: `base` tinted up to
+/// `amount` of the way toward `toward`, and plain `base` when the model is not
+/// drawing the advanced UI.
+///
+/// The live bar, the status pane and the connection notice all animate their
+/// frame this way; only the two colours and how far the tint travels differ.
+pub fn breathing_border(model: &TuiModel, base: Color, toward: Color, amount: f32) -> Color {
+    if model.advanced_ui {
+        anim::blend(
+            base,
+            toward,
+            model.anim.pulse(anim::PULSE_PERIOD_TICKS) * amount,
+        )
+    } else {
+        base
+    }
+}
+
+/// A fixed-width filled/empty bar. `None` (nothing measured yet) draws as all
+/// empty, so the row keeps its width instead of collapsing.
+///
+/// The live bar's ASCII meter and the stats pane's frame-budget bar built the
+/// same string with the same two glyph pairs; the ratio and the width are the
+/// only things that legitimately differ.
+pub fn ratio_bar(model: &TuiModel, ratio: Option<f64>, width: usize) -> String {
+    let full = glyph_char(model, '█', '#');
+    let empty = glyph_char(model, '░', '-');
+    let Some(ratio) = ratio else {
+        return std::iter::repeat_n(empty, width).collect();
+    };
+    let filled = (ratio.clamp(0.0, 1.0) * width as f64).round() as usize;
+    std::iter::repeat_n(full, filled)
+        .chain(std::iter::repeat_n(empty, width - filled))
+        .collect()
+}
+
 /// Shared panel chrome: rounded inactive borders, a heavier focused frame,
 /// animated gradient headings, a count badge, and a dim keyboard hint.
 pub fn panel<'a>(
@@ -124,20 +239,10 @@ pub fn panel<'a>(
     model: &TuiModel,
 ) -> Block<'a> {
     let theme = model.theme;
-    let frame = model.anim.frame;
     // Keep a full visual gutter after wide emoji glyphs. Some terminals render
     // emoji in two cells, making a single following space appear collapsed.
-    let heading = format!(" {icon}  {label} ");
-    let mut title_spans = if model.advanced_ui {
-        anim::gradient_line(&heading, theme.accent, theme.accent_alt, frame, true).spans
-    } else {
-        vec![Span::styled(
-            heading,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )]
-    };
+    let title_text = format!(" {icon}  {label} ");
+    let mut title_spans = heading(model, title_text, theme.accent, theme.accent_alt).spans;
     title_spans.push(Span::styled(
         format!(" {count:02} "),
         Style::default()
@@ -152,20 +257,11 @@ pub fn panel<'a>(
         ));
     }
 
+    let (border_type, border_color) = focus_frame(model, focused);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(if focused {
-            BorderType::Thick
-        } else {
-            BorderType::Rounded
-        })
-        .border_style(Style::default().fg(if focused && model.advanced_ui {
-            anim::blend(theme.border_focus, theme.accent_alt, 0.25)
-        } else if focused {
-            theme.border_focus
-        } else {
-            theme.border
-        }))
+        .border_type(border_type)
+        .border_style(Style::default().fg(border_color))
         .title(Line::from(title_spans));
     ascii_aware(block, model)
 }

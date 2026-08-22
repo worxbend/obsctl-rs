@@ -167,8 +167,11 @@ fn motion_key(code: KeyCode, ctrl: bool, count: usize) -> Option<TuiAction> {
         KeyCode::Down | KeyCode::Char('j') if !ctrl => Some(TuiAction::NavDown(count)),
         KeyCode::PageUp => Some(TuiAction::NavHalfPageUp),
         KeyCode::PageDown => Some(TuiAction::NavHalfPageDown),
-        KeyCode::Char('g') => Some(TuiAction::SetPending(Pending::G)),
-        KeyCode::Char('G') | KeyCode::End => Some(TuiAction::NavBottom),
+        KeyCode::Char('g') if !ctrl => Some(TuiAction::SetPending(Pending::G)),
+        KeyCode::Char('G') if !ctrl => Some(TuiAction::NavBottom),
+        // `End`, `Home` and the page keys are left unguarded: nothing binds a
+        // Ctrl-modified version of them, so there is no binding to shadow.
+        KeyCode::End => Some(TuiAction::NavBottom),
         KeyCode::Home => Some(TuiAction::NavTop),
         _ => None,
     }
@@ -352,6 +355,16 @@ mod tests {
             handle_key(&model, ctrl_key(KeyCode::Char('j'))),
             Some(TuiAction::FocusPaneDown)
         );
+    }
+
+    #[test]
+    fn a_ctrl_modified_g_is_not_a_motion() {
+        // `g` opens the which-key menu and `G` jumps to the bottom, but only
+        // unmodified: a modifier must never fall through to the plain
+        // binding, the way `Ctrl-k` does not mean "move up".
+        let model = TuiModel::default();
+        assert_eq!(handle_key(&model, ctrl_key(KeyCode::Char('g'))), None);
+        assert_eq!(handle_key(&model, ctrl_key(KeyCode::Char('G'))), None);
     }
 
     #[test]

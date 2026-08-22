@@ -184,6 +184,54 @@ impl IpcClient {
             .map_err(ObsctlError::Io)
     }
 
+    /// Read one frame and decode it into a [`ServerMessage`].
+    ///
+    /// `frame_name` and `closed_error` mean what they do on [`read_frame`],
+    /// and `frame_name` also names the frame in the decode failure so a caller
+    /// waiting for an event does not read "malformed response frame".
+    ///
+    /// [`read_frame`]: IpcClient::read_frame
+    async fn read_message(
+        &mut self,
+        closed_error: &'static str,
+        frame_name: &'static str,
+    ) -> Result<ServerMessage> {
+        let frame = self.read_frame(closed_error, frame_name).await?;
+        decode::<ServerMessage>(&frame).map_err(|e| {
+            ObsctlError::IpcProtocolError(format!("malformed {frame_name} frame: {e}"))
+        })
+    }
+
+    /// Wait for the response carrying `id`, skipping anything else.
+    ///
+    /// The server may interleave pushed events and replies to other requests,
+    /// so a frame that is not the awaited one is discarded — but counted, so a
+    /// peer that never sends the awaited reply cannot keep this loop running
+    /// forever. `waiting_for` names the awaited reply in that failure.
+    async fn await_response(
+        &mut self,
+        id: &str,
+        waiting_for: &'static str,
+        closed_error: &'static str,
+    ) -> Result<ServerMessage> {
+        let mut unmatched = UnmatchedFrames::waiting_for(waiting_for);
+        loop {
+            let msg = self.read_message(closed_error, "response").await?;
+            if let ServerMessage::Response {
+                id: ref resp_id, ..
+            } = msg
+            {
+                validate_ipc_request_id(resp_id).map_err(|error| {
+                    ObsctlError::IpcProtocolError(format!("malformed response id: {error}"))
+                })?;
+                if resp_id.as_str() == id {
+                    return Ok(msg);
+                }
+            }
+            unmatched.record()?;
+        }
+    }
+
     /// Send a command and wait for the correlated response.
     pub async fn send_command(&mut self, payload: CommandPayload) -> Result<ServerMessage> {
         validate_command_name(&payload.name).map_err(|error| {
@@ -197,30 +245,8 @@ impl IpcClient {
         };
         self.send_frame(&msg).await?;
 
-        let mut unmatched = UnmatchedFrames::waiting_for("response");
-        loop {
-            let frame = self.read_frame("connection closed", "response").await?;
-            let msg = decode::<ServerMessage>(&frame).map_err(|e| {
-                ObsctlError::IpcProtocolError(format!("malformed response frame: {e}"))
-            })?;
-            match msg {
-                ServerMessage::Response {
-                    id: ref resp_id, ..
-                } => {
-                    validate_ipc_request_id(resp_id).map_err(|error| {
-                        ObsctlError::IpcProtocolError(format!("malformed response id: {error}"))
-                    })?;
-                    if resp_id == &id {
-                        return Ok(msg);
-                    }
-                    unmatched.record()?;
-                }
-                _ => {
-                    unmatched.record()?;
-                    continue;
-                }
-            }
-        }
+        self.await_response(&id, "response", "connection closed")
+            .await
     }
 
     /// Subscribe to the given topics, returning once the server acks.
@@ -246,41 +272,27 @@ impl IpcClient {
         };
         self.send_frame(&msg).await?;
 
-        let mut unmatched = UnmatchedFrames::waiting_for("subscribe response");
-        loop {
-            let frame = self
-                .read_frame("connection closed before subscribe ack", "response")
-                .await?;
-            let msg = decode::<ServerMessage>(&frame).map_err(|e| {
-                ObsctlError::IpcProtocolError(format!("malformed response frame: {e}"))
-            })?;
-            match msg {
-                ServerMessage::Response {
-                    id: resp_id,
-                    ok,
-                    error,
-                    ..
-                } => {
-                    validate_ipc_request_id(&resp_id).map_err(|error| {
-                        ObsctlError::IpcProtocolError(format!("malformed response id: {error}"))
-                    })?;
-                    if resp_id == id {
-                        if ok {
-                            return Ok(());
-                        } else {
-                            let msg = error
-                                .as_ref()
-                                .map(|e| e.message.as_str())
-                                .unwrap_or("subscribe rejected");
-                            return Err(ObsctlError::IpcProtocolError(msg.to_string()));
-                        }
-                    }
-                    unmatched.record()?;
-                }
-                _ => {
-                    unmatched.record()?;
-                }
+        let ack = self
+            .await_response(
+                &id,
+                "subscribe response",
+                "connection closed before subscribe ack",
+            )
+            .await?;
+
+        match ack {
+            ServerMessage::Response { ok: true, .. } => Ok(()),
+            ServerMessage::Response { error, .. } => {
+                let msg = error
+                    .as_ref()
+                    .map(|e| e.message.as_str())
+                    .unwrap_or("subscribe rejected");
+                Err(ObsctlError::IpcProtocolError(msg.to_string()))
             }
+            // `await_response` only ever returns the matched response.
+            _ => Err(ObsctlError::IpcProtocolError(
+                "subscribe rejected".to_string(),
+            )),
         }
     }
 
@@ -288,10 +300,7 @@ impl IpcClient {
     pub async fn next_event(&mut self) -> Result<ServerMessage> {
         let mut unmatched = UnmatchedFrames::waiting_for("event");
         loop {
-            let frame = self.read_frame("connection closed", "event").await?;
-            let msg = decode::<ServerMessage>(&frame).map_err(|e| {
-                ObsctlError::IpcProtocolError(format!("malformed event frame: {e}"))
-            })?;
+            let msg = self.read_message("connection closed", "event").await?;
             match msg {
                 msg @ ServerMessage::Event { .. } => return Ok(msg),
                 ServerMessage::Response { id, .. } => {

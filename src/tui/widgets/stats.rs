@@ -256,7 +256,11 @@ fn verdict_line(model: &TuiModel, health: Health) -> Line<'static> {
     // The verdict is the one row that should catch the eye when it turns
     // bad, so a degraded stream pulses in time with the LIVE badge.
     let color = if health == Health::Bad && model.advanced_ui {
-        anim::blend(theme.danger, theme.warning, model.anim.pulse(24) * 0.5)
+        anim::blend(
+            theme.danger,
+            theme.warning,
+            model.anim.pulse(anim::PULSE_PERIOD_TICKS) * 0.5,
+        )
     } else {
         health.color(theme)
     };
@@ -293,15 +297,7 @@ fn value(text: String, color: Color) -> Span<'static> {
 /// A filled/empty bar showing how much of the per-frame time budget the
 /// average render is using.
 fn budget_bar(model: &TuiModel, usage: Option<f64>) -> String {
-    let full = chrome::glyph_char(model, '█', '#');
-    let empty = chrome::glyph_char(model, '░', '-');
-    let Some(usage) = usage else {
-        return std::iter::repeat_n(empty, GRAPH_WIDTH).collect();
-    };
-    let filled = (usage.clamp(0.0, 1.0) * GRAPH_WIDTH as f64).round() as usize;
-    std::iter::repeat_n(full, filled)
-        .chain(std::iter::repeat_n(empty, GRAPH_WIDTH - filled))
-        .collect()
+    chrome::ratio_bar(model, usage, GRAPH_WIDTH)
 }
 
 /// OBS reports the FPS it is currently achieving, never the one it is

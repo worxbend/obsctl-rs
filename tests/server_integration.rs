@@ -168,7 +168,7 @@ async fn spawn_server_with_obs_client(
 
     let hub = Arc::new(BroadcastHub::new());
     let state = StateStore::new(Arc::clone(&hub));
-    state.replace(snapshot).await;
+    state.seed_for_tests(snapshot).await;
     let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(Some(obs_client)));
     let reconnecting = Arc::new(AtomicBool::new(false));
     let config = Arc::new(Mutex::new(cfg));
@@ -1100,7 +1100,7 @@ async fn reload_config_updates_scene_aliases_in_snapshot() {
 
     // Pre-seed the state as if OBS had reported a scene list.
     state
-        .replace(ObsSnapshot {
+        .seed_for_tests(ObsSnapshot {
             scenes: vec![SceneState {
                 name: "Main Scene".to_string(),
                 ..SceneState::default()

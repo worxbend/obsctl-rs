@@ -71,13 +71,18 @@ impl StateStore {
         self.inner.read().await.clone()
     }
 
-    /// Overwrite the entire snapshot and broadcast.
+    /// Overwrite the entire snapshot and broadcast — a test-seeding entry
+    /// point with no production caller.
     ///
-    /// This discards every field, including the ones the stats poller owns, so
-    /// it is only appropriate for seeding a store that has no other writer yet
-    /// (daemon startup, tests). The live refresh path must use
-    /// [`apply_full_refresh`](Self::apply_full_refresh), which merges instead.
-    pub async fn replace(&self, snapshot: ObsSnapshot) {
+    /// The daemon never replaces a snapshot wholesale: it starts from
+    /// `ObsSnapshot::default()` and every later write goes through
+    /// [`apply_full_refresh`](Self::apply_full_refresh), which merges. This is
+    /// how a test puts a store into a known state before exercising something
+    /// that reads it.
+    ///
+    /// It discards every field, including the ones the stats poller owns, so it
+    /// is only safe on a store that has no other writer yet.
+    pub async fn seed_for_tests(&self, snapshot: ObsSnapshot) {
         let mut guard = self.inner.write().await;
         *guard = snapshot;
         self.commit(&mut guard);
@@ -320,18 +325,34 @@ fn apply_to_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
     changed
 }
 
+/// Write `next` into `slot` unless it is already there, answering "did this
+/// change anything?".
+///
+/// Most of [`mutate_snapshot`]'s arms are that same compare-then-assign, and
+/// each one written out by hand was a chance to compare one field and assign
+/// another, or to answer `true` for a write that changed nothing — which would
+/// broadcast an identical snapshot to every connected client.
+fn set_if_changed<T: PartialEq>(slot: &mut T, next: T) -> bool {
+    if *slot == next {
+        return false;
+    }
+    *slot = next;
+    true
+}
+
 /// Apply `event` to `snapshot`, answering only "did this change anything?".
 /// Callers get the timestamp handling from [`apply_to_snapshot`].
 fn mutate_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
     match event {
         ObsEvent::CurrentProgramSceneChanged { scene_name } => {
-            if snapshot.current_scene.as_deref() == Some(&scene_name) {
+            if !set_if_changed(&mut snapshot.current_scene, Some(scene_name.clone())) {
                 return false;
             }
+            // Only once the scene really did change: the per-scene `active`
+            // flags are already correct otherwise.
             for s in snapshot.scenes.iter_mut() {
                 s.active = s.name == scene_name;
             }
-            snapshot.current_scene = Some(scene_name);
             true
         }
         // The supervisor answers these with a full refresh, which broadcasts
@@ -386,37 +407,18 @@ fn mutate_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
                 false
             }
         }
-        ObsEvent::StreamStateChanged { active } => {
-            if snapshot.streaming == active {
-                return false;
-            }
-            snapshot.streaming = active;
-            true
-        }
-        ObsEvent::RecordStateChanged { active } => {
-            if snapshot.recording == active {
-                return false;
-            }
-            snapshot.recording = active;
-            true
-        }
+        ObsEvent::StreamStateChanged { active } => set_if_changed(&mut snapshot.streaming, active),
+        ObsEvent::RecordStateChanged { active } => set_if_changed(&mut snapshot.recording, active),
         ObsEvent::CurrentProfileChanged { profile_name } => {
-            if snapshot.current_profile.as_deref() == Some(&profile_name) {
-                return false;
-            }
-            snapshot.current_profile = Some(profile_name);
-            true
+            set_if_changed(&mut snapshot.current_profile, Some(profile_name))
         }
         ObsEvent::ProfileListChanged => false,
         ObsEvent::CurrentSceneCollectionChanged {
             scene_collection_name,
-        } => {
-            if snapshot.current_scene_collection.as_deref() == Some(&scene_collection_name) {
-                return false;
-            }
-            snapshot.current_scene_collection = Some(scene_collection_name);
-            true
-        }
+        } => set_if_changed(
+            &mut snapshot.current_scene_collection,
+            Some(scene_collection_name),
+        ),
         ObsEvent::SceneCollectionListChanged => false,
         // High-frequency; don't update the snapshot or broadcast.
         ObsEvent::InputVolumeMeters { .. } => false,
@@ -560,7 +562,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replace_broadcasts_state() {
+    async fn seed_for_tests_broadcasts_state() {
         let store = make_store();
         let mut rx = store.hub.subscribe_state();
 
@@ -569,7 +571,7 @@ mod tests {
             current_scene: Some("Main".to_string()),
             ..ObsSnapshot::default()
         };
-        store.replace(snap).await;
+        store.seed_for_tests(snap).await;
 
         let msg = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
             .await
@@ -592,7 +594,7 @@ mod tests {
             connected: true,
             ..ObsSnapshot::default()
         };
-        store.replace(snap).await;
+        store.seed_for_tests(snap).await;
 
         store.mark_disconnected(Some("timeout".to_string())).await;
 
@@ -610,7 +612,7 @@ mod tests {
     async fn mark_connected_records_the_connection_and_why_the_snapshot_is_thin() {
         let store = make_store();
         store
-            .replace(ObsSnapshot {
+            .seed_for_tests(ObsSnapshot {
                 scenes: vec![SceneState {
                     name: "Main".to_string(),
                     ..Default::default()
@@ -661,7 +663,7 @@ mod tests {
             current_scene: Some("A".to_string()),
             ..ObsSnapshot::default()
         };
-        store.replace(snap).await;
+        store.seed_for_tests(snap).await;
 
         store
             .apply_event(ObsEvent::CurrentProgramSceneChanged {
@@ -683,7 +685,7 @@ mod tests {
     async fn changing_events_advance_updated_at_and_no_ops_do_not() {
         let store = make_store();
         store
-            .replace(ObsSnapshot {
+            .seed_for_tests(ObsSnapshot {
                 streaming: false,
                 ..ObsSnapshot::default()
             })
@@ -722,7 +724,7 @@ mod tests {
             }],
             ..ObsSnapshot::default()
         };
-        store.replace(snap).await;
+        store.seed_for_tests(snap).await;
 
         store
             .apply_event(ObsEvent::InputMuteStateChanged {
@@ -742,7 +744,7 @@ mod tests {
             current_profile: Some("Default".to_string()),
             ..ObsSnapshot::default()
         };
-        store.replace(snap).await;
+        store.seed_for_tests(snap).await;
 
         store
             .apply_event(ObsEvent::CurrentProfileChanged {
@@ -827,7 +829,7 @@ mod tests {
     async fn a_refresh_overtaken_by_an_event_reports_that_it_is_stale() {
         let store = make_store();
         store
-            .replace(ObsSnapshot {
+            .seed_for_tests(ObsSnapshot {
                 scenes: vec![SceneState {
                     name: "Main".to_string(),
                     active: true,
@@ -884,7 +886,7 @@ mod tests {
     async fn a_refresh_that_lands_after_a_disconnect_reports_that_it_is_stale() {
         let store = make_store();
         store
-            .replace(ObsSnapshot {
+            .seed_for_tests(ObsSnapshot {
                 connected: true,
                 ..ObsSnapshot::default()
             })
@@ -920,7 +922,7 @@ mod tests {
     async fn a_refresh_that_lands_after_a_config_merge_reports_that_it_is_stale() {
         let store = make_store();
         store
-            .replace(ObsSnapshot {
+            .seed_for_tests(ObsSnapshot {
                 scenes: vec![SceneState {
                     name: "Main".to_string(),
                     ..Default::default()
@@ -963,7 +965,7 @@ mod tests {
     async fn a_no_op_event_does_not_make_a_refresh_look_stale() {
         let store = make_store();
         store
-            .replace(ObsSnapshot {
+            .seed_for_tests(ObsSnapshot {
                 streaming: true,
                 ..ObsSnapshot::default()
             })
@@ -987,7 +989,7 @@ mod tests {
     async fn merge_config_broadcasts_updated_metadata() {
         let store = make_store();
         store
-            .replace(ObsSnapshot {
+            .seed_for_tests(ObsSnapshot {
                 scenes: vec![SceneState {
                     name: "Main".to_string(),
                     ..Default::default()
@@ -1032,7 +1034,7 @@ mod tests {
     async fn merge_config_clears_metadata_for_entries_the_config_dropped() {
         let store = make_store();
         store
-            .replace(ObsSnapshot {
+            .seed_for_tests(ObsSnapshot {
                 scenes: vec![SceneState {
                     name: "Main".to_string(),
                     alias: Some("cam".to_string()),
@@ -1097,7 +1099,7 @@ mod tests {
             current_scene_collection: Some("Podcast".to_string()),
             ..ObsSnapshot::default()
         };
-        store.replace(snap).await;
+        store.seed_for_tests(snap).await;
 
         store
             .apply_event(ObsEvent::CurrentSceneCollectionChanged {

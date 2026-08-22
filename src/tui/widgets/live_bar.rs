@@ -21,8 +21,6 @@ use rust_i18n::t;
 use crate::tui::widgets::chrome;
 use crate::tui::{anim, model::TuiModel, spinner, theme::Theme};
 
-const PULSE_PERIOD_TICKS: u64 = 24;
-
 /// Cells per braille meter. Ten cells is enough to read a rough percentage
 /// while leaving the labels and values room on a narrow strip.
 const METER_WIDTH: usize = 10;
@@ -37,36 +35,19 @@ const MEMORY_SCALE_STEP_MB: f64 = 256.0;
 /// broadcast state is stated once rather than twice.
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, include_badges: bool) {
     let theme = model.theme;
-    let pulse = model.anim.pulse(PULSE_PERIOD_TICKS);
+    let pulse = model.anim.pulse(anim::PULSE_PERIOD_TICKS);
     let active = model.streaming() || model.recording();
-    let border = if !model.advanced_ui {
-        theme.border
-    } else if active {
-        anim::blend(theme.border, theme.danger, pulse * 0.8)
+    let border = if active {
+        chrome::breathing_border(model, theme.border, theme.danger, 0.8)
     } else {
-        anim::blend(theme.border, theme.info, pulse * 0.18)
+        chrome::breathing_border(model, theme.border, theme.info, 0.18)
     };
     let title_text = format!(
         "{}{} ",
         chrome::glyph(model, " ◉ ", " "),
         t!("tui.panels.live_bar.title")
     );
-    let title = if model.advanced_ui {
-        anim::gradient_line(
-            &title_text,
-            theme.danger,
-            theme.warning,
-            model.anim.frame,
-            true,
-        )
-    } else {
-        Line::styled(
-            title_text,
-            Style::default()
-                .fg(theme.danger)
-                .add_modifier(Modifier::BOLD),
-        )
-    };
+    let title = chrome::heading(model, title_text, theme.danger, theme.warning);
     let block = chrome::bordered(model, BorderType::Rounded, border, title);
     let Some(inner) = chrome::frame(f, area, block) else {
         return;
@@ -154,10 +135,7 @@ fn throughput_spans(model: &TuiModel, theme: Theme) -> Vec<Span<'static>> {
     } else {
         anim::sparkline_ascii
     };
-    let bitrate = model
-        .stream_bitrate_kbps()
-        .map(|value| format!("{value:.0}kbps"))
-        .unwrap_or_else(|| "--kbps".to_string());
+    let bitrate = bitrate_text(model);
     vec![
         chrome::separator(model),
         Span::styled(
@@ -250,7 +228,7 @@ fn meter(
         );
     } else {
         spans.push(Span::styled(
-            ascii_meter(current, scale_max),
+            ascii_meter(model, current, scale_max),
             Style::default().fg(color),
         ));
     }
@@ -258,16 +236,27 @@ fn meter(
 }
 
 /// ASCII stand-in for the braille meter, for terminals without Unicode.
-fn ascii_meter(current: f64, scale_max: f64) -> String {
+///
+/// Only reached on the `!advanced_ui` path, which is why routing it through
+/// [`chrome::ratio_bar`] — whose glyphs are chosen per `advanced_ui` — still
+/// draws the same `#`/`-` bar as the hand-rolled version did.
+fn ascii_meter(model: &TuiModel, current: f64, scale_max: f64) -> String {
     let ratio = if scale_max > 0.0 {
         (current / scale_max).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    let filled = (ratio * METER_WIDTH as f64).round() as usize;
-    std::iter::repeat_n('#', filled)
-        .chain(std::iter::repeat_n('-', METER_WIDTH - filled))
-        .collect()
+    chrome::ratio_bar(model, Some(ratio), METER_WIDTH)
+}
+
+/// The encoder's outgoing bitrate, or a same-shaped placeholder before OBS has
+/// reported one. Spelled the same way by the full strip and its compact
+/// single-line fallback.
+fn bitrate_text(model: &TuiModel) -> String {
+    model
+        .stream_bitrate_kbps()
+        .map(|value| format!("{value:.0}kbps"))
+        .unwrap_or_else(|| "--kbps".to_string())
 }
 
 /// Highest value seen this session, never below the live one so the marker
@@ -287,10 +276,7 @@ fn compact_metrics(model: &TuiModel, theme: Theme) -> Span<'static> {
                 stats.cpu_usage_percent,
                 stats.active_fps,
                 stats.memory_usage_mb,
-                model
-                    .stream_bitrate_kbps()
-                    .map(|value| format!("{value:.0}kbps"))
-                    .unwrap_or_else(|| "--kbps".to_string())
+                bitrate_text(model)
             ),
             Style::default().fg(theme.info),
         ),
@@ -323,12 +309,20 @@ mod tests {
 
     #[test]
     fn ascii_meter_is_fixed_width_and_clamps() {
-        assert_eq!(ascii_meter(0.0, 100.0).chars().count(), METER_WIDTH);
-        assert_eq!(ascii_meter(50.0, 100.0), "#####-----");
-        assert_eq!(ascii_meter(100.0, 100.0).matches('#').count(), METER_WIDTH);
+        // The ASCII meter is only reached with the advanced UI off.
+        let model = TuiModel::with_appearance(TuiModel::default().theme, false, false);
+        assert_eq!(ascii_meter(&model, 0.0, 100.0).chars().count(), METER_WIDTH);
+        assert_eq!(ascii_meter(&model, 50.0, 100.0), "#####-----");
+        assert_eq!(
+            ascii_meter(&model, 100.0, 100.0).matches('#').count(),
+            METER_WIDTH
+        );
         // Over scale clamps rather than overflowing the strip.
-        assert_eq!(ascii_meter(500.0, 100.0).matches('#').count(), METER_WIDTH);
+        assert_eq!(
+            ascii_meter(&model, 500.0, 100.0).matches('#').count(),
+            METER_WIDTH
+        );
         // A zero scale is survivable, not a divide-by-zero panic.
-        assert_eq!(ascii_meter(5.0, 0.0).matches('#').count(), 0);
+        assert_eq!(ascii_meter(&model, 5.0, 0.0).matches('#').count(), 0);
     }
 }

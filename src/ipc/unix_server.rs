@@ -39,6 +39,20 @@ enum SessionControl {
     Close,
 }
 
+/// Reject a socket path that is not safe to bind.
+///
+/// `stage` is the prefix of the error message, which says which of the two
+/// checks in `bind_with_registry` refused the path.
+fn check_socket_path(path: &Path, stage: &str) -> std::io::Result<()> {
+    match crate::ipc::socket_path::validate_socket_path(path) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{stage}: {error}"),
+        )),
+    }
+}
+
 impl IpcServer {
     pub fn bind(path: &Path, hub: Arc<BroadcastHub>) -> std::io::Result<Self> {
         Self::bind_with_registry(path, hub, ClientRegistry::new())
@@ -49,21 +63,13 @@ impl IpcServer {
         hub: Arc<BroadcastHub>,
         registry: ClientRegistry,
     ) -> std::io::Result<Self> {
-        if let Err(error) = crate::ipc::socket_path::validate_socket_path(path) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("unsafe socket path: {error}"),
-            ));
-        }
-
+        // Checked twice on purpose: preparing the parent directory can change
+        // what the path resolves to, so the second check covers the path the
+        // listener is about to bind rather than the one that was asked for.
+        check_socket_path(path, "unsafe socket path")?;
         crate::ipc::socket_path::ensure_private_socket_parent(path)?;
+        check_socket_path(path, "unsafe socket path after directory preparation")?;
 
-        if let Err(error) = crate::ipc::socket_path::validate_socket_path(path) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("unsafe socket path after directory preparation: {error}"),
-            ));
-        }
         let listener = UnixListener::bind(path)?;
         ensure_socket_file(path)?;
         fs::secure_permissions(path, 0o600)?;
@@ -126,6 +132,8 @@ async fn run_session(
         }
     });
 
+    let writer = SessionWriter(write_tx);
+
     let mut subs = SessionSubscriptions::default();
     let mut state_rx = hub.subscribe_state();
     let mut events_rx = hub.subscribe_events();
@@ -148,7 +156,7 @@ async fn run_session(
                         let trimmed = frame.trim_end_matches(['\n', '\r']);
                         if !trimmed.is_empty()
                             && handle_line(
-                                trimmed.to_string(), &mut subs, &command_tx, &write_tx,
+                                trimmed.to_string(), &mut subs, &command_tx, &writer,
                             ).await == SessionControl::Close
                         {
                             break;
@@ -174,84 +182,131 @@ async fn run_session(
             }
 
             res = state_rx.recv(), if subs.contains(Topic::State) => {
-                match res {
-                    Ok(msg) => send_encoded(&msg, &write_tx).await,
-                    Err(RecvError::Lagged(n)) => warn!("state broadcast lagged {n}"),
-                    Err(RecvError::Closed) => break,
+                if forward_broadcast(res, Topic::State, &writer).await == SessionControl::Close {
+                    break;
                 }
             }
 
             res = events_rx.recv(), if subs.contains(Topic::Events) => {
-                match res {
-                    Ok(msg) => send_encoded(&msg, &write_tx).await,
-                    Err(RecvError::Lagged(n)) => warn!("events broadcast lagged {n}"),
-                    Err(RecvError::Closed) => break,
+                if forward_broadcast(res, Topic::Events, &writer).await == SessionControl::Close {
+                    break;
                 }
             }
 
             res = logs_rx.recv(), if subs.contains(Topic::Logs) => {
-                match res {
-                    Ok(msg) => send_encoded(&msg, &write_tx).await,
-                    Err(RecvError::Lagged(n)) => warn!("logs broadcast lagged {n}"),
-                    Err(RecvError::Closed) => break,
+                if forward_broadcast(res, Topic::Logs, &writer).await == SessionControl::Close {
+                    break;
                 }
             }
         }
     }
 
-    drop(write_tx);
+    drop(writer);
     let _ = write_task.await;
 }
 
-async fn send_encoded(msg: &ServerMessage, write_tx: &mpsc::Sender<String>) {
-    let encoded = match encode_framed(msg) {
-        Ok(encoded) => encoded,
-        Err(FrameEncodeError::Encode(error)) => {
-            warn!("Failed to encode IPC message for client socket: {error}");
-            return;
-        }
-        Err(FrameEncodeError::Oversized { len }) => {
-            send_oversized_fallback(msg, len, write_tx).await;
-            return;
-        }
-    };
+/// The one way a session answers its client.
+///
+/// The socket itself is owned by the write task, so everything a handler
+/// wants to say is queued on this channel. Wrapping the sender keeps the
+/// encoding, the size limit and the rejection shape in one place instead of
+/// leaving each handler to remember them.
+#[derive(Clone)]
+struct SessionWriter(mpsc::Sender<String>);
 
-    if write_tx.send(encoded).await.is_err() {
-        warn!("Failed to queue IPC message for client socket");
+impl SessionWriter {
+    /// Encode one message and queue it for the client.
+    async fn send(&self, msg: &ServerMessage) {
+        let encoded = match encode_framed(msg) {
+            Ok(encoded) => encoded,
+            Err(FrameEncodeError::Encode(error)) => {
+                warn!("Failed to encode IPC message for client socket: {error}");
+                return;
+            }
+            Err(FrameEncodeError::Oversized { len }) => {
+                self.send_oversized_fallback(msg, len).await;
+                return;
+            }
+        };
+
+        if self.0.send(encoded).await.is_err() {
+            warn!("Failed to queue IPC message for client socket");
+        }
+    }
+
+    /// Queue an error response for one request.
+    async fn send_error(&self, id: String, code: PublicErrorCode, message: &str) {
+        self.send(&err_response(id, code, message)).await;
+    }
+
+    /// Tell the client its request was rejected.
+    ///
+    /// Every rejection in this module also ends the session, so the `Close`
+    /// that stops the read loop is part of this helper rather than a line each
+    /// caller has to remember to write after it.
+    async fn reject(&self, id: String, code: PublicErrorCode, message: &str) -> SessionControl {
+        self.send_error(id, code, message).await;
+        SessionControl::Close
+    }
+
+    /// Deal with a message that will not fit in one frame.
+    ///
+    /// A client waiting on a response still needs an answer, so the response
+    /// is replaced by a small protocol error carrying the same request id. A
+    /// pushed event has nobody waiting on it and is dropped instead.
+    async fn send_oversized_fallback(&self, msg: &ServerMessage, len: usize) {
+        let ServerMessage::Response { id, .. } = msg else {
+            warn!("Dropping oversized IPC message ({len} > {MAX_IPC_LINE_BYTES} bytes)");
+            return;
+        };
+
+        let fallback = ServerMessage::Response {
+            id: id.clone(),
+            ok: false,
+            result: None,
+            error: Some(ErrorPayload::new(
+                PublicErrorCode::IpcProtocolError,
+                "response frame too large",
+            )),
+        };
+
+        match encode_framed(&fallback) {
+            Ok(fallback_encoded) => {
+                let _ = self.0.send(fallback_encoded).await;
+            }
+            Err(FrameEncodeError::Oversized { len }) => {
+                warn!(
+                    "Dropping oversized fallback IPC response ({len} > {MAX_IPC_LINE_BYTES} bytes)"
+                )
+            }
+            Err(FrameEncodeError::Encode(error)) => {
+                warn!("Failed to encode IPC fallback response: {error}")
+            }
+        }
     }
 }
 
-/// Deal with a message that will not fit in one frame.
+/// Forward one broadcast frame to the client.
 ///
-/// A client waiting on a response still needs an answer, so the response is
-/// replaced by a small protocol error carrying the same request id. A pushed
-/// event has nobody waiting on it and is dropped instead.
-async fn send_oversized_fallback(msg: &ServerMessage, len: usize, write_tx: &mpsc::Sender<String>) {
-    let ServerMessage::Response { id, .. } = msg else {
-        warn!("Dropping oversized IPC message ({len} > {MAX_IPC_LINE_BYTES} bytes)");
-        return;
-    };
-
-    let fallback = ServerMessage::Response {
-        id: id.clone(),
-        ok: false,
-        result: None,
-        error: Some(ErrorPayload::new(
-            PublicErrorCode::IpcProtocolError,
-            "response frame too large",
-        )),
-    };
-
-    match encode_framed(&fallback) {
-        Ok(fallback_encoded) => {
-            let _ = write_tx.send(fallback_encoded).await;
+/// The three broadcast branches of the session loop differ only in which
+/// receiver they read; what they do with the result is this. A closed channel
+/// means the daemon is going away and the session ends with it, while lag only
+/// means this client fell behind and is worth a log line.
+async fn forward_broadcast(
+    result: std::result::Result<ServerMessage, RecvError>,
+    topic: Topic,
+    writer: &SessionWriter,
+) -> SessionControl {
+    match result {
+        Ok(msg) => {
+            writer.send(&msg).await;
+            SessionControl::Continue
         }
-        Err(FrameEncodeError::Oversized { len }) => {
-            warn!("Dropping oversized fallback IPC response ({len} > {MAX_IPC_LINE_BYTES} bytes)")
+        Err(RecvError::Lagged(n)) => {
+            warn!("{} broadcast lagged {n}", topic.as_str());
+            SessionControl::Continue
         }
-        Err(FrameEncodeError::Encode(error)) => {
-            warn!("Failed to encode IPC fallback response: {error}")
-        }
+        Err(RecvError::Closed) => SessionControl::Close,
     }
 }
 
@@ -259,7 +314,7 @@ async fn handle_line(
     line: String,
     subs: &mut SessionSubscriptions,
     command_tx: &mpsc::Sender<CommandDispatch>,
-    write_tx: &mpsc::Sender<String>,
+    writer: &SessionWriter,
 ) -> SessionControl {
     let msg = match decode::<ClientMessage>(&line) {
         Ok(m) => m,
@@ -271,27 +326,12 @@ async fn handle_line(
 
     match msg {
         ClientMessage::Command { id, command } => {
-            handle_command(id, command, command_tx, write_tx).await
+            handle_command(id, command, command_tx, writer).await
         }
         ClientMessage::Subscribe { id, topics } => {
-            handle_subscribe(id, topics, subs, command_tx, write_tx).await
+            handle_subscribe(id, topics, subs, command_tx, writer).await
         }
     }
-}
-
-/// Tell the client its request was rejected.
-///
-/// Every rejection in this module also ends the session, so the `Close` that
-/// stops the read loop is part of this helper rather than a line each caller
-/// has to remember to write after it.
-async fn reject(
-    id: String,
-    code: PublicErrorCode,
-    message: &str,
-    write_tx: &mpsc::Sender<String>,
-) -> SessionControl {
-    send_encoded(&err_response(id, code, message), write_tx).await;
-    SessionControl::Close
 }
 
 /// Hand one command to the executor and answer the client when it replies.
@@ -299,16 +339,20 @@ async fn handle_command(
     id: String,
     command: CommandPayload,
     command_tx: &mpsc::Sender<CommandDispatch>,
-    write_tx: &mpsc::Sender<String>,
+    writer: &SessionWriter,
 ) -> SessionControl {
     if let Err(error) = validate_ipc_request_id(&id) {
-        return reject(id, PublicErrorCode::IpcProtocolError, &error, write_tx).await;
+        return writer
+            .reject(id, PublicErrorCode::IpcProtocolError, &error)
+            .await;
     }
     if let Err(error) = validate_command_name(&command.name) {
-        return reject(id, PublicErrorCode::IpcProtocolError, &error, write_tx).await;
+        return writer
+            .reject(id, PublicErrorCode::IpcProtocolError, &error)
+            .await;
     }
 
-    let write_tx = write_tx.clone();
+    let writer = writer.clone();
     let id_clone = id.clone();
     let (reply_tx, reply_rx) = oneshot::channel();
     if command_tx
@@ -320,13 +364,13 @@ async fn handle_command(
         .await
         .is_err()
     {
-        return reject(
-            id_clone,
-            PublicErrorCode::ServerError,
-            "command handler unavailable",
-            &write_tx,
-        )
-        .await;
+        return writer
+            .reject(
+                id_clone,
+                PublicErrorCode::ServerError,
+                "command handler unavailable",
+            )
+            .await;
     }
 
     // Waiting for the reply here would stop this session reading anything
@@ -341,7 +385,7 @@ async fn handle_command(
                 "command handler dropped",
             ),
         };
-        send_encoded(&response, &write_tx).await;
+        writer.send(&response).await;
     });
 
     SessionControl::Continue
@@ -355,16 +399,18 @@ async fn handle_subscribe(
     topics: Vec<String>,
     subs: &mut SessionSubscriptions,
     command_tx: &mpsc::Sender<CommandDispatch>,
-    write_tx: &mpsc::Sender<String>,
+    writer: &SessionWriter,
 ) -> SessionControl {
     if let Err(error) = validate_ipc_request_id(&id) {
-        return reject(id, PublicErrorCode::IpcProtocolError, &error, write_tx).await;
+        return writer
+            .reject(id, PublicErrorCode::IpcProtocolError, &error)
+            .await;
     }
 
     let topics = match normalize_subscribe_topics(topics) {
         Ok(topics) => topics,
         Err(error) => {
-            send_encoded(&error.to_protocol_response(id), write_tx).await;
+            writer.send(&error.to_protocol_response(id)).await;
             return SessionControl::Close;
         }
     };
@@ -382,21 +428,18 @@ async fn handle_subscribe(
         result: Some(serde_json::json!({ "subscribed": topics })),
         error: None,
     };
-    send_encoded(&ack, write_tx).await;
+    writer.send(&ack).await;
 
     if needs_initial_state {
-        send_initial_state(command_tx, write_tx).await;
+        send_initial_state(command_tx, writer).await;
     }
 
     SessionControl::Continue
 }
 
 /// Push the current snapshot to a session that has just subscribed to `state`.
-async fn send_initial_state(
-    command_tx: &mpsc::Sender<CommandDispatch>,
-    write_tx: &mpsc::Sender<String>,
-) {
-    let write_tx = write_tx.clone();
+async fn send_initial_state(command_tx: &mpsc::Sender<CommandDispatch>, writer: &SessionWriter) {
+    let writer = writer.clone();
     let (reply_tx, reply_rx) = oneshot::channel();
     let dispatch = CommandDispatch {
         id: STATE_INIT_REQUEST_ID.to_string(),
@@ -421,7 +464,7 @@ async fn send_initial_state(
                         topic: Topic::State,
                         data,
                     };
-                    send_encoded(&state_event, &write_tx).await;
+                    writer.send(&state_event).await;
                 }
                 _ => {
                     warn!("Ignoring malformed state-init response");
@@ -441,48 +484,36 @@ fn err_response(id: String, code: PublicErrorCode, message: &str) -> ServerMessa
 }
 
 fn sanitize_response_id(response: ServerMessage, request_id: &str) -> ServerMessage {
-    match response {
-        ServerMessage::Response {
-            id,
-            ok,
-            result,
-            error,
-        } => {
-            if id == request_id && validate_ipc_request_id(&id).is_ok() {
-                return ServerMessage::Response {
-                    id,
-                    ok,
-                    result,
-                    error,
-                };
-            }
+    let ServerMessage::Response { ref id, .. } = response else {
+        warn!("Malformed command handler response type for request {request_id}");
+        return err_response(
+            request_id.to_string(),
+            PublicErrorCode::IpcProtocolError,
+            "malformed command handler response",
+        );
+    };
 
-            if id != request_id {
-                warn!("Mismatched response id from command handler ({id}), expected {request_id}");
-            } else {
-                warn!(
-                    "Malformed response id from command handler ({id}), replacing for request {request_id}"
-                );
-            }
-            err_response(
-                request_id.to_string(),
-                PublicErrorCode::IpcProtocolError,
-                if id == request_id {
-                    "malformed response id"
-                } else {
-                    "response id mismatch"
-                },
-            )
-        }
-        _ => {
-            warn!("Malformed command handler response type for request {request_id}");
-            err_response(
-                request_id.to_string(),
-                PublicErrorCode::IpcProtocolError,
-                "malformed command handler response",
-            )
-        }
+    if id != request_id {
+        warn!("Mismatched response id from command handler ({id}), expected {request_id}");
+        return err_response(
+            request_id.to_string(),
+            PublicErrorCode::IpcProtocolError,
+            "response id mismatch",
+        );
     }
+
+    if validate_ipc_request_id(id).is_err() {
+        warn!(
+            "Malformed response id from command handler ({id}), replacing for request {request_id}"
+        );
+        return err_response(
+            request_id.to_string(),
+            PublicErrorCode::IpcProtocolError,
+            "malformed response id",
+        );
+    }
+
+    response
 }
 
 #[cfg(unix)]
@@ -551,6 +582,7 @@ mod tests {
     #[tokio::test]
     async fn reject_empty_subscribe() {
         let (write_tx, mut write_rx) = mpsc::channel::<String>(4);
+        let writer = SessionWriter(write_tx);
         let (command_tx, _command_rx) = mpsc::channel::<CommandDispatch>(4);
         let mut subs = SessionSubscriptions::default();
 
@@ -562,7 +594,7 @@ mod tests {
             .unwrap(),
             &mut subs,
             &command_tx,
-            &write_tx,
+            &writer,
         )
         .await;
         assert_eq!(handled, SessionControl::Close);
@@ -585,6 +617,7 @@ mod tests {
     #[tokio::test]
     async fn reject_too_many_subscribe_topics() {
         let (write_tx, mut write_rx) = mpsc::channel::<String>(4);
+        let writer = SessionWriter(write_tx);
         let (command_tx, _command_rx) = mpsc::channel::<CommandDispatch>(4);
         let mut subs = SessionSubscriptions::default();
 
@@ -599,7 +632,7 @@ mod tests {
             .unwrap(),
             &mut subs,
             &command_tx,
-            &write_tx,
+            &writer,
         )
         .await;
         assert_eq!(handled, SessionControl::Close);
@@ -622,6 +655,7 @@ mod tests {
     #[tokio::test]
     async fn deduplicate_subscribe_topics_in_ack() {
         let (write_tx, mut write_rx) = mpsc::channel::<String>(4);
+        let writer = SessionWriter(write_tx);
         let (command_tx, _command_rx) = mpsc::channel::<CommandDispatch>(4);
         let mut subs = SessionSubscriptions::default();
 
@@ -639,7 +673,7 @@ mod tests {
             .unwrap(),
             &mut subs,
             &command_tx,
-            &write_tx,
+            &writer,
         )
         .await;
         assert_eq!(handled, SessionControl::Continue);
@@ -674,18 +708,17 @@ mod tests {
     #[tokio::test]
     async fn oversized_response_message_uses_protocol_error_fallback() {
         let (write_tx, mut write_rx) = mpsc::channel::<String>(4);
+        let writer = SessionWriter(write_tx);
 
         let huge = "x".repeat(MAX_IPC_LINE_BYTES);
-        send_encoded(
-            &ServerMessage::Response {
+        writer
+            .send(&ServerMessage::Response {
                 id: "oversized-1".to_string(),
                 ok: true,
                 result: Some(serde_json::json!({ "data": huge })),
                 error: None,
-            },
-            &write_tx,
-        )
-        .await;
+            })
+            .await;
 
         let resp = write_rx.recv().await.unwrap();
         let msg = decode::<ServerMessage>(&resp).unwrap();
@@ -706,16 +739,15 @@ mod tests {
     #[tokio::test]
     async fn oversized_event_is_dropped() {
         let (write_tx, mut write_rx) = mpsc::channel::<String>(4);
+        let writer = SessionWriter(write_tx);
         let huge = "x".repeat(MAX_IPC_LINE_BYTES);
 
-        send_encoded(
-            &ServerMessage::Event {
+        writer
+            .send(&ServerMessage::Event {
                 topic: Topic::Logs,
                 data: serde_json::json!({ "data": huge }),
-            },
-            &write_tx,
-        )
-        .await;
+            })
+            .await;
 
         assert!(write_rx.try_recv().is_err());
     }
@@ -723,6 +755,7 @@ mod tests {
     #[tokio::test]
     async fn reject_command_with_invalid_request_id() {
         let (write_tx, mut write_rx) = mpsc::channel::<String>(4);
+        let writer = SessionWriter(write_tx);
         let (command_tx, _command_rx) = mpsc::channel::<CommandDispatch>(4);
         let mut subs = SessionSubscriptions::default();
 
@@ -737,7 +770,7 @@ mod tests {
             .unwrap(),
             &mut subs,
             &command_tx,
-            &write_tx,
+            &writer,
         )
         .await;
         assert_eq!(handled, SessionControl::Close);
@@ -760,6 +793,7 @@ mod tests {
     #[tokio::test]
     async fn reject_command_with_invalid_command_name() {
         let (write_tx, mut write_rx) = mpsc::channel::<String>(4);
+        let writer = SessionWriter(write_tx);
         let (command_tx, _command_rx) = mpsc::channel::<CommandDispatch>(4);
         let mut subs = SessionSubscriptions::default();
 
@@ -774,7 +808,7 @@ mod tests {
             .unwrap(),
             &mut subs,
             &command_tx,
-            &write_tx,
+            &writer,
         )
         .await;
         assert_eq!(handled, SessionControl::Close);
@@ -797,6 +831,7 @@ mod tests {
     #[tokio::test]
     async fn replace_malformed_handler_response_id_with_protocol_error() {
         let (write_tx, mut write_rx) = mpsc::channel::<String>(4);
+        let writer = SessionWriter(write_tx);
         let (command_tx, mut command_rx) = mpsc::channel::<CommandDispatch>(4);
         let mut subs = SessionSubscriptions::default();
 
@@ -811,7 +846,7 @@ mod tests {
             .unwrap(),
             &mut subs,
             &command_tx,
-            &write_tx,
+            &writer,
         )
         .await;
         assert_eq!(handled, SessionControl::Continue);

@@ -10,9 +10,8 @@
 use std::path::Path;
 
 use crate::{
-    domain::{command::Command, parser, result::Result},
+    domain::{command::Command, names::checked_name, parser, result::Result},
     ipc::protocol::{CommandPayload, ServerCommand, ServerMessage},
-    support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len},
     tui::session::send_command,
 };
 
@@ -122,8 +121,7 @@ fn command_to_payload(cmd: Command) -> std::result::Result<CommandPayload, Strin
 }
 
 fn sanitize_target_arg(value: &str) -> std::result::Result<String, String> {
-    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
-        .map_err(|error| format!("{error}"))
+    checked_name(value).map_err(|error| format!("{error}"))
 }
 
 /// How to describe a successful reply that carried no human-readable
@@ -223,8 +221,9 @@ fn summarize_json(value: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_TARGET_TOKEN_LENGTH, command_to_payload};
+    use super::command_to_payload;
     use crate::domain::command::Command;
+    use crate::support::validation::MAX_TARGET_TOKEN_LENGTH;
 
     #[test]
     fn command_to_payload_rejects_invalid_target_values() {
