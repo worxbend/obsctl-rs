@@ -36,10 +36,18 @@ pub(super) fn render(f: &mut ratatui::Frame, model: &TuiModel) -> Hitboxes {
 
     if !model.connected_to_daemon {
         widgets::connection::render_unavailable(f, f.area(), model);
-        return Hitboxes {
-            view: HitView::Disconnected,
-            ..Hitboxes::default()
-        };
+        // The editor can be opened before the daemon goes away, and its keys
+        // are swallowed for as long as it is open — so it has to stay on
+        // screen here too, rather than leaving the user typing at something
+        // invisible.
+        return overlay_scene_profile(
+            f,
+            model,
+            Hitboxes {
+                view: HitView::Disconnected,
+                ..Hitboxes::default()
+            },
+        );
     }
 
     widgets::header::render(f, areas.header, model);
@@ -63,7 +71,7 @@ pub(super) fn render(f: &mut ratatui::Frame, model: &TuiModel) -> Hitboxes {
     // Last, so the which-key popup floats above the dashboard.
     widgets::which_key::render(f, f.area(), model);
 
-    Hitboxes {
+    let hits = Hitboxes {
         view: HitView::Main,
         scenes: areas.scenes,
         audio: areas.audio,
@@ -72,12 +80,40 @@ pub(super) fn render(f: &mut ratatui::Frame, model: &TuiModel) -> Hitboxes {
         logs: areas.logs,
         palette: areas.palette,
         settings_list: Rect::default(),
+        scene_profile_list: Rect::default(),
         offsets: ListOffsets {
             scenes: scenes_offset,
             profiles: profiles_offset,
             collections: collections_offset,
             settings: 0,
+            scene_profile: 0,
         },
+    };
+
+    overlay_scene_profile(f, model, hits)
+}
+
+/// Draw the scene-profile editor on top of whatever the frame already holds,
+/// and say so in the hitboxes when it is up.
+///
+/// It goes on last — above the which-key popup as well — because it is modal:
+/// it owns the keyboard while it is open, and the panel rects it covers must
+/// stop answering clicks even though the frame still drew them. The rects
+/// themselves are left alone so they are ready again the moment it closes.
+fn overlay_scene_profile(f: &mut ratatui::Frame, model: &TuiModel, hits: Hitboxes) -> Hitboxes {
+    let (scene_profile_list, offset) = widgets::scene_profile::render(f, f.area(), model);
+    if model.scene_profile.is_some() {
+        Hitboxes {
+            view: HitView::SceneProfile,
+            scene_profile_list,
+            offsets: ListOffsets {
+                scene_profile: offset,
+                ..hits.offsets
+            },
+            ..hits
+        }
+    } else {
+        hits
     }
 }
 

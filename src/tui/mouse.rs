@@ -14,7 +14,7 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 use crate::tui::{
     input::TuiAction,
-    model::{FocusPanel, TuiModel},
+    model::{FocusPanel, SceneProfileStage, TuiModel},
 };
 
 /// Rows a wheel tick moves. Three matches the usual terminal wheel step.
@@ -28,6 +28,9 @@ pub enum HitView {
     Settings,
     /// The "daemon unavailable" screen — a click anywhere retries.
     Disconnected,
+    /// The scene-profile editor is up. It is modal, so it answers every
+    /// mouse event itself and nothing reaches the dashboard behind it.
+    SceneProfile,
 }
 
 /// Where the last frame put each interactive region. Zero-sized rects are
@@ -43,6 +46,10 @@ pub struct Hitboxes {
     pub logs: Rect,
     pub palette: Rect,
     pub settings_list: Rect,
+    /// The scene-profile editor's list, as the *content* rect — the modal
+    /// draws it inside its border rather than as a bordered panel of its own,
+    /// so unlike the fields above this one has no border to subtract.
+    pub scene_profile_list: Rect,
     /// Which item each scrollable list drew first, as reported by Ratatui
     /// after it laid the list out. See [`ListOffsets`].
     pub offsets: ListOffsets,
@@ -66,6 +73,7 @@ pub struct ListOffsets {
     pub profiles: usize,
     pub collections: usize,
     pub settings: usize,
+    pub scene_profile: usize,
 }
 
 /// Which offset belongs to which panel, in one place.
@@ -163,7 +171,13 @@ fn index_at(
 /// produced these hitboxes — not a re-derivation of where it ought to have
 /// scrolled to.
 fn index_at_row(area: Rect, heights: &[u16], first: usize, y: u16) -> Option<usize> {
-    let inner = inner(area);
+    index_at_content_row(inner(area), heights, first, y)
+}
+
+/// [`index_at_row`] for a list whose content rect is already known, which is
+/// the case inside the scene-profile modal: its list is one section of the
+/// popup's interior, not a bordered panel of its own.
+fn index_at_content_row(inner: Rect, heights: &[u16], first: usize, y: u16) -> Option<usize> {
     if inner.height == 0 || y < inner.y || y >= inner.y.saturating_add(inner.height) {
         return None;
     }
@@ -193,7 +207,59 @@ pub fn handle_mouse(model: &TuiModel, hits: &Hitboxes, event: MouseEvent) -> Opt
             _ => None,
         },
         HitView::Settings => settings_mouse(model, hits, event, pos),
+        // The editor is modal: it answers what it can and swallows the rest.
+        // Nothing may fall through to the dashboard it covers, which would
+        // switch a scene the user cannot even see.
+        HitView::SceneProfile => scene_profile_mouse(model, hits, event, pos),
         HitView::Main => main_mouse(model, hits, event, pos),
+    }
+}
+
+/// Mouse inside the scene-profile editor: the wheel and a left-click move its
+/// cursor, and a right-click is the Esc of whichever stage is up.
+///
+/// Deliberately no "click the selected row again to act on it" as the settings
+/// list has. There the repeated click applies a theme, which is undone by
+/// picking another; here the stage's Enter either leaves the picker or writes
+/// the config file, and neither belongs on a double-click.
+fn scene_profile_mouse(
+    model: &TuiModel,
+    hits: &Hitboxes,
+    event: MouseEvent,
+    pos: Position,
+) -> Option<TuiAction> {
+    let stage = model.scene_profile.as_ref()?.stage;
+
+    // Right-click is the mouse's Esc throughout the UI, and Esc means a
+    // different thing on each stage of this modal.
+    if matches!(event.kind, MouseEventKind::Down(MouseButton::Right)) {
+        return Some(match stage {
+            SceneProfileStage::Picker => TuiAction::CloseSceneProfiles,
+            SceneProfileStage::Scenes => TuiAction::SceneProfileBack,
+            SceneProfileStage::Naming => TuiAction::SceneProfileNameCancel,
+        });
+    }
+
+    if !contains(hits.scene_profile_list, pos) {
+        return None;
+    }
+    match event.kind {
+        MouseEventKind::ScrollUp => Some(TuiAction::SceneProfileNavUp(WHEEL_ROWS)),
+        MouseEventKind::ScrollDown => Some(TuiAction::SceneProfileNavDown(WHEEL_ROWS)),
+        // Not while a name is being typed: the rows showing through under the
+        // naming overlay belong to the stage behind it, and moving that cursor
+        // out from under a half-typed name is not what a click there means.
+        MouseEventKind::Down(MouseButton::Left) if stage != SceneProfileStage::Naming => {
+            let heights = vec![1u16; model.scene_profile_rows().len()];
+            let index = index_at_content_row(
+                hits.scene_profile_list,
+                &heights,
+                hits.offsets.scene_profile,
+                event.row,
+            )?;
+            Some(TuiAction::SceneProfileSelect(index))
+        }
+        _ => None,
     }
 }
 
@@ -320,6 +386,7 @@ mod tests {
             logs: Rect::new(0, 19, 80, 7),
             palette: Rect::new(0, 26, 80, 4),
             settings_list: Rect::default(),
+            scene_profile_list: Rect::default(),
         }
     }
 

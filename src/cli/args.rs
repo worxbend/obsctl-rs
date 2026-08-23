@@ -92,6 +92,21 @@ pub enum Commands {
         #[arg(value_parser = clap::value_parser!(u8).range(0..=100))]
         percent: u8,
     },
+    // Activate an obsctl scene profile — a named set of scene-visibility
+    // choices — or, with no name, go back to the per-scene `hidden` flags.
+    //
+    // The name is optional rather than a reserved sentinel value ("none",
+    // "off", ...) because any sentinel could also be a real scene profile name;
+    // an absent argument cannot collide with anything. These are plain comments
+    // rather than doc comments because clap would turn a doc comment into help
+    // text, and help text is a user-facing string that cannot go through
+    // `rust_i18n::t!` from an attribute — no other subcommand carries one.
+    SceneProfile {
+        #[arg(value_parser = non_blank_trimmed)]
+        target: Option<String>,
+    },
+    // List the configured scene profiles and which one is active.
+    SceneProfiles,
     DumpConfig,
     ReloadConfig,
     #[command(alias = "stream")]

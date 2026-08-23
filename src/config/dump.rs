@@ -547,6 +547,32 @@ mod tests {
         assert!(merged.audio.inputs.iter().all(|a| a.stale));
     }
 
+    /// `merge` replaces only `scenes` and `audio.inputs`, so scene profiles
+    /// ride through a `dump-config` untouched. In particular a profile that
+    /// hides a scene OBS no longer has keeps that entry: the scene is marked
+    /// stale rather than deleted, and a temporarily missing scene must not
+    /// silently cost the user part of a profile.
+    #[test]
+    fn preserves_scene_profiles_and_the_active_one() {
+        use crate::config::model::SceneProfileConfig;
+
+        let mut config = base_config();
+        config.scene_profiles = vec![SceneProfileConfig {
+            name: "streaming".to_string(),
+            hidden: vec!["OldScene".to_string()],
+        }];
+        config.active_scene_profile = Some("streaming".to_string());
+
+        let obs = ObsResources {
+            scenes: vec!["Main".to_string()],
+            inputs: vec![],
+        };
+        let merged = merge(&config, &obs).unwrap();
+
+        assert_eq!(merged.scene_profiles, config.scene_profiles);
+        assert_eq!(merged.active_scene_profile.as_deref(), Some("streaming"));
+    }
+
     #[test]
     fn preserves_server_and_reconnect_settings() {
         let mut config = base_config();

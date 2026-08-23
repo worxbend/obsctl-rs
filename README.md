@@ -27,6 +27,7 @@ A single Rust binary: a daemon that owns the OBS connection, a live TUI, and a s
 | ⚡ **Snappy, non-blocking input** | Volume, mute, and scene switches apply optimistically with debounced writes, so the UI never stalls on a round-trip. |
 | 🧩 **Daemon-first architecture** | One process owns the OBS WebSocket. The TUI and CLI are thin IPC clients over a local Unix socket. |
 | 🎨 **29 built-in themes** | btop-style live theme picker with whole-UI preview, plus fully custom palettes — down to a TTY-safe `mono` mode. |
+| 🙈 **Scene profiles** | Name a set of scenes to hide — utility and nested scenes stop cluttering every list. Switch sets from the TUI (`<Space>P`), the palette, or the CLI. |
 | 🤖 **Scriptable CLI** | Every action has a proxy command with a stable `--json` envelope and documented exit codes — perfect for hotkeys and automation. |
 | 🔒 **Secret-safe by design** | Passwords come from env vars, never plaintext config; logs and error messages are run through a redaction boundary. |
 | 🌍 **Localizable** | Ships English + Ukrainian, with drop-in runtime locale files — no recompile required. |
@@ -44,7 +45,7 @@ A single Rust binary: a daemon that owns the OBS connection, a live TUI, and a s
 
 A real-time, themeable command center with animated gradient chrome, rounded/heavy focus borders, Unicode symbols, and responsive layouts. The advanced interface is enabled by default; set `ui.advanced_ui: false` for a simplified ASCII-safe TTY mode, or `ui.show_icons: false` to hide icons while keeping the other advanced elements.
 
-- 🎬 **Scenes panel** (`s`) — navigate with `j`/`k` or arrows, `Enter` to switch; the newly active scene briefly flashes
+- 🎬 **Scenes panel** (`s`) — navigate with `j`/`k` or arrows, `Enter` to switch; the newly active scene briefly flashes. Scenes marked hidden are left out of the list, and `<Space>P` opens the scene-profile editor: a modal that lists *every* scene (hidden ones dimmed), `t` hides or reveals the one under the cursor, `n` names the set, and `Enter` saves it to the config as a named **scene profile** you can switch between
 - 🔊 **Audio matrix** (`a`) — OBS's Audio Mixer in the terminal: one bordered vertical channel strip per input, each with a fader, a green/yellow/red dB meter, and its own dB scale. `←`/`→` (or `h`/`l`) picks a strip, `↑`/`↓` (or `k`/`j`) nudges its volume ±5%, `m` mutes
 - 🗂️ **Profiles panel** (`p`) — `Enter` to switch OBS profiles
 - 📚 **Collections panel** (`c`) — `Enter` to switch OBS scene collections
@@ -54,7 +55,7 @@ A real-time, themeable command center with animated gradient chrome, rounded/hea
 - 📡 **Telemetry deck** — active scene, FPS, stream bitrate with a sparkline, and braille meters for CPU and memory that mark the session peak alongside the live value
 - 🪵 **Logs panel** — severity glyphs, colored targets/timestamps, and semantic highlighting for actions, status/error keywords, commands, numbers, and live OBS scene/profile/collection/input names
 - ⚡ **Stats panel** — appears beside the logs the moment you go live: active FPS against the rate you've been holding, average frame render time as a share of the frame budget, and render/output frames skipped. Every row is colored by health and topped with a plain-language verdict (`HEALTHY` / `STRAINED` / `DROPPING`). Drop counts are measured from the start of the current stream, not OBS's since-launch totals
-- 🎛️ **Command palette** (`:`) — `:scene`, `:profile`, `:collection`, `:mute`, `:vol`, `:stream`, `:rec`; `Tab` completes, `Ctrl-W`/`Ctrl-U` edit the line, and results stream in with a typewriter animation
+- 🎛️ **Command palette** (`:`) — `:scene`, `:profile`, `:collection`, `:mute`, `:vol`, `:stream`, `:rec`, `:scene-profile`; `Tab` completes, `Ctrl-W`/`Ctrl-U` edit the line, and results stream in with a typewriter animation
 - 🧭 **Header** — animated gradient identity, daemon/OBS connection chips, active scene/profile, and a render frame indicator
 - 🌈 **Settings view** (`F2`, `Ctrl-T`, `<Space>ut`, or `:themes`) — btop-style theme picker with live full-UI preview; `Enter` persists, `Esc` reverts
 - 🎇 A responsive animated splash (~2s, skippable by any keypress) with a large block logo, slither and liquid-wave loaders, a shimmering `Preparing...` braille band, a multi-color progress rail, and staged boot messages
@@ -180,6 +181,15 @@ ui:
   #   accent: "#D97757"
   # locale: "en"        # "en" or "uk" — see Localization below
 scenes: []
+  # - name: "Utility BG"    # as OBS spells it
+  #   alias: "bg"
+  #   hidden: true          # leave it out of every list obsctl shows
+scene_profiles: []
+  # - name: "streaming"
+  #   hidden: ["Utility BG", "Overlay Src"]
+  # - name: "everything"
+  #   hidden: []
+active_scene_profile:       # null, or the name of one of the above
 audio:
   inputs: []
 keymap:
@@ -190,6 +200,44 @@ keymap:
 ```
 
 > 🔒 **Security:** never set `connection.password` in plain text. Use `password_env` to point to an environment variable name.
+
+### Hiding scenes and scene profiles
+
+OBS projects often carry scenes that exist only to be nested inside other scenes. They are noise in a
+scene list, so obsctl can hide them. There are two layers, and the second wins whenever it is switched on.
+
+**The baseline** is `scenes[].hidden`. Set it to `true` on a scene and obsctl leaves that scene out of
+the TUI scene list and out of everywhere else obsctl lists scenes. The scene still exists in OBS and can
+still be switched to by name; it is only hidden from obsctl's own lists.
+
+**A scene profile** is a *named* set of those choices — `scene_profiles[]` above, each with a `name` and
+a `hidden` list of scene names spelled as OBS spells them. `active_scene_profile` names the one in
+effect, and matching is case-insensitive. The word "profile" is doing double duty here, so to be
+explicit: an obsctl **scene profile** has nothing to do with an **OBS profile** (`obsctl profile`, the
+`Profiles` panel). One is a set of scene-visibility choices that only obsctl knows about; the other is
+OBS's own encoder and output configuration.
+
+While a scene profile is active it **replaces** the per-scene flags rather than adding to them. Every
+scene the active profile lists is hidden and every scene it does not list is visible, even one whose
+`scenes[]` entry says `hidden: true`. That is what lets a profile *reveal* a scene, and what makes a
+profile with an empty `hidden` list mean "show everything". With no profile active, the `scenes[].hidden`
+flags are the answer and nothing about the default behavior changes.
+
+If `active_scene_profile` names a profile that is not defined, that is a **warning**, not an error:
+obsctl logs it, falls back to the `scenes[].hidden` baseline, and carries on. A profile that hides a
+scene name absent from a *populated* `scenes:` list is also only a warning, and such entries are never
+pruned by `dump-config` — a scene that is temporarily missing must not cost you the profile. An empty
+`scenes: []`, which is what `obsctl init` writes and what ships above, is not evidence of anything and
+produces no such warnings; run `dump-config` to fill the list in from OBS.
+
+Two caveats about writing this section by hand:
+
+- **Any command that writes the config rewrites it from the parsed model.** That includes `dump-config`
+  and every scene-profile command (`obsctl scene-profile`, and saving a profile from the TUI). Comments
+  and key ordering in a hand-written config do not survive such a write.
+- **A config containing `scene_profiles:` will not load on an obsctl older than this release.** Unknown
+  top-level config keys are rejected outright, so an older binary reports a config error rather than
+  ignoring the key.
 
 ### TTY compatibility
 
@@ -299,6 +347,8 @@ Global options:
 | `obsctl toggle-mute <target>` | Toggle audio input mute |
 | `obsctl vol <target> <0-100>` | Set input volume by percent |
 | `obsctl volume <target> <0-100>` | Alias for `vol` |
+| `obsctl scene-profile [NAME]` | Activate the named scene profile; with no name, clear the active one |
+| `obsctl scene-profiles` | List the configured scene profiles and which one is active |
 | `obsctl dump-config` | Fetch OBS state and merge into config |
 | `obsctl reload-config` | Reload config and rebroadcast state |
 | `obsctl reconnect` | Ask daemon to reconnect to OBS |
@@ -349,7 +399,8 @@ Press `<Space>` and the which-key popup lists the next key. Groups are marked `+
 
 | Sequence | Action |
 |----------|--------|
-| `<Space>f` `s`/`p`/`c`/`a` | Open the palette pre-filled with `scene` / `profile` / `collection` / `toggle-mute` |
+| `<Space>f` `s`/`p`/`c`/`a`/`P` | Open the palette pre-filled with `scene` / `profile` / `collection` / `toggle-mute` / `scene-profile` |
+| `<Space>P` | Open the scene-profile editor (note the capital: `<Space>p` is the panel group) |
 | `<Space>p` `s`/`a`/`p`/`c` | Focus the scenes / audio / profiles / collections panel |
 | `<Space>s` `s`/`r` | Toggle streaming / recording |
 | `<Space>c` `r`/`d`/`v` | Reload / dump / validate config |
@@ -374,6 +425,36 @@ In the settings view: `↑`/`↓` (or `j`/`k`, `gg`/`G`, and count prefixes) liv
 theme across the whole UI, `Enter` applies and persists it to `ui.theme`, `Esc`/`F2`/`q`
 reverts to the previous theme.
 
+### Scene-profile editor (`<Space>P`)
+
+A modal over the dashboard. While it is open it takes every keystroke, so leader sequences
+and panel motions are inert until it closes. It opens on a list of the scene profiles you
+have, plus a "new scene profile" row at the top.
+
+| Stage | Key | Action |
+|-------|-----|--------|
+| Picker | `j`/`k` (or `↓`/`↑`) | Move between rows |
+| Picker | `Enter` | Edit the selected profile, or start a new one seeded from what is hidden right now |
+| Picker | `a` | Activate the selected profile and close |
+| Picker | `c` | Clear the active profile (back to the `scenes[].hidden` baseline) and close |
+| Picker | `d` | Delete the selected profile |
+| Picker | `Esc` or `q` | Close |
+| Scenes | `j`/`k` (or `↓`/`↑`) | Move between scenes — **all** of them, hidden ones dimmed |
+| Scenes | `t` | Hide/reveal the scene under the cursor in this profile |
+| Scenes | `n` | Name or rename the profile |
+| Scenes | `Enter` | Save the profile to the config (asks for a name first if it has none) |
+| Scenes | `Esc` | Back to the picker, discarding the edit |
+| Naming | any printable key, `Backspace`, `Ctrl-W`, `Ctrl-U` | Edit the name |
+| Naming | `Enter` / `Esc` | Accept the name / cancel and restore the previous one |
+
+`q` is deliberately unbound while toggling scenes, so the muscle-memory quit key cannot
+throw away unsaved toggles. Renaming a profile is a single save that moves the existing
+entry, so a rename keeps the profile's place in the list and keeps it active if it was
+active. A name another profile already uses is refused while you are still typing it,
+because saving under it would replace that other profile and there is no backup file to
+undo that with. Saving is performed by the daemon, which rewrites the config file — see
+[Hiding scenes and scene profiles](#hiding-scenes-and-scene-profiles).
+
 ### Mouse
 
 Mouse reporting is on by default; set `ui.mouse: false` to turn it off and get the
@@ -391,6 +472,7 @@ terminals fall back to that behavior while `Shift` is held).
 | Right-click | Cancel — closes the palette, the which-key popup, or the settings view |
 | Click on the "daemon unavailable" screen | Retry the connection |
 | Click a theme in the settings view | Preview it; click it again to apply |
+| Click or scroll a row in the scene-profile editor | Move its cursor (the editor is modal, so nothing reaches the dashboard behind it) |
 
 ### TUI Command Palette
 
@@ -409,6 +491,10 @@ Type `:` to open the palette, then use any of:
 :unmute <target>
 :toggle-mute <target>
 :vol <target> <0-100>
+:scene-profile <name>
+:set-scene-profile <name>
+:scene-profile-off
+:scene-profile-clear
 :status
 :server-status
 :obs-status
@@ -463,7 +549,7 @@ These mappings are separate because the same underlying condition can have diffe
 
 `obsctl` is daemon-first in normal use. Proxy commands connect to the local Unix socket, send one IPC command to the already-running daemon, wait for the correlated response, print the result, and exit. They do not connect directly to OBS and they do not auto-start the daemon.
 
-Proxy commands include `status`, `server-status`, `obs-status`, `scene`, `profile`, `mute`, `unmute`, `toggle-mute`, `vol`, `volume`, `dump-config`, `reload-config`, `reconnect`, and `shutdown-server`.
+Proxy commands include `status`, `server-status`, `obs-status`, `scene`, `profile`, `mute`, `unmute`, `toggle-mute`, `vol`, `volume`, `scene-profile`, `scene-profiles`, `dump-config`, `reload-config`, `reconnect`, and `shutdown-server`.
 
 Without `--json`, command output is concise and human-readable. Successful command results are printed to stdout. Diagnostics and errors are printed to stderr.
 
@@ -611,11 +697,62 @@ Error response:
 {"id":"req-000001","type":"response","ok":false,"error":{"code":"OBS_UNAVAILABLE","message":"OBS is unavailable"}}
 ```
 
+Scene-profile commands:
+
+```json
+{"id":"req-000003","type":"command","command":{"name":"set_scene_profile","target":"streaming"}}
+{"id":"req-000004","type":"command","command":{"name":"clear_scene_profile"}}
+{"id":"req-000005","type":"command","command":{"name":"delete_scene_profile","target":"streaming"}}
+{"id":"req-000006","type":"command","command":{"name":"list_scene_profiles"}}
+{"id":"req-000007","type":"command","command":{"name":"save_scene_profile","target":"streaming","hidden":["Utility BG","Overlay Src"]}}
+{"id":"req-000008","type":"command","command":{"name":"save_scene_profile","target":"night","hidden":["Utility BG"],"rename_from":"streaming"}}
+```
+
+`save_scene_profile` is the only command carrying a list, and the only one with an optional argument.
+`target` and `hidden` are mandatory: `hidden` must be present and must be an array, and an empty array
+means "this profile hides nothing". A profile may name **at most 128 scenes**, and each name is subject
+to the same 256-character, no-control-character limit as any other target; a payload that breaks either
+rule is rejected whole with `COMMAND_PARSE_ERROR`, as is one carrying any key other than these three.
+
+`rename_from` names the profile the save is replacing, and is what makes a rename one command instead
+of a save followed by a delete. Given it, the daemon replaces that entry where it stands — keeping its
+position in the list, and moving `active_scene_profile` onto the new name if that profile was the
+active one. Renaming onto a name a *different* profile already answers to is `CONFIG_INVALID` rather
+than a silent overwrite. Left out (the request above it), the save is a plain upsert: it creates the
+profile, or replaces one of the same name whole. The reply reports `created` and `renamed` so a client
+can tell which of the three happened.
+
+Naming a scene profile that does not exist in `set_scene_profile` or `delete_scene_profile` is
+`CONFIG_INVALID`, as is any of the four mutating commands on a daemon started without a config file
+path, or on one whose config file is present but cannot be read — that file is left untouched rather
+than replaced from the daemon's in-memory copy, because unlike `dump-config` these commands write no
+backup. `list_scene_profiles` needs none of that: it answers from memory and never touches the file.
+
+All four mutating commands (`set`, `clear`, `save`, `delete`) write the config file and then publish a
+fresh `state` snapshot, so a client does not need to read anything back after one.
+
 State event:
 
 ```json
 {"type":"event","topic":"state","data":{"connected":true}}
 ```
+
+The `state` payload is the full snapshot; the sample above is abbreviated. Its scene-visibility
+fields are `scenes[].hidden` — already resolved by the daemon, so a client renders it directly rather
+than re-deriving it — plus the scene profiles themselves and the active one:
+
+```json
+{"type":"event","topic":"state","data":{
+  "scenes":[{"name":"Main","alias":"main","shortcut":"1","group":"live","active":true,"hidden":false},
+            {"name":"Utility BG","alias":null,"shortcut":null,"group":null,"active":false,"hidden":true}],
+  "scene_profiles":[{"name":"streaming","hidden":["Utility BG"]}],
+  "active_scene_profile":"streaming"}}
+```
+
+`scene_profiles` and `active_scene_profile` were added in this release. Both are optional on the
+wire: a client written against an older snapshot still parses a newer one, and `active_scene_profile`
+is `null` when no profile is in effect. It is only ever a name the daemon can actually resolve — a
+config pointing at a profile that does not exist publishes `null`, not the dangling name.
 
 OBS event:
 

@@ -5,13 +5,59 @@ use time::OffsetDateTime;
 use tokio::sync::{RwLock, RwLockWriteGuard};
 use tracing::debug;
 
-use crate::config::model::{AudioInputConfig, SceneConfig};
+use crate::config::model::{AudioInputConfig, Config, SceneConfig};
+use crate::domain::scene_profiles::SceneVisibility;
 use crate::ipc::{
     protocol::{ServerMessage, Topic},
     session::BroadcastHub,
 };
 use crate::obs::client::ObsEvent;
-use crate::obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState};
+use crate::obs::state::{AudioState, ObsSnapshot, ObsStats, SceneProfileState, SceneState};
+
+/// Everything the config contributes to a snapshot, resolved once.
+///
+/// The store used to take `&[SceneConfig]` and `&[AudioInputConfig]` side by
+/// side in three signatures, which meant every caller re-derived "what does the
+/// config say about this snapshot" for itself. Scene visibility is not a field
+/// that can be read off a `SceneConfig` any more — it depends on which scene
+/// profile is active — so it has to be resolved somewhere, once, and this is
+/// that place. Building the projection is also the only moment a `Config` is
+/// looked at on this path, so a caller cannot forget half of it.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigProjection {
+    pub scenes: Vec<SceneConfig>,
+    pub audio_inputs: Vec<AudioInputConfig>,
+    pub visibility: SceneVisibility,
+    pub scene_profiles: Vec<SceneProfileState>,
+    pub active_scene_profile: Option<String>,
+}
+
+impl ConfigProjection {
+    /// The only place a `Config` becomes snapshot input.
+    ///
+    /// `active_scene_profile` is normalized to the spelling the matching
+    /// profile is stored under, and to `None` when the config names a profile
+    /// that is not defined (or has since been deleted). Publishing the raw
+    /// field would have the snapshot advertise an active profile that is
+    /// missing from the `scene_profiles` list beside it, and a client drawing
+    /// an "active" marker from that would have nothing to mark.
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            scenes: config.scenes.clone(),
+            audio_inputs: config.audio.inputs.clone(),
+            visibility: config.scene_visibility(),
+            scene_profiles: config
+                .scene_profiles
+                .iter()
+                .map(|profile| SceneProfileState {
+                    name: profile.name.clone(),
+                    hidden: profile.hidden.clone(),
+                })
+                .collect(),
+            active_scene_profile: config.active_scene_profile().map(|p| p.name.clone()),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct StateStore {
@@ -109,11 +155,10 @@ impl StateStore {
     pub async fn apply_full_refresh(
         &self,
         refreshed: &RefreshedObsState,
-        scene_cfgs: &[SceneConfig],
-        audio_cfgs: &[AudioInputConfig],
+        projection: &ConfigProjection,
         generation_before: u64,
     ) -> bool {
-        let mut snapshot = build_snapshot(refreshed, scene_cfgs, audio_cfgs);
+        let mut snapshot = build_snapshot(refreshed, projection);
 
         let mut guard = self.inner.write().await;
         // Metrics belong to the stats poller, not to this fetch; carry the
@@ -208,19 +253,26 @@ impl StateStore {
 
     /// Merge scene and audio config metadata into the snapshot and broadcast.
     ///
-    /// Called after config load/reload to attach aliases/shortcuts/groups, so
-    /// subscribers need the new metadata pushed to them the same way every
-    /// other mutation is pushed.
-    pub async fn merge_config(&self, scenes: &[SceneConfig], audio_inputs: &[AudioInputConfig]) {
+    /// Called after config load/reload to attach aliases/shortcuts/groups and
+    /// to settle which scenes are hidden, so subscribers need the new metadata
+    /// pushed to them the same way every other mutation is pushed. Switching
+    /// the active scene profile reaches clients this way too: it is not an OBS
+    /// event, so the `state` snapshot is the only thing that changes.
+    pub async fn merge_config(&self, projection: &ConfigProjection) {
         let mut guard = self.inner.write().await;
         for scene in guard.scenes.iter_mut() {
-            let cfg = scenes.iter().find(|c| c.name == scene.name);
-            apply_scene_config(scene, cfg);
+            let cfg = projection.scenes.iter().find(|c| c.name == scene.name);
+            apply_scene_config(scene, cfg, &projection.visibility);
         }
         for input in guard.audio_inputs.iter_mut() {
-            let cfg = audio_inputs.iter().find(|c| c.name == input.name);
+            let cfg = projection
+                .audio_inputs
+                .iter()
+                .find(|c| c.name == input.name);
             apply_audio_config(input, cfg);
         }
+        guard.scene_profiles = projection.scene_profiles.clone();
+        guard.active_scene_profile = projection.active_scene_profile.clone();
         guard.updated_at = OffsetDateTime::now_utc();
         self.commit(&mut guard);
     }
@@ -290,11 +342,20 @@ impl PolledMetrics {
 /// (`merge_config`) go through here so they cannot disagree about that.
 ///
 /// Only config-derived fields are touched. `active` belongs to OBS.
-fn apply_scene_config(scene: &mut SceneState, cfg: Option<&SceneConfig>) {
+///
+/// `hidden` comes from `visibility`, not from `cfg.hidden`, and this line is
+/// the single point where hidden-ness enters a snapshot. Reading the per-scene
+/// flag here instead would ignore the active scene profile, which is allowed to
+/// both hide a scene the flag leaves visible and reveal one the flag hides.
+fn apply_scene_config(
+    scene: &mut SceneState,
+    cfg: Option<&SceneConfig>,
+    visibility: &SceneVisibility,
+) {
     scene.alias = cfg.and_then(|c| c.alias.clone());
     scene.shortcut = cfg.and_then(|c| c.shortcut.clone());
     scene.group = cfg.and_then(|c| c.group.clone());
-    scene.hidden = cfg.is_some_and(|c| c.hidden);
+    scene.hidden = visibility.is_hidden(&scene.name);
 }
 
 /// Project an audio input's config entry onto its snapshot state, with the
@@ -492,11 +553,7 @@ pub struct RefreshedObsState {
 
 /// Build a full `ObsSnapshot` from a refresh plus the config metadata
 /// (aliases, shortcuts, groups) that OBS itself knows nothing about.
-pub fn build_snapshot(
-    refreshed: &RefreshedObsState,
-    scene_cfgs: &[SceneConfig],
-    audio_cfgs: &[AudioInputConfig],
-) -> ObsSnapshot {
+pub fn build_snapshot(refreshed: &RefreshedObsState, projection: &ConfigProjection) -> ObsSnapshot {
     let current_scene = &refreshed.scenes.current;
 
     let scenes: Vec<SceneState> = refreshed
@@ -509,7 +566,11 @@ pub fn build_snapshot(
                 active: name == current_scene,
                 ..SceneState::default()
             };
-            apply_scene_config(&mut scene, scene_cfgs.iter().find(|c| c.name == *name));
+            apply_scene_config(
+                &mut scene,
+                projection.scenes.iter().find(|c| c.name == *name),
+                &projection.visibility,
+            );
             scene
         })
         .collect();
@@ -528,7 +589,13 @@ pub fn build_snapshot(
                 Some(volume_mul) => state.set_level(volume_mul),
                 None => state.clear_level(),
             }
-            apply_audio_config(&mut state, audio_cfgs.iter().find(|c| c.name == input.name));
+            apply_audio_config(
+                &mut state,
+                projection
+                    .audio_inputs
+                    .iter()
+                    .find(|c| c.name == input.name),
+            );
             state
         })
         .collect();
@@ -546,6 +613,8 @@ pub fn build_snapshot(
         current_profile: refreshed.profiles.current_or_none(),
         scene_collections: refreshed.collections.names.clone(),
         current_scene_collection: refreshed.collections.current_or_none(),
+        scene_profiles: projection.scene_profiles.clone(),
+        active_scene_profile: projection.active_scene_profile.clone(),
         updated_at: OffsetDateTime::now_utc(),
         ..ObsSnapshot::default()
     }
@@ -554,11 +623,34 @@ pub fn build_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::model::{AudioConfig, SceneProfileConfig};
     use crate::ipc::session::BroadcastHub;
 
     fn make_store() -> StateStore {
         let hub = Arc::new(BroadcastHub::new());
         StateStore::new(hub)
+    }
+
+    /// A projection built the way the daemon builds one — from a whole
+    /// `Config` — so these tests go through the same resolution the supervisor
+    /// and the executor do rather than a shortcut only tests take.
+    fn projection(
+        scenes: Vec<SceneConfig>,
+        audio_inputs: Vec<AudioInputConfig>,
+    ) -> ConfigProjection {
+        ConfigProjection::from_config(&Config {
+            scenes,
+            audio: AudioConfig {
+                inputs: audio_inputs,
+            },
+            ..Config::default()
+        })
+    }
+
+    /// What a config that mentions nothing projects to: no metadata, and
+    /// nothing hidden.
+    fn no_config() -> ConfigProjection {
+        ConfigProjection::default()
     }
 
     #[tokio::test]
@@ -774,8 +866,7 @@ mod tests {
                 ),
                 ..RefreshedObsState::default()
             },
-            &[],
-            &[],
+            &no_config(),
         );
         assert_eq!(snapshot.profiles, vec!["Default", "Streaming"]);
         assert_eq!(snapshot.current_profile.as_deref(), Some("Streaming"));
@@ -805,8 +896,7 @@ mod tests {
                     scenes: Listing::new(vec!["Main".to_string()], "Main"),
                     ..RefreshedObsState::default()
                 },
-                &[],
-                &[],
+                &no_config(),
                 store.generation(),
             )
             .await;
@@ -856,8 +946,7 @@ mod tests {
                     scenes: Listing::new(vec!["Main".to_string(), "Second".to_string()], "Main"),
                     ..RefreshedObsState::default()
                 },
-                &[],
-                &[],
+                &no_config(),
                 generation_before,
             )
             .await;
@@ -901,7 +990,11 @@ mod tests {
             .await;
 
         let superseded = store
-            .apply_full_refresh(&RefreshedObsState::default(), &[], &[], generation_before)
+            .apply_full_refresh(
+                &RefreshedObsState::default(),
+                &no_config(),
+                generation_before,
+            )
             .await;
 
         assert!(
@@ -933,14 +1026,14 @@ mod tests {
 
         let generation_before = store.generation();
         store
-            .merge_config(
-                &[SceneConfig {
+            .merge_config(&projection(
+                vec![SceneConfig {
                     name: "Main".to_string(),
                     alias: Some("m".to_string()),
                     ..Default::default()
                 }],
-                &[],
-            )
+                vec![],
+            ))
             .await;
 
         let superseded = store
@@ -949,8 +1042,7 @@ mod tests {
                     scenes: Listing::new(vec!["Main".to_string()], "Main"),
                     ..RefreshedObsState::default()
                 },
-                &[],
-                &[],
+                &no_config(),
                 generation_before,
             )
             .await;
@@ -977,7 +1069,11 @@ mod tests {
             .await;
 
         let superseded = store
-            .apply_full_refresh(&RefreshedObsState::default(), &[], &[], generation_before)
+            .apply_full_refresh(
+                &RefreshedObsState::default(),
+                &no_config(),
+                generation_before,
+            )
             .await;
         assert!(!superseded);
     }
@@ -1000,14 +1096,14 @@ mod tests {
 
         let mut rx = store.hub.subscribe_state();
         store
-            .merge_config(
-                &[SceneConfig {
+            .merge_config(&projection(
+                vec![SceneConfig {
                     name: "Main".to_string(),
                     alias: Some("m".to_string()),
                     ..Default::default()
                 }],
-                &[],
-            )
+                vec![],
+            ))
             .await;
 
         let msg = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
@@ -1054,7 +1150,7 @@ mod tests {
             .await;
 
         // A reloaded config that no longer mentions either of them.
-        store.merge_config(&[], &[]).await;
+        store.merge_config(&no_config()).await;
 
         let snap = store.read().await;
         assert_eq!(snap.scenes[0].alias, None);
@@ -1066,6 +1162,160 @@ mod tests {
         // The name and OBS-owned state survive; only config metadata is cleared.
         assert_eq!(snap.scenes[0].name, "Main");
         assert_eq!(snap.audio_inputs[0].name, "Mic");
+    }
+
+    /// A config with two scenes, one of which `scenes:` marks hidden, and a
+    /// scene profile that hides the *other* one. Both directions of the
+    /// replacement rule are visible in one fixture.
+    fn config_with_a_scene_profile(active: Option<&str>) -> Config {
+        Config {
+            scenes: vec![
+                SceneConfig {
+                    name: "Main".to_string(),
+                    hidden: false,
+                    ..Default::default()
+                },
+                SceneConfig {
+                    name: "Utility BG".to_string(),
+                    hidden: true,
+                    ..Default::default()
+                },
+            ],
+            scene_profiles: vec![SceneProfileConfig {
+                name: "streaming".to_string(),
+                hidden: vec!["Main".to_string()],
+            }],
+            active_scene_profile: active.map(str::to_string),
+            ..Config::default()
+        }
+    }
+
+    async fn store_with_both_scenes() -> StateStore {
+        let store = make_store();
+        store
+            .seed_for_tests(ObsSnapshot {
+                scenes: vec![
+                    SceneState {
+                        name: "Main".to_string(),
+                        ..Default::default()
+                    },
+                    SceneState {
+                        name: "Utility BG".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..ObsSnapshot::default()
+            })
+            .await;
+        store
+    }
+
+    /// An active scene profile replaces the per-scene flags rather than adding
+    /// to them, so it can hide and reveal in the same merge. Asserting only the
+    /// hiding direction would pass just as well for a union, which is a
+    /// different feature: under a union there would be no way to show a scene
+    /// that `scenes:` marks hidden, and no way to say "show everything".
+    #[tokio::test]
+    async fn an_active_scene_profile_hides_exactly_its_own_scenes() {
+        let store = store_with_both_scenes().await;
+
+        store
+            .merge_config(&ConfigProjection::from_config(
+                &config_with_a_scene_profile(Some("streaming")),
+            ))
+            .await;
+
+        let snap = store.read().await;
+        // Listed by the profile, and not marked hidden in `scenes:`.
+        assert!(snap.scenes[0].hidden, "Main is hidden by the profile");
+        // Marked hidden in `scenes:`, and absent from the profile.
+        assert!(
+            !snap.scenes[1].hidden,
+            "Utility BG is revealed by the profile that omits it"
+        );
+        assert_eq!(snap.active_scene_profile.as_deref(), Some("streaming"));
+        assert_eq!(snap.scene_profiles.len(), 1);
+        assert_eq!(snap.scene_profiles[0].hidden, vec!["Main"]);
+    }
+
+    /// With no profile active the per-scene flags are back in charge — the
+    /// behaviour that existed before scene profiles did.
+    #[tokio::test]
+    async fn without_an_active_scene_profile_the_per_scene_flags_decide() {
+        let store = store_with_both_scenes().await;
+
+        store
+            .merge_config(&ConfigProjection::from_config(
+                &config_with_a_scene_profile(None),
+            ))
+            .await;
+
+        let snap = store.read().await;
+        assert!(!snap.scenes[0].hidden);
+        assert!(snap.scenes[1].hidden);
+        assert_eq!(snap.active_scene_profile, None);
+        // The profile is still offered to clients; it is simply not switched on.
+        assert_eq!(snap.scene_profiles.len(), 1);
+    }
+
+    /// A config naming a profile that is not defined — a stale name, or one
+    /// deleted since it was selected — publishes no active profile at all.
+    /// Advertising the name would have a client render an "active" marker
+    /// beside a profile missing from the list it was sent.
+    #[tokio::test]
+    async fn an_unknown_active_scene_profile_is_not_advertised() {
+        let store = store_with_both_scenes().await;
+
+        store
+            .merge_config(&ConfigProjection::from_config(
+                &config_with_a_scene_profile(Some("deleted")),
+            ))
+            .await;
+
+        let snap = store.read().await;
+        assert_eq!(snap.active_scene_profile, None);
+        // ...and the baseline decides, exactly as if nothing were selected.
+        assert!(!snap.scenes[0].hidden);
+        assert!(snap.scenes[1].hidden);
+    }
+
+    /// The name a client is shown is the one the profile is stored under, not
+    /// the spelling `active_scene_profile:` happened to use. A client matching
+    /// the active name against the list byte-for-byte has to be able to find it.
+    #[tokio::test]
+    async fn the_active_scene_profile_is_published_in_its_configured_spelling() {
+        let store = store_with_both_scenes().await;
+
+        store
+            .merge_config(&ConfigProjection::from_config(
+                &config_with_a_scene_profile(Some("  STREAMING  ")),
+            ))
+            .await;
+
+        let snap = store.read().await;
+        assert_eq!(snap.active_scene_profile.as_deref(), Some("streaming"));
+        assert!(snap.scenes[0].hidden);
+    }
+
+    /// The full-refresh path resolves visibility from the same projection the
+    /// reload path uses, so a scene profile survives a reconnect instead of
+    /// being forgotten until the next `reload-config`.
+    #[test]
+    fn build_snapshot_applies_the_active_scene_profile() {
+        let snapshot = build_snapshot(
+            &RefreshedObsState {
+                scenes: Listing::new(
+                    vec!["Main".to_string(), "Utility BG".to_string()],
+                    "Utility BG",
+                ),
+                ..RefreshedObsState::default()
+            },
+            &ConfigProjection::from_config(&config_with_a_scene_profile(Some("streaming"))),
+        );
+
+        assert!(snapshot.scenes[0].hidden);
+        assert!(!snapshot.scenes[1].hidden);
+        assert_eq!(snapshot.active_scene_profile.as_deref(), Some("streaming"));
     }
 
     /// The supervisor answers list-changed events with a full refresh, which

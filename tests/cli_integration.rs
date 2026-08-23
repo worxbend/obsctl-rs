@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use assert_cmd::Command;
 use obsctl_rs::ipc::{
-    protocol::{ErrorPayload, ServerMessage},
+    protocol::{CommandPayload, ErrorPayload, ServerMessage},
     session::{BroadcastHub, CommandDispatch},
     unix_server::IpcServer,
 };
@@ -207,6 +207,25 @@ fn mute_without_server_exits_3() {
 }
 
 #[test]
+fn scene_profile_without_server_exits_3() {
+    let dir = TempDir::new().unwrap();
+    let config = config_with_socket(&dir);
+
+    // Both forms reach the daemon, so both must fail the same way when there
+    // is no daemon: the argument-less one is "clear", not "nothing to do".
+    for args in [
+        vec!["scene-profile", "streaming"],
+        vec!["scene-profile"],
+        vec!["scene-profiles"],
+    ] {
+        let mut command = obsctl();
+        command.args(["--config", config.to_str().unwrap()]);
+        command.args(&args);
+        command.assert().failure().code(3);
+    }
+}
+
+#[test]
 fn vol_without_server_exits_3() {
     let dir = TempDir::new().unwrap();
     let config = config_with_socket(&dir);
@@ -252,7 +271,16 @@ fn volume_alias_works() {
 #[derive(Clone)]
 enum FakeIpcReply {
     Success(serde_json::Value),
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+    },
+    /// Reply with a description of the command that was received.
+    ///
+    /// This is how a test can tell *which* daemon command a subcommand turned
+    /// into: the payload comes off the real wire, built by the real CLI, so no
+    /// hand-written fixture can drift away from what is actually sent.
+    Echo,
 }
 
 impl FakeIpcReply {
@@ -267,12 +295,24 @@ impl FakeIpcReply {
         }
     }
 
-    fn into_response(self, id: String) -> ServerMessage {
+    fn into_response(self, id: String, payload: &CommandPayload) -> ServerMessage {
         match self {
             Self::Success(result) => ServerMessage::Response {
                 id,
                 ok: true,
                 result: Some(result),
+                error: None,
+            },
+            Self::Echo => ServerMessage::Response {
+                id,
+                ok: true,
+                result: Some(serde_json::json!({
+                    // `message` is what the CLI prints without `--json`, so the
+                    // command name is readable from plain stdout too.
+                    "message": payload.name,
+                    "command": payload.name,
+                    "args": payload.args,
+                })),
                 error: None,
             },
             Self::Error { code, message } => ServerMessage::Response {
@@ -319,7 +359,9 @@ fn start_fake_ipc_server_with_reply(reply: FakeIpcReply) -> (TempDir, std::path:
             let _ = ready_tx.send(());
             tokio::spawn(async move { server.run(cmd_tx, shutdown_rx).await });
             while let Some(dispatch) = cmd_rx.recv().await {
-                let msg = reply_bg.clone().into_response(dispatch.id.clone());
+                let msg = reply_bg
+                    .clone()
+                    .into_response(dispatch.id.clone(), &dispatch.payload);
                 let _ = dispatch.reply.send(msg);
             }
         });
@@ -420,6 +462,150 @@ fn json_flag_wraps_scene_mute_and_volume_successes_in_envelope() {
         assert_eq!(parsed["error"], serde_json::Value::Null);
         assert_eq!(parsed["exit_code"], 0);
     }
+}
+
+/// `scene-profile` takes an optional name, and the two forms are two different
+/// daemon commands: with a name it activates that scene profile, without one it
+/// clears whichever was active. An echoing fake daemon is what makes the
+/// distinction observable — the assertion is on the command the CLI actually
+/// put on the wire, not on a fixture describing it.
+#[test]
+fn scene_profile_sends_set_with_a_name_and_clear_without_one() {
+    let (_dir, config_path) = start_fake_ipc_server_with_reply(FakeIpcReply::Echo);
+
+    let assert = obsctl()
+        .args([
+            "--json",
+            "--config",
+            config_path.to_str().unwrap(),
+            "scene-profile",
+            "streaming",
+        ])
+        .assert()
+        .success();
+    let parsed = parse_json_stdout(&assert.get_output().stdout);
+    assert_eq!(parsed["result"]["command"], "set_scene_profile");
+    assert_eq!(parsed["result"]["args"]["target"], "streaming");
+
+    let assert = obsctl()
+        .args([
+            "--json",
+            "--config",
+            config_path.to_str().unwrap(),
+            "scene-profile",
+        ])
+        .assert()
+        .success();
+    let parsed = parse_json_stdout(&assert.get_output().stdout);
+    assert_eq!(parsed["result"]["command"], "clear_scene_profile");
+    // The argument-less payload arrives as an empty object: `args` is flattened
+    // into the command object on the wire, so "no arguments" is "no extra keys".
+    assert_eq!(parsed["result"]["args"], serde_json::json!({}));
+
+    let assert = obsctl()
+        .args([
+            "--json",
+            "--config",
+            config_path.to_str().unwrap(),
+            "scene-profiles",
+        ])
+        .assert()
+        .success();
+    let parsed = parse_json_stdout(&assert.get_output().stdout);
+    assert_eq!(parsed["result"]["command"], "list_scene_profiles");
+}
+
+#[test]
+fn json_flag_wraps_scene_profile_successes_in_envelope() {
+    let cases = [
+        (
+            vec!["scene-profile", "streaming"],
+            serde_json::json!({
+                "message": "scene profile set: streaming",
+                "hidden": 2,
+                "warnings": [],
+            }),
+        ),
+        (
+            vec!["scene-profile"],
+            serde_json::json!({ "message": "scene profile cleared" }),
+        ),
+        (
+            vec!["scene-profiles"],
+            serde_json::json!({
+                "active": "streaming",
+                "profiles": [{ "name": "streaming", "hidden": ["Utility BG"] }],
+            }),
+        ),
+    ];
+
+    for (command, response) in cases {
+        let (_dir, config_path) = start_fake_ipc_server_with_config(response.clone());
+        let mut args = vec!["--json", "--config", config_path.to_str().unwrap()];
+        args.extend(command);
+
+        let assert = obsctl()
+            .args(args)
+            .assert()
+            .success()
+            .stderr(predicates::str::is_empty());
+
+        let parsed = parse_json_stdout(&assert.get_output().stdout);
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["result"], response);
+        assert_eq!(parsed["error"], serde_json::Value::Null);
+        assert_eq!(parsed["exit_code"], 0);
+    }
+}
+
+/// Without `--json`, `scene-profiles` answers with a structure rather than a
+/// sentence, so it is printed field by field instead of as raw JSON.
+#[test]
+fn default_mode_prints_scene_profiles_as_fields() {
+    let response = serde_json::json!({
+        "active": "streaming",
+        "profiles": [{ "name": "streaming", "hidden": ["Utility BG"] }],
+    });
+    let (_dir, config_path) = start_fake_ipc_server_with_config(response);
+
+    obsctl()
+        .args(["--config", config_path.to_str().unwrap(), "scene-profiles"])
+        .assert()
+        .success()
+        .stdout(
+            contains("active: \"streaming\"")
+                .and(contains("profiles: "))
+                .and(predicates::str::is_match(r"^[^\{]").unwrap()),
+        );
+}
+
+/// An unknown scene profile is reported by the daemon as `CONFIG_INVALID`, and
+/// that code already maps to exit 2 — no new public error code was introduced
+/// for scene profiles.
+#[test]
+fn scene_profile_unknown_name_exits_2() {
+    let (_dir, config_path) = start_fake_ipc_server_with_reply(FakeIpcReply::error(
+        "CONFIG_INVALID",
+        "config invalid: scene profile not found: nope",
+    ));
+
+    let assert = obsctl()
+        .args([
+            "--json",
+            "--config",
+            config_path.to_str().unwrap(),
+            "scene-profile",
+            "nope",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicates::str::is_empty());
+
+    let parsed = parse_json_stdout(&assert.get_output().stdout);
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error"]["code"], "CONFIG_INVALID");
+    assert_eq!(parsed["exit_code"], 2);
 }
 
 #[test]

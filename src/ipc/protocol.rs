@@ -56,7 +56,43 @@ impl CommandPayload {
             args: serde_json::json!({ "target": target, "percent": percent }),
         }
     }
+
+    /// `save_scene_profile`, the only command carrying a list.
+    ///
+    /// `hidden` names the scenes the profile hides, spelled as OBS spells
+    /// them. The argument mechanism needed nothing new for this: `args` is an
+    /// untyped JSON object flattened into the command, so an array value is
+    /// already legal — only a constructor for it was missing.
+    ///
+    /// `rename_from` names the profile this save is replacing, when the caller
+    /// opened an editor on an existing profile. It makes a rename **one**
+    /// command: the daemon moves the entry in place instead of the caller
+    /// having to save under the new name and then delete the old one, which
+    /// was two file writes with a window in between where the profile existed
+    /// twice, and which lost the active-profile pointer whenever the rename
+    /// happened to be about the profile in effect. Left out for a profile
+    /// being created, which is not replacing anything.
+    pub fn save_scene_profile(name: &str, hidden: &[String], rename_from: Option<&str>) -> Self {
+        let mut args = serde_json::json!({ "target": name, "hidden": hidden });
+        if let Some(previous) = rename_from
+            && let Some(object) = args.as_object_mut()
+        {
+            object.insert(
+                RENAME_FROM.to_string(),
+                serde_json::Value::String(previous.to_string()),
+            );
+        }
+        Self {
+            name: ServerCommand::SaveSceneProfile.name().to_string(),
+            args,
+        }
+    }
 }
+
+/// The one optional argument in the whole command vocabulary. Named here so
+/// the constructor above, the spec row below and the daemon's reader cannot
+/// spell it three different ways.
+pub const RENAME_FROM: &str = "rename_from";
 
 /// The commands the daemon accepts.
 ///
@@ -85,19 +121,27 @@ pub enum ServerCommand {
     DumpConfig,
     ToggleStream,
     ToggleRecord,
+    SetSceneProfile,
+    ClearSceneProfile,
+    SaveSceneProfile,
+    DeleteSceneProfile,
+    ListSceneProfiles,
 }
 
-/// One row of the command vocabulary: the wire name and the exact set of
-/// argument keys the payload must carry. An empty `args` means the command
-/// accepts no arguments at all.
+/// One row of the command vocabulary: the wire name, the argument keys the
+/// payload must carry, and the ones it may carry. A payload is rejected for
+/// any key outside the two lists, so between them they are the whole shape of
+/// the command. Both empty means the command accepts no arguments at all.
 pub struct CommandSpec {
     pub command: ServerCommand,
     pub name: &'static str,
     pub args: &'static [&'static str],
+    pub optional: &'static [&'static str],
 }
 
 const TARGET: &[&str] = &["target"];
 const NONE: &[&str] = &[];
+const RENAME: &[&str] = &[RENAME_FROM];
 
 /// Every command, in the order they appear in `ServerCommand`. Adding a
 /// command means adding a row here and a handler arm in the executor; the
@@ -107,91 +151,143 @@ pub const COMMANDS: &[CommandSpec] = &[
         command: ServerCommand::Ping,
         name: "ping",
         args: NONE,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::GetServerStatus,
         name: "get_server_status",
         args: NONE,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::GetObsStatus,
         name: "get_obs_status",
         args: NONE,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::GetSnapshot,
         name: "get_snapshot",
         args: NONE,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::SetScene,
         name: "set_scene",
         args: TARGET,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::SetProfile,
         name: "set_profile",
         args: TARGET,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::SetSceneCollection,
         name: "set_scene_collection",
         args: TARGET,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::Mute,
         name: "mute",
         args: TARGET,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::Unmute,
         name: "unmute",
         args: TARGET,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::ToggleMute,
         name: "toggle_mute",
         args: TARGET,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::SetVolume,
         name: "set_volume",
         args: &["target", "percent"],
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::ValidateConfig,
         name: "validate_config",
         args: NONE,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::ReloadConfig,
         name: "reload_config",
         args: NONE,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::ReconnectObs,
         name: "reconnect_obs",
         args: NONE,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::ShutdownServer,
         name: "shutdown_server",
         args: NONE,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::DumpConfig,
         name: "dump_config",
         args: NONE,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::ToggleStream,
         name: "toggle_stream",
         args: NONE,
+        optional: NONE,
     },
     CommandSpec {
         command: ServerCommand::ToggleRecord,
         name: "toggle_record",
         args: NONE,
+        optional: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::SetSceneProfile,
+        name: "set_scene_profile",
+        args: TARGET,
+        optional: NONE,
+    },
+    // Switching a scene profile off is its own command rather than
+    // `set_scene_profile` with an empty target: a blank target is rejected as a
+    // malformed payload, and a reserved sentinel name ("none", "off") would
+    // collide with a scene profile a user is entitled to create.
+    CommandSpec {
+        command: ServerCommand::ClearSceneProfile,
+        name: "clear_scene_profile",
+        args: NONE,
+        optional: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::SaveSceneProfile,
+        name: "save_scene_profile",
+        args: &["target", "hidden"],
+        optional: RENAME,
+    },
+    CommandSpec {
+        command: ServerCommand::DeleteSceneProfile,
+        name: "delete_scene_profile",
+        args: TARGET,
+        optional: NONE,
+    },
+    CommandSpec {
+        command: ServerCommand::ListSceneProfiles,
+        name: "list_scene_profiles",
+        args: NONE,
+        optional: NONE,
     },
 ];
 
@@ -207,10 +303,15 @@ impl ServerCommand {
         self.spec().name
     }
 
-    /// The argument keys this command requires — and, because payloads may not
-    /// carry anything else, the only keys it permits.
+    /// The argument keys a payload for this command must carry.
     pub fn required_args(self) -> &'static [&'static str] {
         self.spec().args
+    }
+
+    /// The argument keys a payload for this command may carry but need not.
+    /// Anything outside `required_args` and this list is rejected.
+    pub fn optional_args(self) -> &'static [&'static str] {
+        self.spec().optional
     }
 
     pub fn parse(name: &str) -> Option<Self> {
@@ -737,7 +838,7 @@ impl Topic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::obs::state::{AudioState, ObsSnapshot, SceneState};
+    use crate::obs::state::{AudioState, ObsSnapshot, SceneProfileState, SceneState};
     use crate::support::redaction::REDACTED_SECRET;
     use serde_json::json;
     use time::macros::datetime;
@@ -787,12 +888,17 @@ mod tests {
             ServerCommand::DumpConfig => {}
             ServerCommand::ToggleStream => {}
             ServerCommand::ToggleRecord => {}
+            ServerCommand::SetSceneProfile => {}
+            ServerCommand::ClearSceneProfile => {}
+            ServerCommand::SaveSceneProfile => {}
+            ServerCommand::DeleteSceneProfile => {}
+            ServerCommand::ListSceneProfiles => {}
         }
     }
 
     #[test]
     fn every_command_has_a_spec_and_round_trips_through_its_name() {
-        const SERVER_COMMAND_VARIANT_COUNT: usize = 18;
+        const SERVER_COMMAND_VARIANT_COUNT: usize = 23;
         assert_eq!(COMMANDS.len(), SERVER_COMMAND_VARIANT_COUNT);
 
         for spec in COMMANDS {
@@ -826,6 +932,68 @@ mod tests {
         assert_eq!(payload.name, "set_volume");
         assert_eq!(payload.args["target"], "Mic");
         assert_eq!(payload.args["percent"], 42);
+
+        let payload = CommandPayload::save_scene_profile(
+            "streaming",
+            &["Utility BG".to_string(), "Overlay Src".to_string()],
+            None,
+        );
+        assert_eq!(payload.name, "save_scene_profile");
+        assert_eq!(payload.args["target"], "streaming");
+        assert_eq!(payload.args["hidden"], json!(["Utility BG", "Overlay Src"]));
+        assert_eq!(payload.args.get(RENAME_FROM), None);
+    }
+
+    /// The one command whose payload carries a list. Pinned verbatim because
+    /// the array — its key, and the fact that it sits beside `target` in the
+    /// flattened command object rather than under a nested `args` — is the
+    /// part of the wire contract a client could otherwise guess wrong.
+    #[test]
+    fn save_scene_profile_request_wire_json_is_stable() {
+        let message = ClientMessage::Command {
+            id: "req-000007".to_string(),
+            command: CommandPayload::save_scene_profile(
+                "streaming",
+                &["Utility BG".to_string(), "Overlay Src".to_string()],
+                None,
+            ),
+        };
+
+        assert_wire_json(
+            &message,
+            r#"{"type":"command","id":"req-000007","command":{"name":"save_scene_profile","hidden":["Utility BG","Overlay Src"],"target":"streaming"}}"#,
+            json!({
+                "type": "command",
+                "id": "req-000007",
+                "command": {
+                    "name": "save_scene_profile",
+                    "target": "streaming",
+                    "hidden": ["Utility BG", "Overlay Src"]
+                }
+            }),
+        );
+    }
+
+    /// An empty list is still a list: `save_scene_profile` declares `hidden`
+    /// as a required argument, so "this profile hides nothing" travels as `[]`
+    /// rather than as a missing key.
+    #[test]
+    fn save_scene_profile_sends_an_empty_hidden_list_as_an_empty_array() {
+        let payload = CommandPayload::save_scene_profile("everything", &[], None);
+
+        assert_eq!(payload.args["hidden"], json!([]));
+    }
+
+    /// The optional argument, which is what makes a rename one command. It is
+    /// left out entirely rather than sent as `null` when there is nothing to
+    /// rename, so a daemon that has never heard of it still accepts the
+    /// payloads every other save produces.
+    #[test]
+    fn save_scene_profile_carries_the_renamed_from_name_only_when_renaming() {
+        let payload = CommandPayload::save_scene_profile("night", &[], Some("streaming"));
+
+        assert_eq!(payload.args[RENAME_FROM], "streaming");
+        assert_eq!(payload.args["target"], "night");
     }
 
     #[test]
@@ -1010,6 +1178,11 @@ mod tests {
             }],
             streaming: false,
             recording: false,
+            scene_profiles: vec![SceneProfileState {
+                name: "streaming".to_string(),
+                hidden: vec!["Utility BG".to_string()],
+            }],
+            active_scene_profile: Some("streaming".to_string()),
             updated_at: datetime!(2024-01-02 03:04:05 UTC),
             ..ObsSnapshot::default()
         };
@@ -1057,6 +1230,13 @@ mod tests {
                     "current_profile": null,
                     "scene_collections": [],
                     "current_scene_collection": null,
+                    "scene_profiles": [
+                        {
+                            "name": "streaming",
+                            "hidden": ["Utility BG"]
+                        }
+                    ],
+                    "active_scene_profile": "streaming",
                     "last_error": null,
                     "stats": null,
                     "stream_bitrate_kbps": null,

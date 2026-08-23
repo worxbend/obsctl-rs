@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use time::OffsetDateTime;
 
 use crate::{
+    domain::names::{checked_name, normalized_name},
     ipc::protocol::{LogEvent, LogLevel},
-    obs::state::{AudioState, ObsSnapshot, ObsStats, SceneState, ServerStatus},
+    obs::state::{AudioState, ObsSnapshot, ObsStats, SceneProfileState, SceneState, ServerStatus},
     tui::{
         anim::AnimClock,
         input::MAX_COUNT,
@@ -159,6 +160,177 @@ impl FrameCounters {
     }
 }
 
+/// A one-line text field.
+///
+/// Deliberately not shared with [`CommandPaletteState`]: that one is a command
+/// *line*, and every one of its editing rules is written around the prompt
+/// character it always keeps at the front — `clear_to_prefix` keeps the first
+/// character, which here would leave the first letter of the name behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TextField {
+    pub value: String,
+}
+
+impl TextField {
+    pub fn push(&mut self, c: char) {
+        self.value.push(c);
+    }
+
+    pub fn backspace(&mut self) {
+        self.value.pop();
+    }
+
+    pub fn clear(&mut self) {
+        self.value.clear();
+    }
+
+    /// Ctrl-W — drop the word before the cursor along with the spaces that
+    /// trail it, so a second press does not have to eat the gap first.
+    pub fn delete_word(&mut self) {
+        let end = match self.value.trim_end().rfind(' ') {
+            Some(space) => space + 1,
+            None => 0,
+        };
+        self.value.truncate(end);
+    }
+}
+
+/// Which of the editor's three questions the user is answering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneProfileStage {
+    /// Which scene profile — an existing one, or a new one.
+    Picker,
+    /// Which scenes it hides.
+    Scenes,
+    /// What it is called.
+    Naming,
+}
+
+/// Why a name typed into the editor was not accepted.
+///
+/// Checked here rather than left to the daemon because both answers are ones
+/// the client already has: the naming rules are shared code, and the list of
+/// existing profiles is in the snapshot. Finding out while still typing beats
+/// finding out from a status line after the config file has been written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneProfileNameError {
+    /// Blank, too long, or otherwise not a usable resource name — the one
+    /// thing the daemon would refuse outright.
+    Unusable,
+    /// Another scene profile already answers to it. Saving would replace that
+    /// profile with this one's hidden list, and there is no backup to undo it
+    /// with, so the name is refused before anything is sent.
+    Taken,
+}
+
+impl SceneProfileNameError {
+    /// The `locales/en.yml` key naming this to the user.
+    pub fn message_key(self) -> &'static str {
+        match self {
+            Self::Unusable => "tui.panels.scene_profiles.name_blank",
+            Self::Taken => "tui.panels.scene_profiles.name_taken",
+        }
+    }
+}
+
+/// The scene-profile editor. `None` on [`TuiModel::scene_profile`] means the
+/// modal is closed.
+///
+/// It carries its own two cursors rather than borrowing one of the dashboard's
+/// [`PanelCursors`], for the same reason `settings_cursor` does: the modal is
+/// not a panel, and a cursor into the all-scenes list has no business sharing
+/// bounds with a cursor into the visible-scenes list underneath it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneProfileEditor {
+    pub stage: SceneProfileStage,
+    /// Row in the picker. Row 0 is "new scene profile"; row n+1 is
+    /// `snapshot.scene_profiles[n]`.
+    pub picker_cursor: usize,
+    /// Row in the all-scenes list on the [`SceneProfileStage::Scenes`] stage.
+    pub scene_cursor: usize,
+    pub name: TextField,
+    /// Name to put back when `Esc` abandons a rename mid-edit.
+    pub name_before_edit: String,
+    /// Scene names this profile hides, as OBS spells them.
+    pub hidden: BTreeSet<String>,
+    /// The profile being edited, or `None` for one that does not exist yet.
+    /// A save whose `name` differs from this is a rename, which the dispatch
+    /// carries out as a save followed by a delete of the old name.
+    pub editing: Option<String>,
+}
+
+impl Default for SceneProfileEditor {
+    fn default() -> Self {
+        Self {
+            stage: SceneProfileStage::Picker,
+            picker_cursor: 0,
+            scene_cursor: 0,
+            name: TextField::default(),
+            name_before_edit: String::new(),
+            hidden: BTreeSet::new(),
+            editing: None,
+        }
+    }
+}
+
+impl SceneProfileEditor {
+    /// Whether the profile being edited hides `scene`.
+    ///
+    /// Case-insensitive, because a `hidden:` entry the user typed into the
+    /// config file need not match OBS's own spelling of the scene, and the
+    /// daemon matches them that way too.
+    pub fn hides(&self, scene: &str) -> bool {
+        self.hidden
+            .iter()
+            .any(|hidden| same_scene_profile_name(hidden, scene))
+    }
+}
+
+/// One row of the scene-profile modal, as the widget draws it and the tests
+/// read it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneProfileRow {
+    /// Text of the row: a profile name on the picker stage, a scene name on
+    /// the others. Empty for [`SceneProfileRowKind::NewProfile`], whose label
+    /// is a translated string and therefore the widget's to supply.
+    pub label: String,
+    /// Whether the editor's cursor is on this row.
+    pub selected: bool,
+    pub kind: SceneProfileRowKind,
+}
+
+/// What a [`SceneProfileRow`] stands for, and everything the widget needs to
+/// decide how to draw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneProfileRowKind {
+    /// Row 0 of the picker: make a scene profile that does not exist yet.
+    NewProfile,
+    /// An existing scene profile.
+    Profile {
+        /// Whether this is the profile currently switched on.
+        active: bool,
+        hidden_count: usize,
+    },
+    /// A scene on the toggle stage.
+    Scene {
+        /// Whether the profile being edited hides it — what `t` flips.
+        hidden: bool,
+        /// Whether it is the scene OBS is showing right now.
+        current: bool,
+    },
+}
+
+/// Whether two names mean the same scene profile. Differences of case or of
+/// surrounding whitespace do not, matching how the daemon looks a profile up.
+fn same_scene_profile_name(a: &str, b: &str) -> bool {
+    match (normalized_name(a), normalized_name(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        // A name that is not usable at all matches nothing, not even another
+        // unusable one: there is no profile it could be naming.
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TuiModel {
     /// The daemon's view of OBS, or `None` before the first snapshot arrives.
@@ -234,6 +406,14 @@ pub struct TuiModel {
     pub palette_prefix: char,
     /// Lines the log pane is scrolled back from the live tail. `0` follows.
     pub log_scroll: usize,
+    /// The scene-profile editor while it is open, `None` while it is not.
+    ///
+    /// A modal overlay rather than a [`View`]: the dashboard stays on screen
+    /// underneath it, so nothing about panel focus, the panel cursors, or the
+    /// motions that move them changes while it is up. Every field of it is
+    /// written through the `scene_profile_*` methods below, each of which
+    /// clamps the cursor of the stage it leaves the editor in.
+    pub scene_profile: Option<SceneProfileEditor>,
     /// Cached visible (non-hidden) scenes; rebuilt in `clamp_cursors` after each snapshot update.
     cached_visible_scenes: Vec<SceneState>,
 }
@@ -288,6 +468,7 @@ impl Default for TuiModel {
             pending_count: None,
             palette_prefix: DEFAULT_PALETTE_PREFIX,
             log_scroll: 0,
+            scene_profile: None,
             cached_visible_scenes: Vec::new(),
         }
     }
@@ -826,6 +1007,16 @@ impl TuiModel {
             let max = self.panel_len(panel).saturating_sub(1);
             self.cursors[panel] = self.cursors[panel].min(max);
         }
+        // The editor's own cursors are otherwise only moved by its
+        // transitions, which is fine while it is the only thing changing —
+        // but the daemon keeps pushing snapshots at the model while the modal
+        // is open, and one that drops a scene (or a profile edited from the
+        // CLI) leaves the cursor past the end of the shortened list. No row
+        // would be highlighted and `t` would do nothing until the user
+        // pressed `j`, so the same clamp the transitions do is re-run here.
+        if self.scene_profile.is_some() {
+            self.scene_profile_cursor_to(self.scene_profile_cursor());
+        }
     }
 
     pub fn focused_scene(&self) -> Option<&SceneState> {
@@ -892,6 +1083,357 @@ impl TuiModel {
         self.scene_collections()
             .get(self.cursors[FocusPanel::Collections])
             .map(String::as_str)
+    }
+
+    // --- the scene-profile editor ---
+    //
+    // Everything below is the only way the editor's fields are written. Each
+    // transition leaves the editor on one stage and clamps that stage's
+    // cursor, so no caller can park a cursor past the end of a list it did not
+    // know had changed underneath it. The lists themselves come from the
+    // snapshot, which changes without the editor being touched at all, so
+    // `clamp_cursors` re-runs that clamp on every snapshot too.
+
+    /// Every scene the daemon knows about, hidden ones included.
+    ///
+    /// [`scenes`](TuiModel::scenes) is the visible subset the dashboard draws;
+    /// the editor has to show what it is choosing between, which is all of
+    /// them.
+    pub fn all_scenes(&self) -> &[SceneState] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.scenes.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Every scene profile the daemon's config defines.
+    pub fn scene_profiles(&self) -> &[SceneProfileState] {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.scene_profiles.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The scene profile currently switched on, if any.
+    pub fn active_scene_profile(&self) -> Option<&str> {
+        self.snapshot
+            .as_ref()
+            .and_then(|s| s.active_scene_profile.as_deref())
+    }
+
+    /// Names of the defined scene profiles, for the palette's completion pool.
+    pub fn scene_profile_names(&self) -> Vec<String> {
+        self.scene_profiles()
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect()
+    }
+
+    /// Open the editor on its picker.
+    pub fn open_scene_profiles(&mut self) {
+        self.scene_profile = Some(SceneProfileEditor::default());
+        self.scene_profile_cursor_to(0);
+    }
+
+    /// Close the editor, discarding whatever it was holding.
+    pub fn close_scene_profiles(&mut self) {
+        self.scene_profile = None;
+    }
+
+    /// Rows of the stage that is up, or an empty list when the editor is
+    /// closed. The widget draws these and the tests read them, so what the
+    /// user sees and what a test asserts cannot come apart.
+    pub fn scene_profile_rows(&self) -> Vec<SceneProfileRow> {
+        let Some(editor) = self.scene_profile.as_ref() else {
+            return Vec::new();
+        };
+        match editor.stage {
+            SceneProfileStage::Picker => {
+                let active = self.active_scene_profile();
+                let new_row = SceneProfileRow {
+                    label: String::new(),
+                    selected: editor.picker_cursor == 0,
+                    kind: SceneProfileRowKind::NewProfile,
+                };
+                std::iter::once(new_row)
+                    .chain(
+                        self.scene_profiles()
+                            .iter()
+                            .enumerate()
+                            .map(|(i, profile)| SceneProfileRow {
+                                label: profile.name.clone(),
+                                selected: editor.picker_cursor == i + 1,
+                                kind: SceneProfileRowKind::Profile {
+                                    active: active
+                                        .is_some_and(|a| same_scene_profile_name(a, &profile.name)),
+                                    hidden_count: profile.hidden.len(),
+                                },
+                            }),
+                    )
+                    .collect()
+            }
+            // The naming stage is drawn over the scene list rather than
+            // instead of it, so it shows the same rows.
+            SceneProfileStage::Scenes | SceneProfileStage::Naming => {
+                let current = self.current_scene();
+                self.all_scenes()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, scene)| SceneProfileRow {
+                        label: scene.name.clone(),
+                        selected: editor.scene_cursor == i,
+                        kind: SceneProfileRowKind::Scene {
+                            hidden: editor.hides(&scene.name),
+                            current: current.is_some_and(|c| c == scene.name),
+                        },
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// The scene profile under the picker cursor, or `None` on row 0 — which
+    /// stands for a profile that does not exist yet.
+    pub fn selected_scene_profile(&self) -> Option<&SceneProfileState> {
+        let editor = self.scene_profile.as_ref()?;
+        let index = editor.picker_cursor.checked_sub(1)?;
+        self.scene_profiles().get(index)
+    }
+
+    /// How many rows the stage that is up has, which is what its cursor is
+    /// clamped against.
+    fn scene_profile_row_count(&self) -> usize {
+        match self.scene_profile.as_ref().map(|editor| editor.stage) {
+            Some(SceneProfileStage::Picker) => 1 + self.scene_profiles().len(),
+            Some(SceneProfileStage::Scenes | SceneProfileStage::Naming) => self.all_scenes().len(),
+            None => 0,
+        }
+    }
+
+    /// The cursor of whichever stage is up, or 0 when the editor is closed.
+    fn scene_profile_cursor(&self) -> usize {
+        self.scene_profile
+            .as_ref()
+            .map(|editor| match editor.stage {
+                SceneProfileStage::Picker => editor.picker_cursor,
+                SceneProfileStage::Scenes | SceneProfileStage::Naming => editor.scene_cursor,
+            })
+            .unwrap_or(0)
+    }
+
+    /// Put the cursor of whichever stage is up on `index`, clamped to that
+    /// stage's list. The one place either cursor is assigned.
+    fn scene_profile_cursor_to(&mut self, index: usize) {
+        let rows = self.scene_profile_row_count();
+        let Some(editor) = self.scene_profile.as_mut() else {
+            return;
+        };
+        let clamped = index.min(rows.saturating_sub(1));
+        match editor.stage {
+            SceneProfileStage::Picker => editor.picker_cursor = clamped,
+            SceneProfileStage::Scenes | SceneProfileStage::Naming => editor.scene_cursor = clamped,
+        }
+    }
+
+    /// A click in the editor's list: move the cursor of the current stage to
+    /// the row that was clicked.
+    pub fn scene_profile_set_cursor(&mut self, index: usize) {
+        self.scene_profile_cursor_to(index);
+    }
+
+    /// Move the cursor of the current stage by `delta` rows `count` times —
+    /// `delta` is -1 for `k` and 1 for `j`, and `count` is the typed count
+    /// prefix.
+    pub fn scene_profile_nav(&mut self, delta: isize, count: usize) {
+        if self.scene_profile.is_none() {
+            return;
+        }
+        let cursor = self.scene_profile_cursor();
+        let step = delta.saturating_mul(isize::try_from(count).unwrap_or(isize::MAX));
+        let moved = isize::try_from(cursor)
+            .unwrap_or(isize::MAX)
+            .saturating_add(step)
+            .max(0);
+        self.scene_profile_cursor_to(usize::try_from(moved).unwrap_or(0));
+    }
+
+    /// Enter on the picker: row 0 starts a new scene profile, row n edits the
+    /// one it names.
+    pub fn scene_profile_confirm_picker(&mut self) {
+        let on_picker = self
+            .scene_profile
+            .as_ref()
+            .is_some_and(|editor| editor.stage == SceneProfileStage::Picker);
+        if !on_picker {
+            return;
+        }
+
+        let chosen = match self.scene_profile.as_ref().map(|e| e.picker_cursor) {
+            Some(0) => None,
+            Some(_) => match self.selected_scene_profile() {
+                Some(profile) => Some(profile.clone()),
+                // The picker is drawn from the snapshot, so a row that is no
+                // longer there means a new snapshot landed between the draw
+                // and the keypress. Doing nothing beats editing whichever
+                // profile happens to have slid into that row.
+                None => return,
+            },
+            None => return,
+        };
+
+        let (hidden, name, editing, stage) = match chosen {
+            Some(profile) => (
+                profile.hidden.iter().cloned().collect(),
+                profile.name.clone(),
+                Some(profile.name),
+                SceneProfileStage::Scenes,
+            ),
+            // A new profile starts from what the user is already looking at,
+            // so saving one straight away cannot silently reveal every scene
+            // the config hides today.
+            None => (
+                self.all_scenes()
+                    .iter()
+                    .filter(|scene| scene.hidden)
+                    .map(|scene| scene.name.clone())
+                    .collect(),
+                String::new(),
+                None,
+                SceneProfileStage::Naming,
+            ),
+        };
+
+        if let Some(editor) = self.scene_profile.as_mut() {
+            editor.hidden = hidden;
+            editor.name_before_edit = name.clone();
+            editor.name = TextField { value: name };
+            editor.editing = editing;
+            editor.stage = stage;
+        }
+        self.scene_profile_cursor_to(0);
+    }
+
+    /// `n` on the scene stage: start editing the name, remembering the one to
+    /// put back if the edit is abandoned.
+    pub fn scene_profile_begin_naming(&mut self) {
+        if let Some(editor) = self.scene_profile.as_mut()
+            && editor.stage == SceneProfileStage::Scenes
+        {
+            editor.name_before_edit = editor.name.value.clone();
+            editor.stage = SceneProfileStage::Naming;
+        }
+    }
+
+    /// Accept the typed name and go back to the scene list, or say why it was
+    /// not accepted — in which case the editor stays on the naming stage with
+    /// the name still there to be corrected.
+    pub fn scene_profile_commit_name(&mut self) -> std::result::Result<(), SceneProfileNameError> {
+        let Some(editor) = self.scene_profile.as_ref() else {
+            return Err(SceneProfileNameError::Unusable);
+        };
+        if editor.stage != SceneProfileStage::Naming {
+            return Err(SceneProfileNameError::Unusable);
+        }
+        let Ok(name) = checked_name(&editor.name.value) else {
+            return Err(SceneProfileNameError::Unusable);
+        };
+
+        // Compared the way the daemon compares profile names, and against the
+        // profile this editor was opened on rather than against the name in
+        // the field, so re-confirming a profile's own name is not mistaken
+        // for a collision with itself.
+        let editing = editor.editing.clone();
+        let taken = self.scene_profiles().iter().any(|profile| {
+            same_scene_profile_name(&profile.name, &name)
+                && !editing
+                    .as_deref()
+                    .is_some_and(|opened_on| same_scene_profile_name(opened_on, &profile.name))
+        });
+        if taken {
+            return Err(SceneProfileNameError::Taken);
+        }
+
+        if let Some(editor) = self.scene_profile.as_mut() {
+            editor.name = TextField { value: name };
+            editor.stage = SceneProfileStage::Scenes;
+        }
+        Ok(())
+    }
+
+    /// Esc on the naming stage: put the previous name back and return to the
+    /// scene list.
+    pub fn scene_profile_cancel_name(&mut self) {
+        if let Some(editor) = self.scene_profile.as_mut()
+            && editor.stage == SceneProfileStage::Naming
+        {
+            editor.name = TextField {
+                value: editor.name_before_edit.clone(),
+            };
+            editor.stage = SceneProfileStage::Scenes;
+        }
+    }
+
+    /// Type into the name field. Inert on any other stage, so a stray key
+    /// cannot rename a profile the user is only looking at.
+    pub fn scene_profile_edit_name(&mut self, edit: impl FnOnce(&mut TextField)) {
+        if let Some(editor) = self.scene_profile.as_mut()
+            && editor.stage == SceneProfileStage::Naming
+        {
+            edit(&mut editor.name);
+        }
+    }
+
+    /// `t` on the scene stage: hide the scene under the cursor, or reveal it
+    /// if this profile already hides it.
+    pub fn scene_profile_toggle_hidden(&mut self) {
+        let on_scenes = self
+            .scene_profile
+            .as_ref()
+            .is_some_and(|editor| editor.stage == SceneProfileStage::Scenes);
+        if !on_scenes {
+            return;
+        }
+        let cursor = self.scene_profile.as_ref().map(|e| e.scene_cursor);
+        let Some(name) = cursor
+            .and_then(|cursor| self.all_scenes().get(cursor))
+            .map(|scene| scene.name.clone())
+        else {
+            return;
+        };
+
+        if let Some(editor) = self.scene_profile.as_mut() {
+            // Removal goes by the stored spelling, which came from the config
+            // file and need not match OBS's, so a toggle cannot leave the same
+            // scene listed twice under two casings.
+            match editor
+                .hidden
+                .iter()
+                .find(|hidden| same_scene_profile_name(hidden, &name))
+                .cloned()
+            {
+                Some(stored) => {
+                    editor.hidden.remove(&stored);
+                }
+                None => {
+                    editor.hidden.insert(name);
+                }
+            }
+        }
+    }
+
+    /// Esc on the scene stage: back to the picker, keeping the editor open.
+    pub fn scene_profile_back(&mut self) {
+        if let Some(editor) = self.scene_profile.as_mut()
+            && editor.stage == SceneProfileStage::Scenes
+        {
+            editor.stage = SceneProfileStage::Picker;
+        }
+        self.scene_profile_cursor_to(
+            self.scene_profile
+                .as_ref()
+                .map(|editor| editor.picker_cursor)
+                .unwrap_or(0),
+        );
     }
 }
 
@@ -1509,5 +2051,349 @@ mod tests {
             model.anim.tick();
         }
         assert_eq!(model.revealed_last_result(3), Some("scene set: Main"));
+    }
+
+    // --- the scene-profile editor ---
+
+    /// Two scenes, one of them hidden by the config's per-scene flag, and one
+    /// scene profile that hides the other one instead.
+    fn scene_profile_model() -> TuiModel {
+        let mut model = TuiModel::default();
+        model.set_snapshot(ObsSnapshot {
+            scenes: vec![
+                SceneState {
+                    name: "Main".to_string(),
+                    ..Default::default()
+                },
+                SceneState {
+                    name: "Utility BG".to_string(),
+                    hidden: true,
+                    ..Default::default()
+                },
+            ],
+            scene_profiles: vec![SceneProfileState {
+                name: "streaming".to_string(),
+                hidden: vec!["Main".to_string()],
+            }],
+            active_scene_profile: Some("streaming".to_string()),
+            ..Default::default()
+        });
+        model
+    }
+
+    fn labels(rows: &[SceneProfileRow]) -> Vec<&str> {
+        rows.iter().map(|row| row.label.as_str()).collect()
+    }
+
+    /// The editor shows every scene, not the visible ones the dashboard draws
+    /// — choosing what to hide means seeing what is already hidden.
+    #[test]
+    fn the_scene_stage_lists_scenes_the_dashboard_does_not() {
+        let mut model = scene_profile_model();
+        assert_eq!(model.scenes().len(), 1, "the dashboard hides 'Main'");
+
+        model.open_scene_profiles();
+        model.scene_profile_nav(1, 1);
+        model.scene_profile_confirm_picker();
+
+        let rows = model.scene_profile_rows();
+        assert_eq!(labels(&rows), vec!["Main", "Utility BG"]);
+        assert_eq!(
+            rows[0].kind,
+            SceneProfileRowKind::Scene {
+                hidden: true,
+                current: false
+            },
+            "the loaded profile hides Main"
+        );
+        assert_eq!(
+            rows[1].kind,
+            SceneProfileRowKind::Scene {
+                hidden: false,
+                current: false
+            },
+            "and reveals the scene the per-scene flag hides"
+        );
+    }
+
+    #[test]
+    fn toggling_a_scene_hides_it_and_toggling_again_reveals_it() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+        model.scene_profile_nav(1, 1);
+        model.scene_profile_confirm_picker();
+
+        // Cursor on "Main", which this profile hides.
+        model.scene_profile_toggle_hidden();
+        assert_eq!(
+            model.scene_profile_rows()[0].kind,
+            SceneProfileRowKind::Scene {
+                hidden: false,
+                current: false
+            }
+        );
+        model.scene_profile_toggle_hidden();
+        assert_eq!(
+            model.scene_profile_rows()[0].kind,
+            SceneProfileRowKind::Scene {
+                hidden: true,
+                current: false
+            }
+        );
+    }
+
+    /// A new profile starts from what is on screen, so saving it straight away
+    /// cannot silently reveal every scene the config hides today.
+    #[test]
+    fn a_new_scene_profile_starts_from_the_scenes_already_hidden() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+        model.scene_profile_confirm_picker();
+
+        let editor = model.scene_profile.as_ref().unwrap();
+        assert_eq!(editor.stage, SceneProfileStage::Naming);
+        assert_eq!(editor.editing, None);
+        assert!(editor.name.value.is_empty());
+        assert!(editor.hides("Utility BG"));
+        assert!(!editor.hides("Main"));
+    }
+
+    #[test]
+    fn editing_an_existing_scene_profile_copies_it_whole() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+        model.scene_profile_nav(1, 1);
+        model.scene_profile_confirm_picker();
+
+        let editor = model.scene_profile.as_ref().unwrap();
+        assert_eq!(editor.stage, SceneProfileStage::Scenes);
+        assert_eq!(editor.editing.as_deref(), Some("streaming"));
+        assert_eq!(editor.name.value, "streaming");
+        assert!(editor.hides("Main"));
+    }
+
+    #[test]
+    fn the_picker_marks_the_active_scene_profile_and_counts_what_it_hides() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+
+        let rows = model.scene_profile_rows();
+        assert_eq!(rows.len(), 2, "the new-profile row plus the one defined");
+        assert_eq!(rows[0].kind, SceneProfileRowKind::NewProfile);
+        assert!(rows[0].selected, "the cursor starts on the new-profile row");
+        assert_eq!(rows[1].label, "streaming");
+        assert_eq!(
+            rows[1].kind,
+            SceneProfileRowKind::Profile {
+                active: true,
+                hidden_count: 1
+            }
+        );
+    }
+
+    /// Each transition clamps the cursor of the stage it leaves the editor on,
+    /// so neither cursor can point past its own list.
+    #[test]
+    fn editor_cursors_stay_inside_their_own_lists() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+
+        model.scene_profile_nav(1, 99);
+        assert_eq!(model.scene_profile.as_ref().unwrap().picker_cursor, 1);
+        model.scene_profile_nav(-1, 99);
+        assert_eq!(model.scene_profile.as_ref().unwrap().picker_cursor, 0);
+
+        model.scene_profile_set_cursor(99);
+        assert_eq!(model.scene_profile.as_ref().unwrap().picker_cursor, 1);
+
+        model.scene_profile_confirm_picker();
+        model.scene_profile_set_cursor(99);
+        assert_eq!(
+            model.scene_profile.as_ref().unwrap().scene_cursor,
+            1,
+            "the scene list has two rows, not two profiles"
+        );
+    }
+
+    #[test]
+    fn a_blank_name_is_refused_and_keeps_the_user_on_the_naming_stage() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+        model.scene_profile_confirm_picker();
+
+        model.scene_profile_edit_name(|name| name.push(' '));
+        assert_eq!(
+            model.scene_profile_commit_name(),
+            Err(SceneProfileNameError::Unusable)
+        );
+        assert_eq!(
+            model.scene_profile.as_ref().unwrap().stage,
+            SceneProfileStage::Naming
+        );
+
+        for c in "night".chars() {
+            model.scene_profile_edit_name(|name| name.push(c));
+        }
+        assert_eq!(model.scene_profile_commit_name(), Ok(()));
+        let editor = model.scene_profile.as_ref().unwrap();
+        assert_eq!(editor.stage, SceneProfileStage::Scenes);
+        assert_eq!(editor.name.value, "night", "committing trims the name");
+    }
+
+    /// Naming a new profile after one that already exists would have the
+    /// daemon replace that profile — an upsert is what `save_scene_profile`
+    /// is — so the name is refused while the user is still typing it.
+    #[test]
+    fn a_name_another_scene_profile_already_uses_is_refused() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+        model.scene_profile_confirm_picker();
+
+        for c in "STREAMING".chars() {
+            model.scene_profile_edit_name(|name| name.push(c));
+        }
+        assert_eq!(
+            model.scene_profile_commit_name(),
+            Err(SceneProfileNameError::Taken),
+            "matching is case-insensitive, the way the daemon matches"
+        );
+        assert_eq!(
+            model.scene_profile.as_ref().unwrap().stage,
+            SceneProfileStage::Naming,
+            "and the user stays where they can fix it"
+        );
+    }
+
+    /// Re-confirming a profile's own name is not a collision with itself.
+    #[test]
+    fn a_profile_may_be_saved_under_the_name_it_already_has() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+        model.scene_profile_nav(1, 1);
+        model.scene_profile_confirm_picker();
+
+        model.scene_profile_begin_naming();
+        assert_eq!(model.scene_profile_commit_name(), Ok(()));
+        assert_eq!(
+            model.scene_profile.as_ref().unwrap().name.value,
+            "streaming"
+        );
+    }
+
+    /// The editor's cursors are moved by its own transitions, but the lists it
+    /// shows come from the snapshot — which the daemon keeps pushing while the
+    /// modal is open. A snapshot that drops a scene must not leave the cursor
+    /// past the end, where no row is highlighted and `t` does nothing.
+    #[test]
+    fn a_shorter_snapshot_reclamps_the_open_editors_cursor() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+        model.scene_profile_nav(1, 1);
+        model.scene_profile_confirm_picker();
+        model.scene_profile_nav(1, 1);
+        assert_eq!(model.scene_profile.as_ref().unwrap().scene_cursor, 1);
+
+        model.update_snapshot(|snapshot| {
+            snapshot.scenes.truncate(1);
+        });
+
+        assert_eq!(model.scene_profile.as_ref().unwrap().scene_cursor, 0);
+        let rows = model.scene_profile_rows();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows.iter().any(|row| row.selected),
+            "a row is still highlighted"
+        );
+
+        // And the toggle acts on that row rather than doing nothing. The
+        // editor was opened on "streaming", which hides "Main", so the toggle
+        // reveals it.
+        assert!(model.scene_profile.as_ref().unwrap().hides("Main"));
+        model.scene_profile_toggle_hidden();
+        assert!(!model.scene_profile.as_ref().unwrap().hides("Main"));
+    }
+
+    /// The same gap on the picker: a profile deleted from elsewhere while the
+    /// picker is open must not leave the cursor pointing past the last row,
+    /// where activate and delete would both be inert.
+    #[test]
+    fn a_snapshot_that_drops_a_profile_reclamps_the_picker_cursor() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+        model.scene_profile_nav(1, 1);
+        assert!(model.selected_scene_profile().is_some());
+
+        model.update_snapshot(|snapshot| {
+            snapshot.scene_profiles.clear();
+        });
+
+        assert_eq!(model.scene_profile.as_ref().unwrap().picker_cursor, 0);
+        assert!(
+            model.scene_profile_rows().iter().any(|row| row.selected),
+            "the 'new scene profile' row is highlighted instead of nothing"
+        );
+    }
+
+    #[test]
+    fn abandoning_a_rename_puts_the_previous_name_back() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+        model.scene_profile_nav(1, 1);
+        model.scene_profile_confirm_picker();
+
+        model.scene_profile_begin_naming();
+        model.scene_profile_edit_name(TextField::clear);
+        model.scene_profile_edit_name(|name| name.push('x'));
+        model.scene_profile_cancel_name();
+
+        let editor = model.scene_profile.as_ref().unwrap();
+        assert_eq!(editor.stage, SceneProfileStage::Scenes);
+        assert_eq!(editor.name.value, "streaming");
+    }
+
+    #[test]
+    fn esc_on_the_scene_list_returns_to_the_picker_without_closing() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+        model.scene_profile_nav(1, 1);
+        model.scene_profile_confirm_picker();
+
+        model.scene_profile_back();
+        assert_eq!(
+            model.scene_profile.as_ref().unwrap().stage,
+            SceneProfileStage::Picker
+        );
+        model.close_scene_profiles();
+        assert!(model.scene_profile.is_none());
+        assert!(model.scene_profile_rows().is_empty());
+    }
+
+    /// The editor's transitions are all no-ops while it is closed, so a stray
+    /// action cannot bring half of it back.
+    #[test]
+    fn editor_transitions_do_nothing_while_the_editor_is_closed() {
+        let mut model = scene_profile_model();
+        model.scene_profile_nav(1, 1);
+        model.scene_profile_confirm_picker();
+        model.scene_profile_toggle_hidden();
+        model.scene_profile_begin_naming();
+        assert_eq!(
+            model.scene_profile_commit_name(),
+            Err(SceneProfileNameError::Unusable)
+        );
+        assert!(model.scene_profile.is_none());
+    }
+
+    #[test]
+    fn deleting_a_word_from_a_text_field_takes_the_spaces_with_it() {
+        let mut field = TextField {
+            value: "late night  ".to_string(),
+        };
+        field.delete_word();
+        assert_eq!(field.value, "late ");
+        field.delete_word();
+        assert_eq!(field.value, "");
+        field.delete_word();
+        assert_eq!(field.value, "");
     }
 }

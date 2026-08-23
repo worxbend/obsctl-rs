@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use tokio::sync::{Mutex, mpsc, watch};
 
 use obsctl_rs::{
-    config::model::Config,
+    config::{loader, model::Config},
     ipc::{
         protocol::{
             ClientMessage, CommandPayload, LogEvent, LogLevel, ServerMessage, TOPIC_EVENTS,
@@ -150,7 +150,7 @@ async fn start_test_server_with_obs_client(
     snapshot: ObsSnapshot,
 ) -> (IpcClient, watch::Sender<bool>) {
     let (socket_path, shutdown_tx) =
-        spawn_server_with_obs_client(dir, cfg, obs_client, snapshot).await;
+        spawn_server_with_obs_client(dir, cfg, obs_client, snapshot, None).await;
     let client = IpcClient::connect(&socket_path).await.unwrap();
     (client, shutdown_tx)
 }
@@ -158,11 +158,15 @@ async fn start_test_server_with_obs_client(
 /// The same daemon as [`start_test_server_with_obs_client`], handed back by its
 /// socket path instead of by one connected client — which is what a test needs
 /// when it wants two clients talking to the daemon at once.
+///
+/// `config_path` is what the commands that rewrite the config file work on;
+/// `None` is the daemon a test gets when it only cares about OBS requests.
 async fn spawn_server_with_obs_client(
     dir: &TempDir,
     cfg: Config,
     obs_client: ObsClient,
     snapshot: ObsSnapshot,
+    config_path: Option<&Path>,
 ) -> (PathBuf, watch::Sender<bool>) {
     let socket_path = dir.path().join("server_obs.sock");
 
@@ -180,7 +184,7 @@ async fn spawn_server_with_obs_client(
         state,
         obs: obs_handle,
         config,
-        config_path: None,
+        config_path: config_path.map(Path::to_path_buf),
         socket_path: socket_path.clone(),
         registry: registry.clone(),
         reconnecting: Arc::clone(&reconnecting),
@@ -1081,6 +1085,13 @@ ui:
   show_icons: true
   theme: "default"
 scenes: []
+scene_profiles:
+  # Hides nothing on purpose: a profile naming a scene the (empty) list above
+  # does not mention is a validation warning, and the tests using this config
+  # assert on what a clean load reports.
+  - name: "streaming"
+    hidden: []
+active_scene_profile: ~
 audio:
   inputs: []
 keymap:
@@ -1205,6 +1216,556 @@ async fn reload_config_returns_config_invalid_for_bad_file() {
     let (ok, result, _) = extract_response(resp);
     assert!(ok, "server should still respond after failed reload");
     assert_eq!(result.unwrap()["message"], "pong");
+}
+
+/// The config the scene-profile tests work on.
+///
+/// Two scenes whose per-scene `hidden` flags disagree with each other — that
+/// is the baseline — and one scene profile that hides the *other* one. A
+/// profile that only re-hid what the flags already hide could not tell the
+/// two rules apart.
+const SCENE_PROFILE_CONFIG_YAML: &str = r#"version: 1
+connection:
+  password_env: ""
+scenes:
+  - name: "Main"
+    hidden: false
+  - name: "Utility BG"
+    hidden: true
+scene_profiles:
+  - name: "streaming"
+    hidden:
+      - "Main"
+"#;
+
+/// A daemon holding [`SCENE_PROFILE_CONFIG_YAML`], with the snapshot seeded as
+/// if OBS had reported both scenes. Hands back the config file path, because
+/// what these tests care about is what ends up written there.
+async fn start_scene_profile_server(dir: &TempDir) -> (IpcClient, PathBuf, watch::Sender<bool>) {
+    let config_path = dir.path().join("config.yml");
+    std::fs::write(&config_path, SCENE_PROFILE_CONFIG_YAML).unwrap();
+
+    let (client, state, shutdown) = start_test_server_with_config(dir, &config_path).await;
+    state
+        .seed_for_tests(ObsSnapshot {
+            connected: true,
+            scenes: vec![
+                SceneState {
+                    name: "Main".to_string(),
+                    ..SceneState::default()
+                },
+                SceneState {
+                    name: "Utility BG".to_string(),
+                    ..SceneState::default()
+                },
+            ],
+            ..ObsSnapshot::default()
+        })
+        .await;
+
+    (client, config_path, shutdown)
+}
+
+/// What the config file itself says, loaded the way the daemon loads it.
+///
+/// The scene-profile commands are only useful if the change outlives the
+/// process, so every one of these tests checks the file and not just the
+/// daemon's answer.
+fn read_config_from_disk(path: &Path) -> Config {
+    loader::load_with_warnings(path)
+        .expect("the config file the daemon just wrote must still load")
+        .0
+}
+
+async fn send_ok(client: &mut IpcClient, name: &str, args: Value) -> Value {
+    let resp = client.send_command(cmd(name, args)).await.unwrap();
+    let (ok, result, code) = extract_response(resp);
+    assert!(ok, "{name} failed with {code:?}");
+    result.expect("a successful command answers with a result")
+}
+
+/// The `hidden` flag the snapshot reports for one scene.
+fn scene_hidden(snapshot: &Value, name: &str) -> bool {
+    snapshot["scenes"]
+        .as_array()
+        .expect("scenes array")
+        .iter()
+        .find(|scene| scene["name"] == name)
+        .unwrap_or_else(|| panic!("no scene named {name} in the snapshot"))["hidden"]
+        .as_bool()
+        .expect("hidden is a bool")
+}
+
+#[tokio::test]
+async fn save_scene_profile_writes_the_config_and_appears_in_the_snapshot() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    // Subscribed before the save, so the broadcast the save causes cannot be
+    // missed. The initial snapshot pushed on subscribe arrives first and does
+    // not carry the new profile, which is what the predicate skips past.
+    let mut subscriber = IpcClient::connect(&dir.path().join("server_cfg.sock"))
+        .await
+        .unwrap();
+    subscriber.subscribe(&[TOPIC_STATE]).await.unwrap();
+
+    let result = send_ok(
+        &mut client,
+        "save_scene_profile",
+        serde_json::json!({ "target": "podcast", "hidden": ["Utility BG"] }),
+    )
+    .await;
+    assert_eq!(result["message"], "scene profile saved: podcast");
+    assert_eq!(result["created"], true);
+    assert_eq!(result["hidden"], 1);
+
+    let on_disk = read_config_from_disk(&config_path);
+    let saved = on_disk
+        .scene_profiles
+        .iter()
+        .find(|profile| profile.name == "podcast")
+        .expect("the saved scene profile must be in the file");
+    assert_eq!(saved.hidden, vec!["Utility BG".to_string()]);
+    assert_eq!(
+        on_disk.scene_profiles.len(),
+        2,
+        "saving a new profile must not disturb the existing one"
+    );
+    assert!(
+        on_disk.active_scene_profile.is_none(),
+        "saving must not switch the saved profile on"
+    );
+
+    let state = next_state_event_matching(&mut subscriber, "the saved scene profile", |data| {
+        data["scene_profiles"]
+            .as_array()
+            .is_some_and(|profiles| profiles.iter().any(|p| p["name"] == "podcast"))
+    })
+    .await;
+    assert_eq!(state["active_scene_profile"], Value::Null);
+}
+
+#[tokio::test]
+async fn activating_a_scene_profile_hides_exactly_its_scenes_in_the_snapshot() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    let result = send_ok(
+        &mut client,
+        "set_scene_profile",
+        serde_json::json!({ "target": "streaming" }),
+    )
+    .await;
+    assert_eq!(result["message"], "scene profile set: streaming");
+    assert_eq!(result["hidden"], 1);
+
+    let snapshot = send_ok(&mut client, "get_snapshot", Value::Null).await;
+    assert_eq!(snapshot["active_scene_profile"], "streaming");
+    assert!(
+        scene_hidden(&snapshot, "Main"),
+        "the profile lists Main, so Main is hidden"
+    );
+    assert!(
+        !scene_hidden(&snapshot, "Utility BG"),
+        "an active profile replaces the per-scene flags rather than adding to \
+         them, so a scene it omits is visible even though scenes: hides it"
+    );
+
+    assert_eq!(
+        read_config_from_disk(&config_path).active_scene_profile,
+        Some("streaming".to_string())
+    );
+}
+
+#[tokio::test]
+async fn clearing_the_scene_profile_restores_the_per_scene_baseline() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    send_ok(
+        &mut client,
+        "set_scene_profile",
+        serde_json::json!({ "target": "streaming" }),
+    )
+    .await;
+
+    let result = send_ok(&mut client, "clear_scene_profile", Value::Null).await;
+    assert_eq!(result["message"], "scene profile cleared");
+
+    let snapshot = send_ok(&mut client, "get_snapshot", Value::Null).await;
+    assert_eq!(snapshot["active_scene_profile"], Value::Null);
+    assert!(!scene_hidden(&snapshot, "Main"));
+    assert!(scene_hidden(&snapshot, "Utility BG"));
+
+    let on_disk = read_config_from_disk(&config_path);
+    assert!(on_disk.active_scene_profile.is_none());
+    assert_eq!(
+        on_disk.scene_profiles.len(),
+        1,
+        "clearing switches a profile off, it does not delete it"
+    );
+}
+
+#[tokio::test]
+async fn deleting_the_active_scene_profile_also_clears_it() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    send_ok(
+        &mut client,
+        "set_scene_profile",
+        serde_json::json!({ "target": "streaming" }),
+    )
+    .await;
+
+    let result = send_ok(
+        &mut client,
+        "delete_scene_profile",
+        serde_json::json!({ "target": "STREAMING" }),
+    )
+    .await;
+    assert_eq!(result["message"], "scene profile deleted: streaming");
+    assert_eq!(
+        result["deactivated"], true,
+        "the profile that was switched on has to be switched off with it"
+    );
+
+    let snapshot = send_ok(&mut client, "get_snapshot", Value::Null).await;
+    assert_eq!(snapshot["active_scene_profile"], Value::Null);
+    assert_eq!(snapshot["scene_profiles"], serde_json::json!([]));
+    assert!(scene_hidden(&snapshot, "Utility BG"), "baseline is back");
+
+    let on_disk = read_config_from_disk(&config_path);
+    assert!(on_disk.scene_profiles.is_empty());
+    assert!(on_disk.active_scene_profile.is_none());
+}
+
+/// The rename the TUI's editor performs, end to end: one command, and the
+/// profile keeps the hold it had on the scene list.
+///
+/// Renaming used to be a save under the new name followed by a delete of the
+/// old one, and deleting the active profile switches it off — so renaming the
+/// profile in effect quietly stopped hiding anything.
+#[tokio::test]
+async fn renaming_the_active_scene_profile_keeps_it_active() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    send_ok(
+        &mut client,
+        "set_scene_profile",
+        serde_json::json!({ "target": "streaming" }),
+    )
+    .await;
+
+    let result = send_ok(
+        &mut client,
+        "save_scene_profile",
+        serde_json::json!({
+            "target": "night",
+            "hidden": ["Main"],
+            "rename_from": "streaming",
+        }),
+    )
+    .await;
+    assert_eq!(result["message"], "scene profile saved: night");
+    assert_eq!(
+        result["created"], false,
+        "the entry moved, it was not added"
+    );
+    assert_eq!(result["renamed"], true);
+
+    let snapshot = send_ok(&mut client, "get_snapshot", Value::Null).await;
+    assert_eq!(snapshot["active_scene_profile"], "night");
+    assert!(
+        scene_hidden(&snapshot, "Main"),
+        "the renamed profile still hides what it hid"
+    );
+    assert!(
+        !scene_hidden(&snapshot, "Utility BG"),
+        "and the per-scene baseline is still not the one deciding"
+    );
+
+    let on_disk = read_config_from_disk(&config_path);
+    assert_eq!(on_disk.active_scene_profile, Some("night".to_string()));
+    let names: Vec<&str> = on_disk
+        .scene_profiles
+        .iter()
+        .map(|profile| profile.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["night"], "renaming leaves one profile, not two");
+}
+
+/// A rename that lands on a name a *different* profile already answers to is
+/// refused. Doing it would replace that profile's hidden list with this one's
+/// and then delete the entry being renamed away from — two profiles collapsing
+/// into one, with no backup file to get the lost one back from.
+#[tokio::test]
+async fn renaming_a_scene_profile_onto_an_existing_name_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    send_ok(
+        &mut client,
+        "save_scene_profile",
+        serde_json::json!({ "target": "podcast", "hidden": ["Utility BG"] }),
+    )
+    .await;
+
+    let resp = client
+        .send_command(cmd(
+            "save_scene_profile",
+            serde_json::json!({
+                "target": "PODCAST",
+                "hidden": ["Main"],
+                "rename_from": "streaming",
+            }),
+        ))
+        .await
+        .unwrap();
+    let (ok, _, code) = extract_response(resp);
+    assert!(!ok, "renaming onto an existing name must be refused");
+    assert_eq!(code.as_deref(), Some("CONFIG_INVALID"));
+
+    let on_disk = read_config_from_disk(&config_path);
+    let podcast = on_disk
+        .scene_profiles
+        .iter()
+        .find(|profile| profile.name == "podcast")
+        .expect("the profile that was aimed at is still there");
+    assert_eq!(
+        podcast.hidden,
+        vec!["Utility BG".to_string()],
+        "and still hides what it hid"
+    );
+    assert_eq!(
+        on_disk.scene_profiles.len(),
+        2,
+        "the profile being renamed is still there too"
+    );
+}
+
+/// Saving over the *same* profile is not a rename, however differently it is
+/// spelled, so it neither trips the collision check nor loses the active
+/// pointer. A hand-written config can store a name with surrounding
+/// whitespace, and the client passes that stored spelling back verbatim.
+#[tokio::test]
+async fn saving_a_scene_profile_under_its_own_name_is_not_a_rename() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    send_ok(
+        &mut client,
+        "set_scene_profile",
+        serde_json::json!({ "target": "streaming" }),
+    )
+    .await;
+
+    let result = send_ok(
+        &mut client,
+        "save_scene_profile",
+        serde_json::json!({
+            "target": "streaming",
+            "hidden": ["Utility BG"],
+            "rename_from": "  STREAMING  ",
+        }),
+    )
+    .await;
+    assert_eq!(result["created"], false);
+    assert_eq!(result["renamed"], false);
+
+    let on_disk = read_config_from_disk(&config_path);
+    assert_eq!(on_disk.scene_profiles.len(), 1);
+    assert_eq!(
+        on_disk.scene_profiles[0].hidden,
+        vec!["Utility BG".to_string()]
+    );
+    assert_eq!(
+        on_disk.active_scene_profile,
+        Some("streaming".to_string()),
+        "the profile that was on is still on"
+    );
+}
+
+/// A config file that is there but unparseable is left alone rather than
+/// replaced with the daemon's startup copy. Unlike `dump-config`, a
+/// scene-profile save writes no backup, so overwriting would destroy every
+/// hand edit made since the daemon started with nothing to restore from.
+#[tokio::test]
+async fn a_scene_profile_save_refuses_to_overwrite_an_unreadable_config() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    let hand_edited = format!("{SCENE_PROFILE_CONFIG_YAML}      - \"unterminated\n");
+    std::fs::write(&config_path, &hand_edited).unwrap();
+
+    let resp = client
+        .send_command(cmd(
+            "save_scene_profile",
+            serde_json::json!({ "target": "podcast", "hidden": ["Utility BG"] }),
+        ))
+        .await
+        .unwrap();
+    let (ok, _, code) = extract_response(resp);
+    assert!(!ok, "the save must not proceed onto a file it cannot read");
+    assert_eq!(code.as_deref(), Some("CONFIG_INVALID"));
+
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        hand_edited,
+        "the file is byte-for-byte what the user left"
+    );
+}
+
+#[tokio::test]
+async fn set_scene_profile_for_an_unknown_name_returns_config_invalid() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    let resp = client
+        .send_command(cmd(
+            "set_scene_profile",
+            serde_json::json!({ "target": "does-not-exist" }),
+        ))
+        .await
+        .unwrap();
+    let (ok, _, code) = extract_response(resp);
+    assert!(!ok);
+    assert_eq!(code.as_deref(), Some("CONFIG_INVALID"));
+
+    assert!(
+        read_config_from_disk(&config_path)
+            .active_scene_profile
+            .is_none(),
+        "a rejected edit must leave the file exactly as it was"
+    );
+}
+
+#[tokio::test]
+async fn save_scene_profile_rejects_an_oversized_hidden_list() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    // One past the 128-scene cap the executor enforces.
+    let hidden: Vec<String> = (0..129).map(|index| format!("Scene {index}")).collect();
+
+    let resp = client
+        .send_command(cmd(
+            "save_scene_profile",
+            serde_json::json!({ "target": "too-big", "hidden": hidden }),
+        ))
+        .await
+        .unwrap();
+    let (ok, _, code) = extract_response(resp);
+    assert!(!ok);
+    assert_eq!(code.as_deref(), Some("COMMAND_PARSE_ERROR"));
+
+    assert_eq!(
+        read_config_from_disk(&config_path).scene_profiles.len(),
+        1,
+        "a malformed payload must not reach the file"
+    );
+}
+
+#[tokio::test]
+async fn list_scene_profiles_reports_what_the_config_holds() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, _config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    // The test daemon starts holding a default config and only learns what is
+    // in the file when something reads it, so read it first.
+    send_ok(&mut client, "reload_config", Value::Null).await;
+
+    let listing = send_ok(&mut client, "list_scene_profiles", Value::Null).await;
+    assert_eq!(listing["active"], Value::Null);
+    assert_eq!(
+        listing["profiles"],
+        serde_json::json!([{ "name": "streaming", "hidden": ["Main"] }])
+    );
+
+    send_ok(
+        &mut client,
+        "set_scene_profile",
+        serde_json::json!({ "target": "streaming" }),
+    )
+    .await;
+
+    let listing = send_ok(&mut client, "list_scene_profiles", Value::Null).await;
+    assert_eq!(listing["active"], "streaming");
+}
+
+#[tokio::test]
+async fn a_scene_profile_survives_dump_config() {
+    let dir = TempDir::new().unwrap();
+    let config_path = dir.path().join("config.yml");
+    std::fs::write(
+        &config_path,
+        SCENE_PROFILE_CONFIG_YAML.replace(
+            "scene_profiles:",
+            "active_scene_profile: streaming\nscene_profiles:",
+        ),
+    )
+    .unwrap();
+
+    let fake_obs = spawn_fake_obs(false, None).await;
+    let mut cfg = Config::default();
+    cfg.connection.host = "127.0.0.1".to_string();
+    cfg.connection.port = fake_obs.addr.port();
+    cfg.connection.password_env = String::new();
+    cfg.connection.request_timeout_ms = 500;
+    let params = ObsConnectionParams::from_config(&cfg.connection).unwrap();
+    let (event_tx, _event_rx) = mpsc::channel(8);
+    let (obs_client, _, _, _disconnect) = connect(&params, event_tx).await.unwrap();
+
+    let (socket_path, _shutdown) = spawn_server_with_obs_client(
+        &dir,
+        cfg,
+        obs_client,
+        ObsSnapshot {
+            connected: true,
+            ..ObsSnapshot::default()
+        },
+        Some(&config_path),
+    )
+    .await;
+    let mut client = IpcClient::connect(&socket_path).await.unwrap();
+
+    send_ok(&mut client, "dump_config", Value::Null).await;
+
+    // A dump rewrites the whole file from what OBS reports; scene profiles are
+    // not something OBS knows about, so they have to ride through untouched.
+    let on_disk = read_config_from_disk(&config_path);
+    assert_eq!(on_disk.active_scene_profile, Some("streaming".to_string()));
+    assert_eq!(on_disk.scene_profiles.len(), 1);
+    assert_eq!(on_disk.scene_profiles[0].hidden, vec!["Main".to_string()]);
+    assert!(
+        on_disk.scenes.iter().any(|scene| scene.name == "BRB"),
+        "the dump still recorded what OBS has"
+    );
+}
+
+#[tokio::test]
+async fn reload_config_picks_up_a_hand_edited_scene_profile() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    // Spelled in a different case than the profile it names, because a user
+    // editing the file by hand is not required to match it exactly.
+    std::fs::write(
+        &config_path,
+        format!("{SCENE_PROFILE_CONFIG_YAML}active_scene_profile: \"STREAMING\"\n"),
+    )
+    .unwrap();
+
+    send_ok(&mut client, "reload_config", Value::Null).await;
+
+    let snapshot = send_ok(&mut client, "get_snapshot", Value::Null).await;
+    assert_eq!(
+        snapshot["active_scene_profile"], "streaming",
+        "the snapshot advertises the spelling the profile is stored under"
+    );
+    assert!(scene_hidden(&snapshot, "Main"));
+    assert!(!scene_hidden(&snapshot, "Utility BG"));
 }
 
 async fn start_obs_connected_server(
@@ -1425,7 +1986,7 @@ impl HoldableObsDaemon {
         };
 
         let (socket_path, shutdown) =
-            spawn_server_with_obs_client(dir, cfg, obs_client, snapshot).await;
+            spawn_server_with_obs_client(dir, cfg, obs_client, snapshot, None).await;
 
         Self {
             socket_path,

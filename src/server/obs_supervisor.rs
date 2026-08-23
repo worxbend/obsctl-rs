@@ -20,7 +20,8 @@ use crate::runtime::reconnect_policy::ReconnectPolicy;
 use crate::server::log_relay::ServerLog;
 use crate::server::obs_event_adapter::{log_obs_event, needs_full_refresh, normalize_obs_event};
 use crate::server::state_store::{
-    Listing, ObsVersions, OutputFlags, PolledMetrics, RawInputState, RefreshedObsState, StateStore,
+    ConfigProjection, Listing, ObsVersions, OutputFlags, PolledMetrics, RawInputState,
+    RefreshedObsState, StateStore,
 };
 use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
@@ -529,9 +530,9 @@ impl SnapshotRefresher {
             },
         };
 
-        let (scene_cfgs, audio_cfgs) = {
+        let projection = {
             let cfg = self.config.lock().await;
-            (cfg.scenes.clone(), cfg.audio.inputs.clone())
+            ConfigProjection::from_config(&cfg)
         };
 
         // The write lock keeps the swap atomic and preserves the metrics the stats
@@ -541,7 +542,7 @@ impl SnapshotRefresher {
         // fetch again rather than leave the wrong value in place.
         Ok(self
             .state
-            .apply_full_refresh(&refreshed, &scene_cfgs, &audio_cfgs, generation_before)
+            .apply_full_refresh(&refreshed, &projection, generation_before)
             .await)
     }
 

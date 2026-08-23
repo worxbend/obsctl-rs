@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use rust_i18n::t;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -14,9 +15,12 @@ use crate::{
     ipc::protocol::{ServerCommand, ServerMessage},
     tui::{
         app::spawn_session_forwarder,
-        daemon::{PaletteOutcome, ReplyStyle, dispatch_palette_command, send_simple_with_target},
+        daemon::{
+            PaletteOutcome, ReplyStyle, dispatch_palette_command, send_save_scene_profile,
+            send_simple_with_target,
+        },
         input::TuiAction,
-        model::{CommandPaletteState, FocusPanel, TuiModel},
+        model::{CommandPaletteState, FocusPanel, TextField, TuiModel},
         mouse::Hitboxes,
         render::half_page,
         session::TuiEventSession,
@@ -103,6 +107,14 @@ enum DaemonWork {
     PaletteSubmit(String),
     /// Save the theme just confirmed in the settings view to the config file.
     ApplyTheme(Theme),
+    /// Persist the scene profile the editor just built. `editing` names the
+    /// profile it was opened on, which the daemon needs in order to move that
+    /// entry rather than add a second one when the name has changed.
+    SceneProfileSave {
+        name: String,
+        hidden: Vec<String>,
+        editing: Option<String>,
+    },
 }
 
 impl DaemonWork {
@@ -136,6 +148,20 @@ impl DaemonWork {
             DaemonWork::ApplyTheme(theme) => {
                 ActionOutcome::status(persist_theme_choice(ctx.config_path, theme.id).await)
             }
+            // One command, including when the name has changed. The rename
+            // used to be a save under the new name followed by a delete of the
+            // old one, which was two rewrites of the config file — and the
+            // delete switched the scene profile off whenever the renamed one
+            // was the active one, because a delete of the active profile is
+            // supposed to do exactly that. Telling the daemon which entry is
+            // being replaced lets it move that entry in place instead.
+            DaemonWork::SceneProfileSave {
+                name,
+                hidden,
+                editing,
+            } => ActionOutcome::Status(
+                send_save_scene_profile(socket_path, &name, &hidden, editing.as_deref()).await,
+            ),
         }
     }
 }
@@ -382,7 +408,133 @@ fn dispatch(action: TuiAction, model: &mut TuiModel, ctx: &ActionCtx<'_>) -> Dis
         TuiAction::ObsStatus => simple(ServerCommand::GetObsStatus, ReplyStyle::ShowPayload),
         TuiAction::ServerStatus => simple(ServerCommand::GetServerStatus, ReplyStyle::ShowPayload),
         TuiAction::RetryConnect => daemon(DaemonWork::RetryConnect),
+
+        // --- the scene-profile editor ---
+        //
+        // Every one of these is a pure model update except the four that
+        // change what is stored on disk, and those close the modal first: the
+        // daemon answers with a fresh snapshot, and the scene list the user
+        // came back to is what shows the result.
+        TuiAction::OpenSceneProfiles => {
+            model.open_scene_profiles();
+            done()
+        }
+        TuiAction::CloseSceneProfiles => {
+            model.close_scene_profiles();
+            done()
+        }
+        TuiAction::SceneProfileNavUp(rows) => {
+            model.scene_profile_nav(-1, rows);
+            done()
+        }
+        TuiAction::SceneProfileNavDown(rows) => {
+            model.scene_profile_nav(1, rows);
+            done()
+        }
+        TuiAction::SceneProfileSelect(index) => {
+            model.scene_profile_set_cursor(index);
+            done()
+        }
+        TuiAction::SceneProfilePickerConfirm => {
+            model.scene_profile_confirm_picker();
+            done()
+        }
+        TuiAction::SceneProfileActivate => match selected_scene_profile_name(model) {
+            Some(name) => {
+                model.close_scene_profiles();
+                daemon(DaemonWork::Targeted(ServerCommand::SetSceneProfile, name))
+            }
+            // Row 0 is the "new scene profile" row: there is nothing to
+            // activate yet.
+            None => done(),
+        },
+        TuiAction::SceneProfileClearActive => {
+            model.close_scene_profiles();
+            simple(ServerCommand::ClearSceneProfile, ReplyStyle::Acknowledge)
+        }
+        TuiAction::SceneProfileDelete => match selected_scene_profile_name(model) {
+            Some(name) => {
+                model.close_scene_profiles();
+                daemon(DaemonWork::Targeted(
+                    ServerCommand::DeleteSceneProfile,
+                    name,
+                ))
+            }
+            None => done(),
+        },
+        TuiAction::SceneProfileToggleHidden => {
+            model.scene_profile_toggle_hidden();
+            done()
+        }
+        TuiAction::SceneProfileBeginNaming => {
+            model.scene_profile_begin_naming();
+            done()
+        }
+        TuiAction::SceneProfileNameChar(c) => {
+            model.scene_profile_edit_name(|name| name.push(c));
+            done()
+        }
+        TuiAction::SceneProfileNameBackspace => {
+            model.scene_profile_edit_name(TextField::backspace);
+            done()
+        }
+        TuiAction::SceneProfileNameClear => {
+            model.scene_profile_edit_name(TextField::clear);
+            done()
+        }
+        TuiAction::SceneProfileNameDeleteWord => {
+            model.scene_profile_edit_name(TextField::delete_word);
+            done()
+        }
+        TuiAction::SceneProfileNameCommit => match model.scene_profile_commit_name() {
+            Ok(()) => done(),
+            // A name that cannot be saved keeps the user on the naming stage
+            // rather than dropping them back onto the scene list with nothing
+            // to show for the keypress — and says why, since an Enter that
+            // appears to do nothing reads as a broken key.
+            Err(error) => {
+                Dispatched::Done(ActionOutcome::status(t!(error.message_key()).into_owned()))
+            }
+        },
+        TuiAction::SceneProfileNameCancel => {
+            model.scene_profile_cancel_name();
+            done()
+        }
+        TuiAction::SceneProfileSave => save_scene_profile(model),
+        TuiAction::SceneProfileBack => {
+            model.scene_profile_back();
+            done()
+        }
     }
+}
+
+/// Name of the scene profile under the picker cursor, or `None` on the "new
+/// scene profile" row, which names nothing that exists yet.
+fn selected_scene_profile_name(model: &TuiModel) -> Option<String> {
+    model
+        .selected_scene_profile()
+        .map(|profile| profile.name.clone())
+}
+
+/// Enter on the scene list: hand the profile to the daemon, or — when it has
+/// no name yet, which is every profile made from row 0 that was `Esc`aped out
+/// of the naming stage — ask for one first.
+fn save_scene_profile(model: &mut TuiModel) -> Dispatched {
+    let Some(editor) = model.scene_profile.as_ref() else {
+        return done();
+    };
+    if editor.name.value.trim().is_empty() {
+        model.scene_profile_begin_naming();
+        return done();
+    }
+
+    let work = DaemonWork::SceneProfileSave {
+        name: editor.name.value.clone(),
+        hidden: editor.hidden.iter().cloned().collect(),
+        editing: editor.editing.clone(),
+    };
+    model.close_scene_profiles();
+    daemon(work)
 }
 
 fn simple(command: ServerCommand, reply: ReplyStyle) -> Dispatched {
@@ -457,10 +609,10 @@ fn adjust_focused_volume(
 #[cfg(test)]
 mod tests {
     use super::{ActionCtx, ActionOutcome, Dispatched, dispatch, persist_theme_choice};
-    use crate::obs::state::{AudioState, ObsSnapshot, SceneState};
+    use crate::obs::state::{AudioState, ObsSnapshot, SceneProfileState, SceneState};
     use crate::tui::input::TuiAction;
     use crate::tui::keymap::Pending;
-    use crate::tui::model::{FocusPanel, TuiModel};
+    use crate::tui::model::{FocusPanel, SceneProfileRowKind, SceneProfileStage, TuiModel};
     use crate::tui::mouse::Hitboxes;
     use std::path::Path;
     use tokio::sync::mpsc;
@@ -566,6 +718,9 @@ mod tests {
             TuiAction::ActivateIndex(FocusPanel::Profiles, 0),
             TuiAction::ToggleMute,
             TuiAction::ApplySettingsTheme,
+            // Clearing the active scene profile needs no editor state: there
+            // is exactly one thing it can mean.
+            TuiAction::SceneProfileClearActive,
         ];
         for action in daemon_bound {
             let mut model = populated_model();
@@ -621,6 +776,28 @@ mod tests {
             TuiAction::OpenSettings,
             TuiAction::CloseSettings,
             TuiAction::SettingsSelect(1),
+            // The scene-profile editor. With no editor open, even the three
+            // that can reach the daemon have nothing to send and finish here;
+            // `saving_a_scene_profile_is_the_only_editor_action_that_writes`
+            // below is what exercises them with one open.
+            TuiAction::OpenSceneProfiles,
+            TuiAction::CloseSceneProfiles,
+            TuiAction::SceneProfileNavUp(1),
+            TuiAction::SceneProfileNavDown(1),
+            TuiAction::SceneProfileSelect(0),
+            TuiAction::SceneProfilePickerConfirm,
+            TuiAction::SceneProfileActivate,
+            TuiAction::SceneProfileDelete,
+            TuiAction::SceneProfileToggleHidden,
+            TuiAction::SceneProfileBeginNaming,
+            TuiAction::SceneProfileNameChar('x'),
+            TuiAction::SceneProfileNameBackspace,
+            TuiAction::SceneProfileNameClear,
+            TuiAction::SceneProfileNameDeleteWord,
+            TuiAction::SceneProfileNameCommit,
+            TuiAction::SceneProfileNameCancel,
+            TuiAction::SceneProfileSave,
+            TuiAction::SceneProfileBack,
         ];
         for action in local {
             let mut model = populated_model();
@@ -649,6 +826,136 @@ mod tests {
             dispatch(TuiAction::ToggleMute, &mut model, &ctx),
             Dispatched::Done(ActionOutcome::Continue)
         ));
+    }
+
+    /// A model holding one scene profile, with the editor open on the picker.
+    fn scene_profile_model() -> TuiModel {
+        let mut model = TuiModel::default();
+        model.set_snapshot(ObsSnapshot {
+            scenes: vec![
+                SceneState {
+                    name: "Main".to_string(),
+                    ..Default::default()
+                },
+                SceneState {
+                    name: "Utility BG".to_string(),
+                    ..Default::default()
+                },
+            ],
+            scene_profiles: vec![SceneProfileState {
+                name: "streaming".to_string(),
+                hidden: vec!["Utility BG".to_string()],
+            }],
+            ..Default::default()
+        });
+        model.open_scene_profiles();
+        model
+    }
+
+    /// Editing a scene profile is all local until the moment it is persisted,
+    /// and the three actions that persist close the modal first — the daemon's
+    /// answer is a fresh snapshot, and the dashboard underneath is what shows
+    /// it.
+    #[test]
+    fn saving_a_scene_profile_is_the_only_editor_action_that_writes() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+
+        // Row 1 is the defined profile, so activating and deleting both have a
+        // name to send.
+        for action in [
+            TuiAction::SceneProfileActivate,
+            TuiAction::SceneProfileDelete,
+        ] {
+            let mut model = scene_profile_model();
+            model.scene_profile_nav(1, 1);
+            assert!(
+                matches!(
+                    dispatch(action.clone(), &mut model, &ctx),
+                    Dispatched::Daemon(_)
+                ),
+                "{action:?} should be answered by the daemon"
+            );
+            assert!(model.scene_profile.is_none(), "{action:?} closes the modal");
+        }
+
+        // Row 0 is the "new scene profile" row, which names nothing yet.
+        for action in [
+            TuiAction::SceneProfileActivate,
+            TuiAction::SceneProfileDelete,
+        ] {
+            let mut model = scene_profile_model();
+            assert!(matches!(
+                dispatch(action, &mut model, &ctx),
+                Dispatched::Done(ActionOutcome::Continue)
+            ));
+            assert!(model.scene_profile.is_some(), "and leaves the modal up");
+        }
+
+        let mut model = scene_profile_model();
+        model.scene_profile_nav(1, 1);
+        model.scene_profile_confirm_picker();
+        assert!(matches!(
+            dispatch(TuiAction::SceneProfileSave, &mut model, &ctx),
+            Dispatched::Daemon(_)
+        ));
+        assert!(model.scene_profile.is_none());
+    }
+
+    /// Enter on a profile that has no name yet asks for one instead of sending
+    /// a payload the daemon would refuse.
+    #[test]
+    fn saving_an_unnamed_scene_profile_asks_for_a_name_first() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+        let mut model = scene_profile_model();
+        // Row 0 opens the naming stage; Esc leaves it with the name still
+        // empty.
+        model.scene_profile_confirm_picker();
+        model.scene_profile_cancel_name();
+
+        assert!(matches!(
+            dispatch(TuiAction::SceneProfileSave, &mut model, &ctx),
+            Dispatched::Done(ActionOutcome::Continue)
+        ));
+        assert_eq!(
+            model.scene_profile.as_ref().map(|editor| editor.stage),
+            Some(SceneProfileStage::Naming),
+            "the editor stays open, asking for a name"
+        );
+    }
+
+    /// `t` is the key the feature exists for: it changes what the editor will
+    /// save, and the change is visible in the rows the widget draws.
+    #[test]
+    fn toggling_a_scene_changes_what_the_rows_report() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+        let mut model = scene_profile_model();
+        model.scene_profile_nav(1, 1);
+        model.scene_profile_confirm_picker();
+
+        let hidden = |model: &TuiModel| {
+            model
+                .scene_profile_rows()
+                .into_iter()
+                .map(|row| match row.kind {
+                    SceneProfileRowKind::Scene { hidden, .. } => hidden,
+                    other => panic!("expected a scene row, got {other:?}"),
+                })
+                .collect::<Vec<bool>>()
+        };
+
+        assert_eq!(hidden(&model), vec![false, true]);
+        dispatch(TuiAction::SceneProfileToggleHidden, &mut model, &ctx);
+        assert_eq!(hidden(&model), vec![true, true], "Main is hidden now");
+        dispatch(TuiAction::SceneProfileNavDown(1), &mut model, &ctx);
+        dispatch(TuiAction::SceneProfileToggleHidden, &mut model, &ctx);
+        assert_eq!(
+            hidden(&model),
+            vec![true, false],
+            "and Utility BG is revealed"
+        );
     }
 
     #[tokio::test]

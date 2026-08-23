@@ -87,6 +87,22 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         },
     },
     PaletteCommandSpec {
+        canonical: "scene-profile",
+        aliases: &["set-scene-profile"],
+        arity: 1,
+        build: |args| {
+            Ok(Command::SetSceneProfile {
+                target: target_of(args)?,
+            })
+        },
+    },
+    PaletteCommandSpec {
+        canonical: "scene-profile-off",
+        aliases: &["scene-profile-clear"],
+        arity: 0,
+        build: |_| Ok(Command::ClearSceneProfile),
+    },
+    PaletteCommandSpec {
         canonical: "mute",
         aliases: &[],
         arity: 1,
@@ -484,6 +500,42 @@ mod tests {
         assert!(parse_u8_in_range("50.5", "percent", 0, 100).is_err());
         assert!(parse_u8_in_range(" 42", "percent", 0, 100).is_err());
         assert!(parse_u8_in_range("42 ", "percent", 0, 100).is_err());
+    }
+
+    /// A scene profile is a set of scene-visibility choices, and `profile` is
+    /// the OBS profile: two commands, never one.
+    #[test]
+    fn scene_profile_commands_are_separate_from_the_obs_profile_command() {
+        assert_eq!(
+            parse(":scene-profile streaming").unwrap(),
+            Command::SetSceneProfile {
+                target: "streaming".to_string()
+            }
+        );
+        assert_eq!(
+            parse(":set-scene-profile streaming").unwrap(),
+            Command::SetSceneProfile {
+                target: "streaming".to_string()
+            }
+        );
+        assert_eq!(
+            parse(":scene-profile-off").unwrap(),
+            Command::ClearSceneProfile
+        );
+        assert_eq!(
+            parse(":scene-profile-clear").unwrap(),
+            Command::ClearSceneProfile
+        );
+        assert_eq!(
+            parse(":profile streaming").unwrap(),
+            Command::SetProfile {
+                target: "streaming".to_string()
+            }
+        );
+        // Switching profiles is not something to do by accident, so neither
+        // command guesses at a missing or extra argument.
+        assert!(parse(":scene-profile").is_err());
+        assert!(parse(":scene-profile-off now").is_err());
     }
 
     #[test]

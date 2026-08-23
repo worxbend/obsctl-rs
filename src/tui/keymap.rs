@@ -66,6 +66,10 @@ const LEADER_ROOT: &[WhichKeyEntry] = &[
     group("c", "config"),
     group("o", "obs"),
     group("u", "ui"),
+    // A leaf, not a group: `P` opens the scene-profile editor outright. Note
+    // the case — `<leader>p` is the panel group, and a scene profile is not an
+    // OBS profile.
+    entry("P", "scene profiles"),
     entry(":", "command palette"),
     entry("q", "quit"),
 ];
@@ -73,6 +77,7 @@ const LEADER_ROOT: &[WhichKeyEntry] = &[
 const LEADER_FIND: &[WhichKeyEntry] = &[
     entry("s", "scene"),
     entry("p", "profile"),
+    entry("P", "scene profile"),
     entry("c", "collection"),
     entry("a", "audio input"),
 ];
@@ -141,11 +146,13 @@ pub fn resolve(pending: Pending, ch: char) -> Option<TuiAction> {
                 seed: "",
             }),
             'q' => Some(TuiAction::Quit),
+            'P' => Some(TuiAction::OpenSceneProfiles),
             _ => None,
         },
         Pending::LeaderGroup('f') => match ch {
             's' => Some(seeded("scene ")),
             'p' => Some(seeded("profile ")),
+            'P' => Some(seeded("scene-profile ")),
             'c' => Some(seeded("collection ")),
             'a' => Some(seeded("toggle-mute ")),
             _ => None,
@@ -260,6 +267,32 @@ mod tests {
     #[test]
     fn gg_jumps_to_the_top_of_the_focused_list() {
         assert!(matches!(resolve(Pending::G, 'g'), Some(TuiAction::NavTop)));
+    }
+
+    /// `<leader>P` and `<leader>p` are two different mappings, and the case is
+    /// the whole difference: `p` opens the panel group, `P` opens the
+    /// scene-profile editor. A scene profile is not an OBS profile.
+    #[test]
+    fn leader_p_is_a_group_and_leader_shift_p_opens_the_scene_profile_editor() {
+        assert_eq!(
+            resolve(Pending::Leader, 'P'),
+            Some(TuiAction::OpenSceneProfiles)
+        );
+        assert_eq!(
+            resolve(Pending::Leader, 'p'),
+            Some(TuiAction::SetPending(Pending::LeaderGroup('p')))
+        );
+    }
+
+    #[test]
+    fn leader_find_shift_p_seeds_the_scene_profile_command() {
+        assert_eq!(
+            resolve(Pending::LeaderGroup('f'), 'P'),
+            Some(TuiAction::OpenPalette {
+                prefix: None,
+                seed: "scene-profile "
+            })
+        );
     }
 
     #[test]

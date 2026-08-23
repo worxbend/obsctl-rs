@@ -17,7 +17,7 @@ use crate::server::{
     log_relay::ServerLog,
     obs_supervisor::{ObsSupervisor, ObsSupervisorConfig},
     options::ServerOptions,
-    state_store::StateStore,
+    state_store::{ConfigProjection, StateStore},
 };
 
 /// Start the daemon and block until shutdown.
@@ -46,6 +46,17 @@ pub async fn run(options: ServerOptions) -> i32 {
 
     let hub = Arc::new(BroadcastHub::new());
     let state = StateStore::new(Arc::clone(&hub));
+    // Seed the snapshot from the config before anything can subscribe to it.
+    // The scene profiles and the active one live only in the config file, so
+    // nothing about them needs OBS — but until this ran, the only writers of
+    // those snapshot fields were a config command and the refresh that follows
+    // a successful OBS connect. A daemon started with OBS closed therefore
+    // published an empty profile list, and the TUI's editor showed no profiles
+    // to activate even though `obsctl scene-profiles`, which answers from the
+    // config, listed them.
+    state
+        .merge_config(&ConfigProjection::from_config(&config))
+        .await;
     let obs_handle: Arc<Mutex<Option<ObsClient>>> = Arc::new(Mutex::new(None));
     let reconnecting = Arc::new(AtomicBool::new(false));
     let config_shared = Arc::new(Mutex::new(config));

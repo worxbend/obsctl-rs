@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+
 use crate::domain::aliases::ensure_unique_aliases_and_shortcuts;
 use crate::domain::errors::ObsctlError;
-use crate::domain::names::{ResourceKind, checked_name};
+use crate::domain::names::{ResourceKind, checked_name, normalized_name};
 use crate::domain::result::Result;
 use crate::ipc::socket_path::resolve_server_socket_path;
 use crate::support::validation::{
@@ -35,6 +37,7 @@ pub fn validate(config: &Config) -> Result<Vec<ValidationWarning>> {
     validate_socket_path(config)?;
     warnings.extend(validate_password_config(&config.connection)?);
     validate_no_duplicate_aliases(config)?;
+    warnings.extend(validate_scene_profiles(config)?);
 
     Ok(warnings)
 }
@@ -229,13 +232,98 @@ fn validate_resource_names(config: &Config) -> Result<()> {
         checked_name(&audio.name).map_err(|error| config_invalid(format!("audio name {error}")))?;
     }
 
+    for profile in &config.scene_profiles {
+        checked_name(&profile.name)
+            .map_err(|error| config_invalid(format!("scene profile name {error}")))?;
+        for scene in &profile.hidden {
+            checked_name(scene).map_err(|error| {
+                config_invalid(format!(
+                    "scene profile '{}' hidden scene {error}",
+                    profile.name
+                ))
+            })?;
+        }
+    }
+
     Ok(())
+}
+
+/// Scene profiles: names must be distinct, and the selected one should exist.
+///
+/// Only the duplicate is an error. Two profiles answering to the same name
+/// make `active_scene_profile` ambiguous and there is no sensible way to pick
+/// one. Everything else here is a warning, because the daemon has a defined
+/// answer in each case — fall back to the per-scene `hidden` flags — and a
+/// config that has been working must not stop the daemon over a scene that is
+/// merely absent right now.
+///
+/// Runs last in [`validate`] so that a config wrong in more than one way still
+/// reports whichever earlier problem it reported before scene profiles existed.
+fn validate_scene_profiles(config: &Config) -> Result<Vec<ValidationWarning>> {
+    let mut seen: HashSet<String> = HashSet::new();
+    for profile in &config.scene_profiles {
+        // `validate_resource_names` already rejected any name this cannot
+        // normalize, so a failure here cannot happen; treating it as "no
+        // duplicate" keeps this function from having to invent a second
+        // message for a case the earlier check owns.
+        let Ok(normalized) = normalized_name(&profile.name) else {
+            continue;
+        };
+        if !seen.insert(normalized) {
+            return Err(config_invalid(format!(
+                "duplicate scene profile name: '{}'",
+                profile.name
+            )));
+        }
+    }
+
+    let mut warnings = Vec::new();
+
+    if let Some(active) = &config.active_scene_profile
+        && config.active_scene_profile().is_none()
+    {
+        warnings.push(ValidationWarning(format!(
+            "active scene profile '{active}' is not defined; no scenes are hidden by a profile"
+        )));
+    }
+
+    // An empty `scenes:` list is not a claim that there are no scenes — it is
+    // the shipped default, and what `obsctl init` writes. Only `dump-config`
+    // ever fills it in. Cross-checking a profile against it in that state
+    // would report every scene a profile hides as unknown, which is one
+    // warning per hidden scene in the server log and the TUI log pane on every
+    // save, reload and validate, about scenes that are perfectly real. With no
+    // list to check against there is no ground truth, so there is nothing to
+    // say.
+    if config.scenes.is_empty() {
+        return Ok(warnings);
+    }
+
+    let configured_scenes: HashSet<String> = config
+        .scenes
+        .iter()
+        .filter_map(|scene| normalized_name(&scene.name).ok())
+        .collect();
+    for profile in &config.scene_profiles {
+        for scene in &profile.hidden {
+            let known = normalized_name(scene)
+                .is_ok_and(|normalized| configured_scenes.contains(&normalized));
+            if !known {
+                warnings.push(ValidationWarning(format!(
+                    "scene profile '{}' hides '{scene}', which is not in the scenes list",
+                    profile.name
+                )));
+            }
+        }
+    }
+
+    Ok(warnings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::model::{AudioInputConfig, SceneConfig};
+    use crate::config::model::{AudioInputConfig, SceneConfig, SceneProfileConfig};
     use crate::support::validation::test_env::with_env_var;
     use crate::support::validation::{MAX_PASSWORD_LENGTH, MAX_TARGET_TOKEN_LENGTH};
     use tempfile::TempDir;
@@ -768,6 +856,140 @@ mod tests {
             ..Default::default()
         }];
         assert!(validate(&c).is_err());
+    }
+
+    fn scene_profile(name: &str, hidden: &[&str]) -> SceneProfileConfig {
+        SceneProfileConfig {
+            name: name.to_string(),
+            hidden: hidden.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// A config that lists one scene and one profile hiding it, so that scene
+    /// profile tests start from a state with no warnings of their own.
+    fn config_with_one_profile() -> Config {
+        let mut c = valid_config();
+        c.scenes = vec![SceneConfig {
+            name: "Utility BG".to_string(),
+            ..Default::default()
+        }];
+        c.scene_profiles = vec![scene_profile("streaming", &["Utility BG"])];
+        c
+    }
+
+    #[test]
+    fn a_valid_scene_profile_produces_no_warnings() {
+        let mut c = config_with_one_profile();
+        c.active_scene_profile = Some("streaming".to_string());
+        let warnings = validate(&c).expect("a well-formed scene profile should validate");
+        assert!(
+            !warnings.iter().any(|w| w.0.contains("scene profile")),
+            "unexpected scene profile warning: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_scene_profile_names_rejected() {
+        let mut c = config_with_one_profile();
+        c.scene_profiles
+            .push(scene_profile("streaming", &["Utility BG"]));
+        let err = validate(&c).unwrap_err();
+        assert!(err.to_string().contains("duplicate scene profile name"));
+    }
+
+    #[test]
+    fn duplicate_scene_profile_names_rejected_case_insensitive() {
+        let mut c = config_with_one_profile();
+        c.scene_profiles
+            .push(scene_profile(" Streaming ", &["Utility BG"]));
+        assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn scene_profile_name_rejects_blank_and_control_characters() {
+        for name in ["   ", "record\nonly"] {
+            let mut c = valid_config();
+            c.scene_profiles = vec![scene_profile(name, &[])];
+            let err = validate(&c).unwrap_err();
+            assert!(
+                err.to_string().contains("scene profile name"),
+                "name {name:?} gave {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn scene_profile_hidden_entry_rejects_control_characters() {
+        let mut c = valid_config();
+        c.scene_profiles = vec![scene_profile("streaming", &["Utility\nBG"])];
+        let err = validate(&c).unwrap_err();
+        assert!(err.to_string().contains("hidden scene"), "got {err}");
+    }
+
+    /// A profile that has been deleted, or a name typed with a typo, leaves
+    /// the daemon with a defined answer — the per-scene flags — so it must not
+    /// stop startup.
+    #[test]
+    fn an_unknown_active_scene_profile_warns_instead_of_failing() {
+        let mut c = config_with_one_profile();
+        c.active_scene_profile = Some("no such profile".to_string());
+        let warnings = validate(&c).expect("an unknown scene profile must not block startup");
+        assert!(
+            warnings.iter().any(|w| w
+                .0
+                .contains("active scene profile 'no such profile' is not defined")),
+            "expected a fallback warning, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_profile_hiding_an_unconfigured_scene_warns() {
+        let mut c = config_with_one_profile();
+        c.scene_profiles[0].hidden.push("Gone Scene".to_string());
+        let warnings = validate(&c).expect("a missing scene must not block startup");
+        assert!(
+            warnings.iter().any(|w| w
+                .0
+                .contains("hides 'Gone Scene', which is not in the scenes list")),
+            "expected a stale-scene warning, got {warnings:?}"
+        );
+    }
+
+    /// An empty `scenes:` is the shipped default and what `obsctl init`
+    /// writes; only `dump-config` ever fills it in. With no list to check
+    /// against there is no ground truth, so a profile hiding real scenes must
+    /// not produce one "not in the scenes list" warning per scene on every
+    /// save, reload and validate.
+    #[test]
+    fn a_profile_hiding_scenes_warns_about_none_of_them_when_scenes_is_empty() {
+        let mut c = Config::default();
+        c.connection.password_env = String::new();
+        c.scene_profiles = vec![SceneProfileConfig {
+            name: "streaming".to_string(),
+            hidden: vec![
+                "Utility BG".to_string(),
+                "BRB".to_string(),
+                "Cam Only".to_string(),
+            ],
+        }];
+
+        let warnings = validate(&c).expect("this config is valid");
+        assert!(
+            warnings.is_empty(),
+            "an empty scenes list is not evidence a scene is missing, got {warnings:?}"
+        );
+    }
+
+    /// Scene profile checks run last, so a config that is also wrong in an
+    /// older way still reports the older problem first.
+    #[test]
+    fn scene_profile_checks_do_not_pre_empt_earlier_errors() {
+        let mut c = config_with_one_profile();
+        c.scene_profiles
+            .push(scene_profile("streaming", &["Utility BG"]));
+        c.connection.host = String::new();
+        let err = validate(&c).unwrap_err();
+        assert!(err.to_string().contains("connection.host"), "got {err}");
     }
 
     #[test]

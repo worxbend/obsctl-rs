@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -9,15 +10,20 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
-use crate::config::{dump as dump_config_mod, model::Config, schema::ValidationWarning};
+use crate::config::{
+    dump as dump_config_mod,
+    model::{Config, SceneProfileConfig},
+    schema::ValidationWarning,
+};
 use crate::domain::{
     aliases::{AliasEntry, resolve, resolve_audio},
     errors::ObsctlError,
+    names::normalized_name,
     result::Result,
     volume::percent_to_mul,
 };
 use crate::ipc::{
-    protocol::{ErrorPayload, ServerCommand, ServerMessage, public_error_code},
+    protocol::{ErrorPayload, RENAME_FROM, ServerCommand, ServerMessage, public_error_code},
     session::{BroadcastHub, CommandDispatch},
 };
 use crate::obs::{
@@ -27,7 +33,9 @@ use crate::obs::{
     validation::extract_resource_names,
 };
 use crate::server::{
-    client_registry::ClientRegistry, log_relay::ServerLog, state_store::StateStore,
+    client_registry::ClientRegistry,
+    log_relay::ServerLog,
+    state_store::{ConfigProjection, StateStore},
 };
 use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 
@@ -143,6 +151,13 @@ impl CommandExecutor {
                 ServerCommand::DumpConfig => self.cmd_dump_config().await,
                 ServerCommand::ToggleStream => self.cmd_toggle_stream().await,
                 ServerCommand::ToggleRecord => self.cmd_toggle_record().await,
+                ServerCommand::SetSceneProfile => self.cmd_set_scene_profile(&payload.args).await,
+                ServerCommand::ClearSceneProfile => self.cmd_clear_scene_profile().await,
+                ServerCommand::SaveSceneProfile => self.cmd_save_scene_profile(&payload.args).await,
+                ServerCommand::DeleteSceneProfile => {
+                    self.cmd_delete_scene_profile(&payload.args).await
+                }
+                ServerCommand::ListSceneProfiles => self.cmd_list_scene_profiles().await,
             }
         }
         .await;
@@ -371,7 +386,7 @@ impl CommandExecutor {
         let _config_file = self.config_file.lock().await;
 
         let in_memory = self.config.lock().await.clone();
-        let base = dump_merge_base(path, &in_memory);
+        let base = config_write_base(path, &in_memory);
         let merged = dump_config_mod::merge(&base.config, &obs_resources)?;
 
         let backup = dump_config_mod::write_backup(path)?;
@@ -436,6 +451,266 @@ impl CommandExecutor {
         }
     }
 
+    /// Read the config file, apply `edit`, validate the result, write it back,
+    /// and make the daemon and every subscriber agree with what is now on disk.
+    ///
+    /// The ordering is the whole point of the helper. Nothing is applied in
+    /// memory until the file has been written, so a rejected edit or a failed
+    /// write leaves the daemon holding exactly what the file still says
+    /// instead of the two disagreeing until the next reload.
+    ///
+    /// There is deliberately no `.bak` copy. Backups belong to `dump-config`,
+    /// which rewrites the whole file from what OBS reports; a scene-profile
+    /// edit changes two sections, and writing a backup for each one would
+    /// litter the config directory as fast as the user presses save. That is
+    /// also why a file that cannot be read is refused below instead of being
+    /// written over: with no backup, there would be nothing to restore from.
+    ///
+    /// Like `dump-config`, this rewrites the file from the parsed model, so
+    /// comments and key ordering in a hand-written config do not survive it.
+    async fn edit_config_file<F>(&self, edit: F) -> Result<(Config, Vec<ValidationWarning>)>
+    where
+        F: FnOnce(&mut Config) -> Result<()>,
+    {
+        // Checked first: with nowhere to write, the edit cannot be made
+        // durable, and applying it in memory only would be a change the user
+        // loses at the next restart without being told.
+        let path = self.config_path.as_ref().ok_or_else(|| {
+            ObsctlError::ConfigInvalid("scene profiles require a config file path".to_string())
+        })?;
+
+        // The same lock `dump-config` and `reload-config` take: everything
+        // from the read below to the write is one read-modify-write of the
+        // file and must not interleave with another one.
+        let _config_file = self.config_file.lock().await;
+
+        let in_memory = self.config.lock().await.clone();
+        let base = config_write_base(path, &in_memory);
+        // A config file that exists but cannot be read or parsed is not
+        // something to build a write on. `dump-config` can fall back to the
+        // daemon's in-memory copy because it takes a backup first and its
+        // whole job is to produce a working file out of what OBS reports; a
+        // scene-profile edit takes no backup, so the same fallback here would
+        // replace a file — every hand edit made since the daemon started
+        // included — with a copy that predates them, and report success.
+        // Refusing leaves the file untouched and tells the user what to fix.
+        // A file that is merely *absent* is a different matter: writing it
+        // from memory recreates what the daemon is already running on.
+        if let Some(error) = base.error.filter(|_| !base.missing) {
+            return Err(ObsctlError::ConfigInvalid(format!(
+                "refusing to overwrite {}, which cannot be read: {error}",
+                path.display()
+            )));
+        }
+
+        let mut edited = base.config;
+        edit(&mut edited)?;
+
+        let warnings = crate::config::schema::validate(&edited)?;
+        crate::config::writer::write_atomic(&edited, path)?;
+
+        {
+            let mut guard = self.config.lock().await;
+            *guard = edited.clone();
+        }
+
+        // What turns the edit into something clients can see: the projection
+        // re-resolves which scenes are hidden, and `merge_config` broadcasts
+        // the updated snapshot on the `state` topic.
+        let projection = ConfigProjection::from_config(&edited);
+        self.state.merge_config(&projection).await;
+
+        self.log_config_warnings(&warnings, "after scene profile change");
+
+        Ok((edited, warnings))
+    }
+
+    /// Switch a scene profile on. The per-scene `hidden` flags stop deciding
+    /// anything until it is switched off again.
+    async fn cmd_set_scene_profile(&self, args: &Value) -> Result<Value> {
+        let target = required_string(args, "target")?;
+
+        let (config, warnings) = self
+            .edit_config_file(|config| {
+                // The stored spelling, not the caller's: the config file
+                // should keep naming the profile the way it names it in the
+                // `scene_profiles` list above.
+                let name = find_scene_profile(config, &target)
+                    .ok_or_else(|| scene_profile_not_found(&target))?
+                    .name
+                    .clone();
+                config.active_scene_profile = Some(name);
+                Ok(())
+            })
+            .await?;
+
+        let profile =
+            find_scene_profile(&config, &target).ok_or_else(|| scene_profile_not_found(&target))?;
+        let name = profile.name.clone();
+        let hidden = profile.hidden.len();
+        info!("Scene profile set to: {name}");
+
+        Ok(json!({
+            "message": format!("scene profile set: {name}"),
+            "hidden": hidden,
+            "warnings": Self::warning_messages(&warnings),
+        }))
+    }
+
+    /// Switch off whatever scene profile is active, handing the per-scene
+    /// `hidden` flags back their say. Clearing when nothing is active is not
+    /// an error — the caller asked for a state, and that state is reached.
+    async fn cmd_clear_scene_profile(&self) -> Result<Value> {
+        self.edit_config_file(|config| {
+            config.active_scene_profile = None;
+            Ok(())
+        })
+        .await?;
+
+        info!("Scene profile cleared");
+        Ok(json!({ "message": "scene profile cleared" }))
+    }
+
+    /// Create a scene profile, replace one that already exists, or rename one.
+    ///
+    /// `rename_from` is what makes the third of those possible in a single
+    /// command. Without it a client renaming a profile had to save under the
+    /// new name and then delete the old one, which rewrote the config file
+    /// twice and — because deleting the active profile switches it off, which
+    /// is the right thing for a delete the user actually asked for — silently
+    /// stopped hiding any scenes whenever the profile being renamed was the
+    /// one in effect. With it the entry is moved where it stands, keeping its
+    /// place in the list and, below, its hold on `active_scene_profile`.
+    ///
+    /// Saving otherwise never changes which profile is active: the TUI's
+    /// editor lets a user work on a profile they are not currently using, and
+    /// having the save switch the scene list out from under them would be a
+    /// surprise.
+    async fn cmd_save_scene_profile(&self, args: &Value) -> Result<Value> {
+        let name = required_string(args, "target")?;
+        let hidden = required_string_array(args, "hidden")?;
+        let rename_from = optional_string(args, RENAME_FROM)?;
+
+        let mut created = false;
+        let mut renamed = false;
+        let (_, warnings) = self
+            .edit_config_file(|config| {
+                let profile = SceneProfileConfig {
+                    name: name.clone(),
+                    hidden: hidden.clone(),
+                };
+                // The entry being replaced, when the caller named one, and the
+                // entry the new name would land on. A rename is interesting
+                // only when those are two different entries.
+                let replacing = rename_from
+                    .as_deref()
+                    .and_then(|previous| scene_profile_position(config, previous));
+                let by_name = scene_profile_position(config, &name);
+
+                match (replacing, by_name) {
+                    // Renaming onto a name a *different* profile answers to
+                    // would destroy that profile: this save would overwrite
+                    // it, and the entry being renamed away from would go too.
+                    // Two profiles collapsing into one is not something a user
+                    // can undo — `edit_config_file` writes no backup — so it
+                    // is refused rather than done quietly.
+                    (Some(from), Some(other)) if from != other => {
+                        return Err(scene_profile_name_taken(&name));
+                    }
+                    (Some(from), _) => {
+                        let previous = config.scene_profiles[from].name.clone();
+                        renamed = !same_scene_profile_name(&previous, &name);
+                        let was_active = config
+                            .active_scene_profile
+                            .as_deref()
+                            .is_some_and(|active| same_scene_profile_name(active, &previous));
+                        config.scene_profiles[from] = profile;
+                        // `active_scene_profile` points by name, so renaming
+                        // the profile in effect has to move the pointer with
+                        // it or the config would name a profile that is no
+                        // longer there.
+                        if was_active {
+                            config.active_scene_profile = Some(name.clone());
+                        }
+                    }
+                    // Not a rename: create, or replace whole a profile of the
+                    // same name — spelling included, since the name the caller
+                    // just gave is the one they meant even when it differs
+                    // from the stored one only in case.
+                    (None, Some(index)) => config.scene_profiles[index] = profile,
+                    (None, None) => {
+                        created = true;
+                        config.scene_profiles.push(profile);
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+
+        info!("Scene profile saved: {name}");
+        Ok(json!({
+            "message": format!("scene profile saved: {name}"),
+            "hidden": hidden.len(),
+            "created": created,
+            "renamed": renamed,
+            "warnings": Self::warning_messages(&warnings),
+        }))
+    }
+
+    /// Remove a scene profile.
+    ///
+    /// Deleting the active one also switches it off. Leaving
+    /// `active_scene_profile` pointing at a profile that no longer exists
+    /// would make every later validation report a warning about a mistake the
+    /// user never made.
+    async fn cmd_delete_scene_profile(&self, args: &Value) -> Result<Value> {
+        let target = required_string(args, "target")?;
+
+        let mut deleted_name = String::new();
+        let mut deactivated = false;
+        self.edit_config_file(|config| {
+            let index = scene_profile_position(config, &target)
+                .ok_or_else(|| scene_profile_not_found(&target))?;
+            let removed = config.scene_profiles.remove(index);
+            deleted_name = removed.name.clone();
+
+            let was_active = config
+                .active_scene_profile
+                .as_deref()
+                .is_some_and(|active| same_scene_profile_name(active, &removed.name));
+            if was_active {
+                config.active_scene_profile = None;
+                deactivated = true;
+            }
+            Ok(())
+        })
+        .await?;
+
+        info!("Scene profile deleted: {deleted_name}");
+        Ok(json!({
+            "message": format!("scene profile deleted: {deleted_name}"),
+            "deactivated": deactivated,
+        }))
+    }
+
+    /// What scene profiles the daemon is holding, and which one is on.
+    ///
+    /// Answered from memory. Unlike the four commands above this one changes
+    /// nothing, so it neither reads the file nor takes the file lock — a
+    /// listing must not queue behind a save that is part-way through writing.
+    async fn cmd_list_scene_profiles(&self) -> Result<Value> {
+        let config = self.config.lock().await;
+        let active = config.active_scene_profile().map(|p| p.name.clone());
+        let profiles: Vec<Value> = config
+            .scene_profiles
+            .iter()
+            .map(|profile| json!({ "name": profile.name, "hidden": profile.hidden }))
+            .collect();
+        drop(config);
+
+        Ok(json!({ "active": active, "profiles": profiles }))
+    }
+
     async fn cmd_validate_config(&self) -> Result<Value> {
         let config = self.config.lock().await;
         let warnings = crate::config::schema::validate(&config)?;
@@ -479,16 +754,17 @@ impl CommandExecutor {
         let (new_config, warnings) = crate::config::loader::load_with_warnings(path)?;
         self.log_config_warnings(&warnings, "on reload");
 
-        let scenes = new_config.scenes.clone();
-        let audio_inputs = new_config.audio.inputs.clone();
+        let projection = ConfigProjection::from_config(&new_config);
 
         {
             let mut guard = self.config.lock().await;
             *guard = new_config;
         }
 
-        // `merge_config` broadcasts the updated alias/shortcut metadata itself.
-        self.state.merge_config(&scenes, &audio_inputs).await;
+        // `merge_config` broadcasts the updated metadata itself. That includes
+        // which scenes are hidden, so hand-editing `active_scene_profile:` and
+        // running `reload-config` re-hides the scene list without a restart.
+        self.state.merge_config(&projection).await;
 
         Ok(warnings)
     }
@@ -550,52 +826,107 @@ impl CommandExecutor {
     }
 }
 
-/// The config a dump merges OBS's current state onto, and why it might not be
-/// the one on disk.
-struct DumpMergeBase {
+/// The config a command about to rewrite the config file starts from, and why
+/// it might not be the one on disk.
+struct ConfigWriteBase {
     config: Config,
     /// `None` when the file was read. Otherwise why it was not, so the caller
-    /// can say the dump was built from a possibly-stale in-memory copy.
+    /// can say the write was built from a possibly-stale in-memory copy.
     error: Option<String>,
+    /// Whether the reason was that there is no file there yet, as opposed to
+    /// one that is there but unusable. `dump-config` treats the two the same;
+    /// `edit_config_file` does not, because only one of them means a write
+    /// would destroy something.
+    missing: bool,
 }
 
-/// Choose the config that a `dump-config` should merge onto.
+/// Choose the config that a command rewriting the config file should build on.
 ///
 /// The file, not the daemon's in-memory copy. The daemon loads the config at
 /// startup and on `reload-config`; a user who hand-edits the file and then runs
 /// `dump-config` — which the README's quick start puts one line apart — would
-/// otherwise have their edits overwritten by a copy that predates them.
+/// otherwise have their edits overwritten by a copy that predates them. Saving
+/// a scene profile has the same hazard for the same reason.
 ///
 /// A file that cannot be read or does not parse falls back to the in-memory
-/// copy rather than failing. The dump's job is to record what OBS has, and
+/// copy rather than failing. A dump's job is to record what OBS has, and
 /// refusing to do it because the file on disk is currently broken would take
 /// away the command most likely to produce a working one. The caller reports
 /// the fallback.
-fn dump_merge_base(path: &std::path::Path, in_memory: &Config) -> DumpMergeBase {
+fn config_write_base(path: &std::path::Path, in_memory: &Config) -> ConfigWriteBase {
     match crate::config::loader::load_with_warnings(path) {
-        Ok((config, _)) => DumpMergeBase {
+        Ok((config, _)) => ConfigWriteBase {
             config,
             error: None,
+            missing: false,
         },
         Err(error) => {
             warn!(
-                "Dumping onto the in-memory config; {} is unusable: {error}",
+                "Writing onto the in-memory config; {} is unusable: {error}",
                 path.display()
             );
-            DumpMergeBase {
+            ConfigWriteBase {
                 config: in_memory.clone(),
+                missing: matches!(error, ObsctlError::ConfigNotFound(_)),
                 error: Some(error.to_string()),
             }
         }
     }
 }
 
+/// Whether two spellings name the same scene profile.
+///
+/// Case- and whitespace-insensitive, the same rule
+/// [`Config::active_scene_profile`] matches by, so `obsctl scene-profile
+/// STREAMING` finds the profile the user wrote as `streaming`. A name that is
+/// not usable at all matches nothing, including another unusable one.
+fn same_scene_profile_name(left: &str, right: &str) -> bool {
+    match (normalized_name(left), normalized_name(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// The scene profile in `config` that `target` names.
+fn find_scene_profile<'a>(config: &'a Config, target: &str) -> Option<&'a SceneProfileConfig> {
+    config
+        .scene_profiles
+        .iter()
+        .find(|profile| same_scene_profile_name(&profile.name, target))
+}
+
+/// Where the scene profile `target` names sits in `config.scene_profiles`.
+fn scene_profile_position(config: &Config, target: &str) -> Option<usize> {
+    config
+        .scene_profiles
+        .iter()
+        .position(|profile| same_scene_profile_name(&profile.name, target))
+}
+
+/// A scene profile the config does not define.
+///
+/// `ConfigInvalid` rather than a new error variant: the config file is the
+/// only place scene profiles exist, so "there is no such profile" is a
+/// statement about the config. A truthful new variant would mean a new public
+/// error code, a new CLI exit code and a new README row for a case the
+/// existing taxonomy already describes.
+fn scene_profile_not_found(target: &str) -> ObsctlError {
+    ObsctlError::ConfigInvalid(format!("scene profile not found: {target}"))
+}
+
+/// A rename that would land on a name another scene profile already answers
+/// to. `ConfigInvalid` for the same reason as above: it is a statement about
+/// what the config file already contains.
+fn scene_profile_name_taken(name: &str) -> ObsctlError {
+    ObsctlError::ConfigInvalid(format!("scene profile already exists: {name}"))
+}
+
 /// Reject a payload whose shape does not match what the command declares in
 /// `ipc::protocol::COMMANDS`, before any OBS request is attempted.
 fn validate_payload(command: ServerCommand, args: &Value) -> Result<()> {
-    match command.required_args() {
-        [] => validate_empty_payload(args, command.name()),
-        required => validate_object_args(args, command.name(), required),
+    match (command.required_args(), command.optional_args()) {
+        ([], []) => validate_empty_payload(args, command.name()),
+        (required, optional) => validate_object_args(args, command.name(), required, optional),
     }
 }
 
@@ -620,6 +951,64 @@ fn required_string(args: &Value, key: &str) -> Result<String> {
         .map_err(|error| ObsctlError::CommandParseError(format!("{key} {error}")))
 }
 
+/// An argument the payload is allowed to leave out.
+///
+/// Absent and explicitly `null` both mean "not given". Anything else goes
+/// through the same validation as a required argument: a client that sent the
+/// key meant something by it, and quietly ignoring an unusable value would
+/// turn a rename into a second profile.
+fn optional_string(args: &Value, key: &str) -> Result<Option<String>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => required_string(args, key).map(Some),
+    }
+}
+
+/// Most scenes one scene profile may hide.
+///
+/// 128 names of at most `MAX_TARGET_TOKEN_LENGTH` (256) bytes each, plus JSON
+/// quoting and commas, stays well inside the 64 KiB
+/// [`MAX_IPC_LINE_BYTES`](crate::ipc::protocol::MAX_IPC_LINE_BYTES) frame the
+/// request has to fit in — and so does the snapshot that later carries the
+/// saved list back out to every subscriber.
+const MAX_HIDDEN_SCENES_PER_PROFILE: usize = 128;
+
+/// The list of scene names under `key`, checked the same way a single `target`
+/// is.
+///
+/// Every failure is a `CommandParseError`: the payload is malformed, which is
+/// the client's mistake and not a statement about OBS or the config. Names
+/// that differ only in case are the same scene everywhere else in obsctl, so
+/// repeats collapse here too — the first spelling is the one kept, because
+/// that is the one the caller listed.
+fn required_string_array(args: &Value, key: &str) -> Result<Vec<String>> {
+    let items = args.get(key).and_then(Value::as_array).ok_or_else(|| {
+        ObsctlError::CommandParseError(format!("{key} must be an array of scene names"))
+    })?;
+
+    if items.len() > MAX_HIDDEN_SCENES_PER_PROFILE {
+        return Err(ObsctlError::CommandParseError(format!(
+            "{key} may name at most {MAX_HIDDEN_SCENES_PER_PROFILE} scenes"
+        )));
+    }
+
+    let mut seen = HashSet::new();
+    let mut names = Vec::with_capacity(items.len());
+    for item in items {
+        let raw = item.as_str().ok_or_else(|| {
+            ObsctlError::CommandParseError(format!("{key} must be an array of scene names"))
+        })?;
+        let name = trim_and_validate_token_with_max_len(raw, MAX_TARGET_TOKEN_LENGTH)
+            .map_err(|error| ObsctlError::CommandParseError(format!("{key} entry {error}")))?;
+
+        if seen.insert(name.to_ascii_lowercase()) {
+            names.push(name);
+        }
+    }
+
+    Ok(names)
+}
+
 fn required_u8_percentage(args: &Value, key: &str) -> Result<u8> {
     let value = args
         .get(key)
@@ -635,13 +1024,18 @@ fn required_u8_percentage(args: &Value, key: &str) -> Result<u8> {
     }
 }
 
-fn validate_object_args(args: &Value, command: &str, required: &[&str]) -> Result<()> {
+fn validate_object_args(
+    args: &Value,
+    command: &str,
+    required: &[&str],
+    optional: &[&str],
+) -> Result<()> {
     let object = args.as_object().ok_or_else(|| {
         ObsctlError::CommandParseError(format!("command {command} requires an object payload"))
     })?;
 
     for (key, _) in object {
-        if !required.contains(&key.as_str()) {
+        if !required.contains(&key.as_str()) && !optional.contains(&key.as_str()) {
             return Err(ObsctlError::CommandParseError(format!(
                 "command {command} received unexpected argument '{key}'"
             )));
@@ -733,7 +1127,8 @@ fn audio_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_TARGET_TOKEN_LENGTH, parse_server_command, required_string, required_u8_percentage,
+        MAX_HIDDEN_SCENES_PER_PROFILE, MAX_TARGET_TOKEN_LENGTH, parse_server_command,
+        required_string, required_string_array, required_u8_percentage,
     };
     use super::{validate_command_payload, validate_empty_payload, validate_object_args};
     use serde_json::json;
@@ -742,7 +1137,7 @@ mod tests {
     /// loaded at startup — otherwise a hand-edit made since then is silently
     /// overwritten by the dump.
     #[test]
-    fn dump_merge_base_prefers_the_file_over_the_in_memory_copy() {
+    fn config_write_base_prefers_the_file_over_the_in_memory_copy() {
         use crate::config::model::{Config, SceneConfig};
 
         let dir = tempfile::tempdir().unwrap();
@@ -762,7 +1157,7 @@ mod tests {
         // What the daemon still holds from startup.
         let in_memory = Config::default();
 
-        let base = super::dump_merge_base(&path, &in_memory);
+        let base = super::config_write_base(&path, &in_memory);
         assert!(base.error.is_none(), "the file was readable");
         assert_eq!(
             base.config.scenes.first().and_then(|s| s.alias.as_deref()),
@@ -775,7 +1170,7 @@ mod tests {
     /// recording what OBS has is exactly what someone with a broken config
     /// needs. The caller is told which copy was used.
     #[test]
-    fn dump_merge_base_falls_back_to_memory_when_the_file_is_unusable() {
+    fn config_write_base_falls_back_to_memory_when_the_file_is_unusable() {
         use crate::config::model::{Config, SceneConfig};
 
         let dir = tempfile::tempdir().unwrap();
@@ -790,7 +1185,7 @@ mod tests {
             ..Config::default()
         };
 
-        let base = super::dump_merge_base(&path, &in_memory);
+        let base = super::config_write_base(&path, &in_memory);
         assert!(base.error.is_some(), "the fallback must be reported");
         assert_eq!(
             base.config.scenes.first().map(|s| s.name.as_str()),
@@ -838,12 +1233,93 @@ mod tests {
     }
 
     #[test]
+    fn required_string_array_requires_an_array_of_usable_names() {
+        let args = json!({ "hidden": ["Utility BG", " Overlay Src "] });
+        assert_eq!(
+            required_string_array(&args, "hidden").unwrap(),
+            vec!["Utility BG".to_string(), "Overlay Src".to_string()],
+            "entries are trimmed, exactly as a single target is"
+        );
+
+        let args = json!({ "hidden": [] });
+        assert!(
+            required_string_array(&args, "hidden").unwrap().is_empty(),
+            "hiding nothing is a legal thing to save"
+        );
+
+        // Not an array at all, and an array carrying something that is not a
+        // scene name.
+        assert!(required_string_array(&json!({ "hidden": "Main" }), "hidden").is_err());
+        assert!(required_string_array(&json!({}), "hidden").is_err());
+        assert!(required_string_array(&json!({ "hidden": [42] }), "hidden").is_err());
+        assert!(required_string_array(&json!({ "hidden": ["  "] }), "hidden").is_err());
+        assert!(required_string_array(&json!({ "hidden": ["a\tb"] }), "hidden").is_err());
+
+        let too_long = "a".repeat(MAX_TARGET_TOKEN_LENGTH + 1);
+        assert!(required_string_array(&json!({ "hidden": [too_long] }), "hidden").is_err());
+    }
+
+    #[test]
+    fn required_string_array_caps_the_list_length() {
+        let at_limit: Vec<String> = (0..MAX_HIDDEN_SCENES_PER_PROFILE)
+            .map(|index| format!("Scene {index}"))
+            .collect();
+        assert_eq!(
+            required_string_array(&json!({ "hidden": at_limit }), "hidden")
+                .unwrap()
+                .len(),
+            MAX_HIDDEN_SCENES_PER_PROFILE
+        );
+
+        let over_limit: Vec<String> = (0..=MAX_HIDDEN_SCENES_PER_PROFILE)
+            .map(|index| format!("Scene {index}"))
+            .collect();
+        assert!(required_string_array(&json!({ "hidden": over_limit }), "hidden").is_err());
+    }
+
+    #[test]
+    fn required_string_array_drops_repeats_keeping_the_first_spelling() {
+        let args = json!({ "hidden": ["Utility BG", "utility bg", " UTILITY BG "] });
+
+        assert_eq!(
+            required_string_array(&args, "hidden").unwrap(),
+            vec!["Utility BG".to_string()]
+        );
+    }
+
+    #[test]
+    fn save_scene_profile_payloads_are_checked_against_the_declared_shape() {
+        assert!(
+            validate_command_payload("save_scene_profile", &json!({ "target": "streaming" }))
+                .is_err(),
+            "hidden is declared, so it is required"
+        );
+        assert!(
+            validate_command_payload(
+                "save_scene_profile",
+                &json!({ "target": "streaming", "hidden": [], "extra": true }),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_command_payload(
+                "save_scene_profile",
+                &json!({ "target": "streaming", "hidden": ["Utility BG"] }),
+            )
+            .is_ok(),
+            "an array value is legal: the payload check looks at key names"
+        );
+        assert!(validate_command_payload("clear_scene_profile", &json!(null)).is_ok());
+        assert!(validate_command_payload("list_scene_profiles", &json!({})).is_ok());
+    }
+
+    #[test]
     fn validate_object_args_rejects_extra_payload_fields() {
         let args = json!({
             "target": "Mic",
             "extra": "boom",
         });
-        assert!(validate_object_args(&args, "mute", &["target"]).is_err());
+        assert!(validate_object_args(&args, "mute", &["target"], &[]).is_err());
     }
 
     #[test]
@@ -851,13 +1327,13 @@ mod tests {
         let args = json!({
             "target": "Mic",
         });
-        assert!(validate_object_args(&args, "set_volume", &["target", "percent"]).is_err());
+        assert!(validate_object_args(&args, "set_volume", &["target", "percent"], &[]).is_err());
     }
 
     #[test]
     fn validate_object_args_rejects_non_object_payload() {
-        assert!(validate_object_args(&json!(null), "set_scene", &["target"]).is_err());
-        assert!(validate_object_args(&json!("string"), "set_scene", &["target"]).is_err());
+        assert!(validate_object_args(&json!(null), "set_scene", &["target"], &[]).is_err());
+        assert!(validate_object_args(&json!("string"), "set_scene", &["target"], &[]).is_err());
     }
 
     #[test]

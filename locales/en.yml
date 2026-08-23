@@ -175,3 +175,28 @@ tui:
       preview: " Preview: %{theme} "
       preview_heading: "◈ OBSCTL // THEME PREVIEW"
       preview_heading_ascii: "OBSCTL // THEME PREVIEW"
+
+    # The scene-profile editor (<Space>P). "Scene profile" is an obsctl
+    # concept — a named set of scene-visibility choices — and never the OBS
+    # profile the Profiles panel above lists.
+    scene_profiles:
+      title: "Scene Profiles"
+      title_new: "New Scene Profile"
+      title_editing: "Editing: %{name}"
+      new_entry: "＋ new scene profile"
+      new_entry_ascii: "+ new scene profile"
+      empty: "no scene profiles yet — press Enter to make one"
+      active_marker: "★ active"
+      active_marker_ascii: "* active"
+      hidden_count: "%{count} hidden"
+      name_prompt: "name: "
+      name_blank: "a scene profile needs a name"
+      name_taken: "another scene profile is already called that"
+      hint_picker: "↑↓ move · ↵ edit · a activate · c clear · d delete · esc close"
+      hint_picker_ascii: "jk move | Enter edit | a activate | c clear | d delete | Esc close"
+      hint_scenes: "↑↓ move · t hide/show · n rename · ↵ save · esc back"
+      hint_scenes_ascii: "jk move | t hide/show | n rename | Enter save | Esc back"
+      hint_naming: "type a name · ↵ accept · esc cancel"
+      hint_naming_ascii: "type a name | Enter accept | Esc cancel"
+      state_hidden: "hidden"
+      state_visible: "visible"

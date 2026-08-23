@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::domain::names::normalized_name;
+use crate::domain::scene_profiles::{ActiveSceneProfile, SceneVisibility};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -14,6 +17,16 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub scenes: Vec<SceneConfig>,
+    /// Named sets of scene-visibility choices. Declared next to `scenes`
+    /// because that is the list they describe; declaration order is also the
+    /// order the config file is written back in.
+    #[serde(default)]
+    pub scene_profiles: Vec<SceneProfileConfig>,
+    /// Which of `scene_profiles` is switched on, if any. Matched
+    /// case-insensitively; a name nothing answers to is a validation warning,
+    /// not an error, and leaves the per-scene `hidden` flags in charge.
+    #[serde(default)]
+    pub active_scene_profile: Option<String>,
     #[serde(default)]
     pub audio: AudioConfig,
     #[serde(default)]
@@ -29,9 +42,46 @@ impl Default for Config {
             reconnect: ReconnectConfig::default(),
             ui: UiConfig::default(),
             scenes: Vec::new(),
+            scene_profiles: Vec::new(),
+            active_scene_profile: None,
             audio: AudioConfig::default(),
             keymap: KeymapConfig::default(),
         }
+    }
+}
+
+impl Config {
+    /// The profile the `active_scene_profile` field names, matched
+    /// case-insensitively.
+    ///
+    /// `None` covers both "no profile selected" and "the selected one is not
+    /// defined". Those are the same situation for every caller: fall back to
+    /// the per-scene `hidden` flags. Validation is what tells the user about
+    /// the second case, so nothing here needs to distinguish them.
+    pub fn active_scene_profile(&self) -> Option<&SceneProfileConfig> {
+        let wanted = normalized_name(self.active_scene_profile.as_deref()?).ok()?;
+        self.scene_profiles
+            .iter()
+            .find(|profile| normalized_name(&profile.name).is_ok_and(|name| name == wanted))
+    }
+
+    /// Which scenes this config hides right now.
+    ///
+    /// The one call every consumer makes — the daemon when it builds a
+    /// snapshot, and anything else that has to know. Re-deriving the rule from
+    /// `scenes[].hidden` and `scene_profiles` at a call site is how a caller
+    /// ends up disagreeing with the rest of obsctl about what is on screen.
+    pub fn scene_visibility(&self) -> SceneVisibility {
+        let active = match self.active_scene_profile() {
+            Some(profile) => ActiveSceneProfile::Named(&profile.hidden),
+            None => ActiveSceneProfile::None,
+        };
+        SceneVisibility::resolve(
+            self.scenes
+                .iter()
+                .map(|scene| (scene.name.as_str(), scene.hidden)),
+            active,
+        )
     }
 }
 
@@ -189,6 +239,16 @@ pub struct SceneConfig {
     pub hidden: bool,
 }
 
+/// One named set of scene-visibility choices — an "obsctl scene profile",
+/// unrelated to an OBS profile. `hidden` names the scenes this profile hides,
+/// spelled as OBS spells them; every other scene is visible while it is active.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SceneProfileConfig {
+    pub name: String,
+    #[serde(default)]
+    pub hidden: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AudioConfig {
     #[serde(default)]
@@ -245,5 +305,75 @@ mod tests {
             serde_yaml::from_str("version: 1\nui:\n  advanced_ui: false\n").unwrap();
         assert!(!config.ui.advanced_ui);
         assert!(config.ui.show_icons);
+    }
+
+    /// Scene profiles were added without bumping `version`, so a config
+    /// written before they existed has to keep loading untouched.
+    #[test]
+    fn a_config_without_scene_profiles_still_loads() {
+        let config: Config = serde_yaml::from_str("version: 1\n").unwrap();
+        assert!(config.scene_profiles.is_empty());
+        assert!(config.active_scene_profile.is_none());
+    }
+
+    #[test]
+    fn scene_profiles_round_trip_through_yaml() {
+        let yaml = "version: 1\nscene_profiles:\n  - name: streaming\n    hidden:\n      - Utility BG\nactive_scene_profile: streaming\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.scene_profiles.len(), 1);
+        assert_eq!(config.scene_profiles[0].name, "streaming");
+        assert_eq!(config.scene_profiles[0].hidden, vec!["Utility BG"]);
+
+        let written = serde_yaml::to_string(&config).unwrap();
+        let reloaded: Config = serde_yaml::from_str(&written).unwrap();
+        assert_eq!(reloaded.scene_profiles, config.scene_profiles);
+        assert_eq!(reloaded.active_scene_profile, config.active_scene_profile);
+    }
+
+    fn config_with_profiles(active: Option<&str>) -> Config {
+        Config {
+            scenes: vec![
+                SceneConfig {
+                    name: "Main".to_string(),
+                    ..Default::default()
+                },
+                SceneConfig {
+                    name: "Utility BG".to_string(),
+                    hidden: true,
+                    ..Default::default()
+                },
+            ],
+            scene_profiles: vec![SceneProfileConfig {
+                name: "Streaming".to_string(),
+                hidden: vec!["Main".to_string()],
+            }],
+            active_scene_profile: active.map(str::to_string),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn the_active_scene_profile_is_found_case_insensitively() {
+        let config = config_with_profiles(Some(" STREAMING "));
+        assert_eq!(
+            config.active_scene_profile().map(|p| p.name.as_str()),
+            Some("Streaming")
+        );
+    }
+
+    #[test]
+    fn scene_visibility_uses_the_active_profile_instead_of_the_flags() {
+        let visibility = config_with_profiles(Some("streaming")).scene_visibility();
+        assert!(visibility.is_hidden("Main"));
+        assert!(!visibility.is_hidden("Utility BG"));
+    }
+
+    #[test]
+    fn scene_visibility_falls_back_to_the_flags_without_a_profile() {
+        for active in [None, Some("no such profile")] {
+            let visibility = config_with_profiles(active).scene_visibility();
+            assert!(visibility.is_hidden("Utility BG"), "active: {active:?}");
+            assert!(!visibility.is_hidden("Main"), "active: {active:?}");
+        }
     }
 }

@@ -8,6 +8,7 @@ pub mod live_bar;
 pub mod logs;
 pub mod name_list;
 pub mod profiles;
+pub mod scene_profile;
 pub mod scenes;
 pub mod settings;
 pub mod splash;

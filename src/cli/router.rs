@@ -636,6 +636,23 @@ fn proxy_payload(cmd: &Commands) -> ProxyRequest {
         Commands::Mute { target } => with_target(ServerCommand::Mute, target),
         Commands::Unmute { target } => with_target(ServerCommand::Unmute, target),
         Commands::ToggleMute { target } => with_target(ServerCommand::ToggleMute, target),
+        // A scene profile name is optional: given one, it is activated; given
+        // none, whatever was active is cleared. These are two distinct daemon
+        // commands rather than one command with an empty target, because a
+        // blank target is rejected by name validation before it could ever mean
+        // "clear".
+        Commands::SceneProfile { target } => match target {
+            Some(target) => with_target(ServerCommand::SetSceneProfile, target),
+            None => simple(ServerCommand::ClearSceneProfile),
+        },
+        // `list_scene_profiles` answers with a structure (`active` plus a list)
+        // rather than a sentence, so it borrows `status`'s renderer instead of
+        // the one that looks for a `message` field and would fall back to
+        // printing raw JSON.
+        Commands::SceneProfiles => ProxyRequest::Send(
+            CommandPayload::simple(ServerCommand::ListSceneProfiles),
+            client_commands::print_status_json,
+        ),
         Commands::Vol { target, percent } => {
             // clap already limits this argument to 0..=100, but
             // `CommandPayload::set_volume` is reachable from tests and from any
@@ -834,6 +851,38 @@ mod tests {
                 }
                 _ => panic!("{command:?} must not become a request"),
             }
+        }
+    }
+
+    /// A missing scene-profile name is the "clear" instruction, not a blank
+    /// target — which is what makes `scene-profile` with no argument usable at
+    /// all, since a blank target would be rejected by name validation.
+    #[test]
+    fn scene_profile_without_a_name_clears_and_with_a_name_activates() {
+        let cases = [
+            (None, "clear_scene_profile"),
+            (Some("streaming"), "set_scene_profile"),
+        ];
+
+        for (target, expected) in cases {
+            let command = Commands::SceneProfile {
+                target: target.map(str::to_string),
+            };
+            match proxy_payload(&command) {
+                ProxyRequest::Send(payload, _) => assert_eq!(payload.name, expected),
+                _ => panic!("{command:?} must become a request"),
+            }
+        }
+    }
+
+    #[test]
+    fn scene_profiles_lists_without_arguments() {
+        match proxy_payload(&Commands::SceneProfiles) {
+            ProxyRequest::Send(payload, _) => {
+                assert_eq!(payload.name, "list_scene_profiles");
+                assert_eq!(payload.args, serde_json::Value::Null);
+            }
+            _ => panic!("scene-profiles must become a request"),
         }
     }
 

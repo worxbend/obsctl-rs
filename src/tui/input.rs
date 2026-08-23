@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::{
     keymap::{self, LEADER, Pending},
-    model::{FocusPanel, TuiModel, View},
+    model::{FocusPanel, SceneProfileEditor, SceneProfileStage, TuiModel, View},
 };
 
 /// Upper bound on a typed count prefix (`42j`). Vim has no limit; this one
@@ -86,6 +86,34 @@ pub enum TuiAction {
     // Appearance toggles (`<leader>ui` / `<leader>ua`)
     ToggleIcons,
     ToggleAdvancedUi,
+    // Scene-profile editor (`<leader>P`). A scene profile is a named set of
+    // scene-visibility choices — nothing to do with an OBS profile, which is
+    // what the Profiles panel and `FocusProfiles` above are about.
+    OpenSceneProfiles,
+    CloseSceneProfiles,
+    SceneProfileNavUp(usize),
+    SceneProfileNavDown(usize),
+    /// Mouse: move the editor's cursor to the row that was clicked.
+    SceneProfileSelect(usize),
+    /// Enter on the picker: make a new scene profile, or edit the selected one.
+    SceneProfilePickerConfirm,
+    /// Switch to the selected scene profile and close the editor.
+    SceneProfileActivate,
+    /// Switch to no scene profile at all and close the editor.
+    SceneProfileClearActive,
+    SceneProfileDelete,
+    SceneProfileToggleHidden,
+    SceneProfileBeginNaming,
+    SceneProfileNameChar(char),
+    SceneProfileNameBackspace,
+    SceneProfileNameClear,
+    SceneProfileNameDeleteWord,
+    SceneProfileNameCommit,
+    SceneProfileNameCancel,
+    SceneProfileSave,
+    /// Esc on the scene list: back to the picker, editor still open.
+    SceneProfileBack,
+
     // Pending-key (vim sequence) bookkeeping
     SetPending(Pending),
     ClearPending,
@@ -95,6 +123,14 @@ pub enum TuiAction {
 pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
     if model.command_palette.active {
         return palette_key(model, key);
+    }
+    // The scene-profile editor comes before the pending check, not after it:
+    // its naming stage has to swallow `Space`, and `Space` is the leader key,
+    // so leaving the pending machine in front would turn typing a name with a
+    // space in it into a half-typed leader sequence. The price is that leader
+    // sequences are inert while the editor is open, which is what a modal is.
+    if let Some(editor) = model.scene_profile.as_ref() {
+        return scene_profile_key(editor, key);
     }
     // A half-typed sequence is resolved before the per-screen bindings, so
     // every screen shares the one pending state machine in `keymap::resolve`.
@@ -129,6 +165,58 @@ fn palette_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
         KeyCode::BackTab | KeyCode::Up => Some(TuiAction::CompletePrev),
         KeyCode::Char(c) => Some(TuiAction::PaletteChar(c)),
         _ => None,
+    }
+}
+
+/// Keys of the scene-profile editor, which are the stage's alone: the modal
+/// answers every key itself, so nothing typed at it can reach the dashboard
+/// behind it.
+///
+/// The motions carry a count of 1 rather than the model's count prefix,
+/// because no digit is bound here — a count typed at the dashboard is cleared
+/// on the way in, and one typed at the modal never starts.
+fn scene_profile_key(editor: &SceneProfileEditor, key: KeyEvent) -> Option<TuiAction> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // Ctrl-C ends the program from here as it does from every other screen;
+    // it is matched first so the plain `c` binding below cannot shadow it.
+    if ctrl && key.code == KeyCode::Char('c') {
+        return Some(TuiAction::Quit);
+    }
+
+    match editor.stage {
+        SceneProfileStage::Picker => match key.code {
+            KeyCode::Down | KeyCode::Char('j') if !ctrl => Some(TuiAction::SceneProfileNavDown(1)),
+            KeyCode::Up | KeyCode::Char('k') if !ctrl => Some(TuiAction::SceneProfileNavUp(1)),
+            KeyCode::Enter => Some(TuiAction::SceneProfilePickerConfirm),
+            KeyCode::Char('a') if !ctrl => Some(TuiAction::SceneProfileActivate),
+            KeyCode::Char('c') if !ctrl => Some(TuiAction::SceneProfileClearActive),
+            KeyCode::Char('d') if !ctrl => Some(TuiAction::SceneProfileDelete),
+            KeyCode::Esc | KeyCode::Char('q') => Some(TuiAction::CloseSceneProfiles),
+            _ => None,
+        },
+        SceneProfileStage::Scenes => match key.code {
+            KeyCode::Down | KeyCode::Char('j') if !ctrl => Some(TuiAction::SceneProfileNavDown(1)),
+            KeyCode::Up | KeyCode::Char('k') if !ctrl => Some(TuiAction::SceneProfileNavUp(1)),
+            KeyCode::Char('t') if !ctrl => Some(TuiAction::SceneProfileToggleHidden),
+            KeyCode::Char('n') if !ctrl => Some(TuiAction::SceneProfileBeginNaming),
+            KeyCode::Enter => Some(TuiAction::SceneProfileSave),
+            KeyCode::Esc => Some(TuiAction::SceneProfileBack),
+            // `q` is deliberately unbound here. It closes the picker one stage
+            // up, but on this stage there are unsaved toggles to lose, and
+            // muscle memory should not be able to throw them away.
+            _ => None,
+        },
+        SceneProfileStage::Naming => match key.code {
+            KeyCode::Char('u') if ctrl => Some(TuiAction::SceneProfileNameClear),
+            KeyCode::Char('w') if ctrl => Some(TuiAction::SceneProfileNameDeleteWord),
+            KeyCode::Backspace => Some(TuiAction::SceneProfileNameBackspace),
+            KeyCode::Enter => Some(TuiAction::SceneProfileNameCommit),
+            KeyCode::Esc => Some(TuiAction::SceneProfileNameCancel),
+            // Space included: on this stage it is a character in a name, not
+            // the leader key.
+            KeyCode::Char(c) if !ctrl => Some(TuiAction::SceneProfileNameChar(c)),
+            _ => None,
+        },
     }
 }
 
@@ -688,6 +776,144 @@ mod tests {
             handle_key(&model, key(KeyCode::Backspace)),
             Some(TuiAction::ClosePalette)
         );
+    }
+
+    // --- the scene-profile editor ---
+
+    /// A model with the editor open on `stage`, reached the way a user reaches
+    /// it: `<leader>P`, then Enter on the "new scene profile" row, then a
+    /// typed name.
+    fn editor_on(stage: SceneProfileStage) -> TuiModel {
+        let mut model = TuiModel::default();
+        model.open_scene_profiles();
+        if stage != SceneProfileStage::Picker {
+            model.scene_profile_confirm_picker();
+        }
+        if stage == SceneProfileStage::Scenes {
+            model.scene_profile_edit_name(|name| name.push('a'));
+            assert!(model.scene_profile_commit_name().is_ok());
+        }
+        assert_eq!(model.scene_profile.as_ref().unwrap().stage, stage);
+        model
+    }
+
+    /// The whole reason the editor is consulted before the pending state
+    /// machine: `Space` is the leader key, and a scene profile called
+    /// "late night" has one in the middle of it.
+    #[test]
+    fn space_types_a_character_while_naming_instead_of_opening_the_leader_menu() {
+        let model = editor_on(SceneProfileStage::Naming);
+        assert_eq!(
+            handle_key(&model, ch(LEADER)),
+            Some(TuiAction::SceneProfileNameChar(' '))
+        );
+        assert_eq!(
+            handle_key(&model, ch('n')),
+            Some(TuiAction::SceneProfileNameChar('n'))
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Enter)),
+            Some(TuiAction::SceneProfileNameCommit)
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Esc)),
+            Some(TuiAction::SceneProfileNameCancel)
+        );
+        assert_eq!(
+            handle_key(&model, ctrl_key(KeyCode::Char('u'))),
+            Some(TuiAction::SceneProfileNameClear)
+        );
+        assert_eq!(
+            handle_key(&model, ctrl_key(KeyCode::Char('w'))),
+            Some(TuiAction::SceneProfileNameDeleteWord)
+        );
+    }
+
+    /// A half-typed leader sequence does not survive the editor opening, and
+    /// while the editor is up the pending machine never gets the key.
+    #[test]
+    fn the_editor_answers_keys_before_a_pending_sequence_does() {
+        let mut model = editor_on(SceneProfileStage::Picker);
+        model.pending = Pending::Leader;
+        assert_eq!(
+            handle_key(&model, ch('s')),
+            None,
+            "`<leader>s` would open the stream group on the dashboard"
+        );
+        assert_eq!(
+            handle_key(&model, ch('j')),
+            Some(TuiAction::SceneProfileNavDown(1))
+        );
+    }
+
+    /// The palette is checked first, so a command line opened over the editor
+    /// still takes what is typed at it.
+    #[test]
+    fn the_palette_still_wins_over_the_editor() {
+        let mut model = editor_on(SceneProfileStage::Picker);
+        model.command_palette.active = true;
+        model.command_palette.input = ":sc".to_string();
+        assert_eq!(
+            handle_key(&model, ch('e')),
+            Some(TuiAction::PaletteChar('e'))
+        );
+    }
+
+    #[test]
+    fn the_picker_activates_clears_deletes_and_closes() {
+        let model = editor_on(SceneProfileStage::Picker);
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Enter)),
+            Some(TuiAction::SceneProfilePickerConfirm)
+        );
+        assert_eq!(
+            handle_key(&model, ch('a')),
+            Some(TuiAction::SceneProfileActivate)
+        );
+        assert_eq!(
+            handle_key(&model, ch('c')),
+            Some(TuiAction::SceneProfileClearActive)
+        );
+        assert_eq!(
+            handle_key(&model, ch('d')),
+            Some(TuiAction::SceneProfileDelete)
+        );
+        assert_eq!(
+            handle_key(&model, ch('q')),
+            Some(TuiAction::CloseSceneProfiles)
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Esc)),
+            Some(TuiAction::CloseSceneProfiles)
+        );
+        // Ctrl-C still ends the program, as it does from every other screen.
+        assert_eq!(
+            handle_key(&model, ctrl_key(KeyCode::Char('c'))),
+            Some(TuiAction::Quit)
+        );
+    }
+
+    #[test]
+    fn the_scene_stage_toggles_renames_saves_and_goes_back() {
+        let model = editor_on(SceneProfileStage::Scenes);
+        assert_eq!(
+            handle_key(&model, ch('t')),
+            Some(TuiAction::SceneProfileToggleHidden)
+        );
+        assert_eq!(
+            handle_key(&model, ch('n')),
+            Some(TuiAction::SceneProfileBeginNaming)
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Enter)),
+            Some(TuiAction::SceneProfileSave)
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Esc)),
+            Some(TuiAction::SceneProfileBack)
+        );
+        // `q` is unbound here: there are unsaved toggles to lose.
+        assert_eq!(handle_key(&model, ch('q')), None);
     }
 
     #[test]

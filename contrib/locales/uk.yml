@@ -173,3 +173,28 @@ tui:
       preview: " Перегляд: %{theme} "
       preview_heading: "◈ OBSCTL // ПЕРЕГЛЯД ТЕМИ"
       preview_heading_ascii: "OBSCTL // ПЕРЕГЛЯД ТЕМИ"
+
+    # Редактор профілів сцен (<Space>P). "Профіль сцен" — це поняття obsctl
+    # (іменований набір налаштувань видимості сцен), а не профіль OBS,
+    # який показує панель "Профілі".
+    scene_profiles:
+      title: "Профілі сцен"
+      title_new: "Новий профіль сцен"
+      title_editing: "Редагування: %{name}"
+      new_entry: "＋ новий профіль сцен"
+      new_entry_ascii: "+ новий профіль сцен"
+      empty: "профілів сцен ще немає — натисніть Enter, щоб створити"
+      active_marker: "★ активний"
+      active_marker_ascii: "* активний"
+      hidden_count: "приховано: %{count}"
+      name_prompt: "назва: "
+      name_blank: "профіль сцен потребує назви"
+      name_taken: "інший профіль сцен уже має таку назву"
+      hint_picker: "↑↓ рух · ↵ редагувати · a активувати · c скинути · d видалити · esc закрити"
+      hint_picker_ascii: "jk рух | Enter редагувати | a активувати | c скинути | d видалити | Esc закрити"
+      hint_scenes: "↑↓ рух · t сховати/показати · n перейменувати · ↵ зберегти · esc назад"
+      hint_scenes_ascii: "jk рух | t сховати/показати | n перейменувати | Enter зберегти | Esc назад"
+      hint_naming: "введіть назву · ↵ підтвердити · esc скасувати"
+      hint_naming_ascii: "введіть назву | Enter підтвердити | Esc скасувати"
+      state_hidden: "приховано"
+      state_visible: "видимо"

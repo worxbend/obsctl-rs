@@ -97,6 +97,8 @@ fn command_to_payload(cmd: Command) -> std::result::Result<CommandPayload, Strin
         Command::SetSceneCollection { target } => {
             with_target(ServerCommand::SetSceneCollection, target)
         }
+        Command::SetSceneProfile { target } => with_target(ServerCommand::SetSceneProfile, target),
+        Command::ClearSceneProfile => Ok(CommandPayload::simple(ServerCommand::ClearSceneProfile)),
         Command::Mute { target } => with_target(ServerCommand::Mute, target),
         Command::Unmute { target } => with_target(ServerCommand::Unmute, target),
         Command::ToggleMute { target } => with_target(ServerCommand::ToggleMute, target),
@@ -192,6 +194,58 @@ fn checked_target(target: &str) -> std::result::Result<String, String> {
     sanitize_target_arg(target).map_err(|error| format!("error: invalid target: {error}"))
 }
 
+/// Most scenes one scene profile may hide.
+///
+/// Mirrors the cap the daemon enforces in `server::command_executor`, which is
+/// the authority: it rejects a longer list outright. Checking here as well
+/// turns that rejection into a message the user can act on without spending a
+/// round-trip on a payload that cannot be accepted.
+const MAX_HIDDEN_SCENES_PER_PROFILE: usize = 128;
+
+/// Save a scene profile: `name`, the scenes it hides, and — when the editor
+/// was opened on an existing profile — which entry this is replacing.
+///
+/// Every name is validated here, before anything reaches the wire, because
+/// the daemon rejects the whole payload over a single unusable entry — and a
+/// scene name comes from OBS, which does not share obsctl's idea of what a
+/// usable name is.
+///
+/// `rename_from` is passed through untouched apart from that validation: which
+/// entry it identifies, and whether the name has changed at all, are questions
+/// the daemon answers with its own trim-and-lowercase comparison. Deciding
+/// either here is how a stored name with surrounding whitespace used to be
+/// read as a rename that had not happened.
+pub(super) async fn send_save_scene_profile(
+    socket_path: &Path,
+    name: &str,
+    hidden: &[String],
+    rename_from: Option<&str>,
+) -> String {
+    let name = match checked_target(name) {
+        Ok(name) => name,
+        Err(message) => return message,
+    };
+    let rename_from = match rename_from.map(checked_target).transpose() {
+        Ok(previous) => previous,
+        Err(message) => return message,
+    };
+    if hidden.len() > MAX_HIDDEN_SCENES_PER_PROFILE {
+        return format!(
+            "error: a scene profile may hide at most {MAX_HIDDEN_SCENES_PER_PROFILE} scenes"
+        );
+    }
+    let mut scenes = Vec::with_capacity(hidden.len());
+    for scene in hidden {
+        match sanitize_target_arg(scene) {
+            Ok(scene) => scenes.push(scene),
+            Err(error) => return format!("error: invalid scene name: {error}"),
+        }
+    }
+
+    let payload = CommandPayload::save_scene_profile(&name, &scenes, rename_from.as_deref());
+    ReplyStyle::Acknowledge.format(send_command(socket_path, payload).await, "ok")
+}
+
 pub(super) async fn send_set_volume(socket_path: &Path, target: &str, percent: u8) -> String {
     let target = match checked_target(target) {
         Ok(target) => target,
@@ -249,6 +303,25 @@ mod tests {
             payload.args.get("target").and_then(|v| v.as_str()).unwrap(),
             "Mic"
         );
+    }
+
+    /// The palette's two scene-profile commands, which are `set_scene_profile`
+    /// and `clear_scene_profile` on the wire — never `set_profile`, which is
+    /// the OBS profile.
+    #[test]
+    fn command_to_payload_maps_the_scene_profile_commands() {
+        let payload = command_to_payload(Command::SetSceneProfile {
+            target: " streaming ".to_string(),
+        })
+        .unwrap();
+        assert_eq!(payload.name, "set_scene_profile");
+        assert_eq!(
+            payload.args.get("target").and_then(|v| v.as_str()).unwrap(),
+            "streaming"
+        );
+
+        let payload = command_to_payload(Command::ClearSceneProfile).unwrap();
+        assert_eq!(payload.name, "clear_scene_profile");
     }
 
     #[test]

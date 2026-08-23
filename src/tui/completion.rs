@@ -58,6 +58,9 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
             .flat_map(|s| name_and_alias(&s.name, &s.alias))
             .collect(),
         "profile" | "set-profile" => model.profiles().to_vec(),
+        // The obsctl scene profiles, which the daemon publishes in the same
+        // snapshot as the OBS profiles above and which are a different thing.
+        "scene-profile" | "set-scene-profile" => model.scene_profile_names(),
         "collection" | "set-collection" | "scene-collection" => model.scene_collections().to_vec(),
         "mute" | "unmute" | "toggle-mute" | "vol" | "volume" => model
             .audio_inputs()
@@ -123,20 +126,42 @@ mod tests {
         }
     }
 
+    /// Three commands start with `sc`, and all three are offered.
     #[test]
     fn command_prefix_no_space() {
         let model = make_model(vec![], vec![]);
         let result = compute("/sc", &model);
-        assert_eq!(result, vec!["/scene".to_string()]);
+        assert_eq!(
+            result,
+            vec![
+                "/scene".to_string(),
+                "/scene-profile".to_string(),
+                "/scene-profile-off".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn candidates_keep_whichever_palette_prefix_was_typed() {
         let model = make_model(vec![scene("main", None)], vec![]);
-        assert_eq!(compute(":sc", &model), vec![":scene".to_string()]);
+        assert_eq!(
+            compute(":sc", &model),
+            vec![
+                ":scene".to_string(),
+                ":scene-profile".to_string(),
+                ":scene-profile-off".to_string(),
+            ]
+        );
         assert_eq!(compute(":scene m", &model), vec![":scene main".to_string()]);
         // No prefix at all is still completed, unprefixed.
-        assert_eq!(compute("sc", &model), vec!["scene".to_string()]);
+        assert_eq!(
+            compute("sc", &model),
+            vec![
+                "scene".to_string(),
+                "scene-profile".to_string(),
+                "scene-profile-off".to_string(),
+            ]
+        );
     }
 
     #[test]

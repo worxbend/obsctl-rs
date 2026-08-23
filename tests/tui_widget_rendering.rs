@@ -1893,3 +1893,371 @@ fn clicks_map_to_the_rows_ratatui_actually_drew() {
         "click on row {first_row} selected index {index}, but that row reads: {drawn}"
     );
 }
+
+// ── scene-profile editor ────────────────────────────────────────────────────
+
+/// A connected model whose daemon knows two scene profiles. The active one
+/// hides `Utility BG`, which is therefore missing from the dashboard's scene
+/// list — the thing the editor has to show anyway.
+fn model_with_scene_profiles() -> TuiModel {
+    use obsctl_rs::obs::state::SceneProfileState;
+
+    let mut model = model_connected();
+    model.update_snapshot(|snapshot| {
+        snapshot.scenes.push(SceneState {
+            name: "Utility BG".into(),
+            hidden: true,
+            ..SceneState::default()
+        });
+        snapshot.scene_profiles = vec![
+            SceneProfileState {
+                name: "streaming".into(),
+                hidden: vec!["Utility BG".into()],
+            },
+            SceneProfileState {
+                name: "recording".into(),
+                hidden: Vec::new(),
+            },
+        ];
+        snapshot.active_scene_profile = Some("streaming".into());
+    });
+    model
+}
+
+fn draw_scene_profile(model: &TuiModel) -> Terminal<TestBackend> {
+    let mut t = term(80, 24);
+    t.draw(|f| {
+        let _ = widgets::scene_profile::render(f, f.area(), model);
+    })
+    .unwrap();
+    t
+}
+
+/// The editor opened on the toggle stage for the profile named `profile`.
+fn editing_scene_profile(profile: &str) -> TuiModel {
+    let mut model = model_with_scene_profiles();
+    model.open_scene_profiles();
+    let row = model
+        .scene_profiles()
+        .iter()
+        .position(|p| p.name == profile)
+        .expect("profile in the snapshot");
+    // Row 0 of the picker is "new scene profile", so profile n sits at n + 1.
+    model.scene_profile_set_cursor(row + 1);
+    model.scene_profile_confirm_picker();
+    model
+}
+
+/// Which buffer row `needle` was printed on.
+fn row_containing(terminal: &Terminal<TestBackend>, needle: &str) -> u16 {
+    let out = buf_string(terminal);
+    let index = out
+        .lines()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("{needle:?} is not on screen:\n{out}"));
+    u16::try_from(index).expect("row fits a u16")
+}
+
+#[test]
+fn scene_profile_editor_draws_nothing_while_it_is_closed() {
+    let model = model_with_scene_profiles();
+    let t = draw_scene_profile(&model);
+    assert!(
+        buf_string(&t).trim().is_empty(),
+        "a closed editor must leave the dashboard alone"
+    );
+}
+
+#[test]
+fn scene_profile_picker_lists_the_profiles_and_marks_the_active_one() {
+    let mut model = model_with_scene_profiles();
+    model.open_scene_profiles();
+
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(out.contains("Scene Profiles"), "title; got:\n{out}");
+    assert!(
+        out.contains("new scene profile"),
+        "the first row makes a new profile; got:\n{out}"
+    );
+    assert!(out.contains("streaming"), "profile name; got:\n{out}");
+    assert!(out.contains("recording"), "profile name; got:\n{out}");
+    assert!(
+        out.contains("1 hidden"),
+        "each profile says how many scenes it hides; got:\n{out}"
+    );
+    assert!(
+        out.contains("★ active"),
+        "the switched-on profile is marked; got:\n{out}"
+    );
+    assert!(
+        out.contains("activate"),
+        "the footer hint names the keys; got:\n{out}"
+    );
+}
+
+#[test]
+fn scene_profile_picker_says_so_when_no_profile_has_been_made_yet() {
+    let mut model = model_connected();
+    model.open_scene_profiles();
+
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.contains("no scene profiles yet"),
+        "an empty picker explains itself; got:\n{out}"
+    );
+    assert!(
+        out.contains("new scene profile"),
+        "and still offers the row that makes one; got:\n{out}"
+    );
+}
+
+#[test]
+fn scene_profile_toggle_stage_lists_scenes_the_dashboard_leaves_out() {
+    let model = editing_scene_profile("streaming");
+
+    assert!(
+        !model.scenes().iter().any(|s| s.name == "Utility BG"),
+        "the dashboard's scene list must be the visible subset"
+    );
+
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.contains("Editing: streaming"),
+        "the title names the profile being edited; got:\n{out}"
+    );
+    assert!(
+        out.contains("Utility BG"),
+        "a hidden scene is still a scene the profile can reveal; got:\n{out}"
+    );
+    assert!(out.contains("Main"), "visible scenes are listed too");
+    assert!(out.contains("hidden") && out.contains("visible"), "{out}");
+    assert!(
+        out.contains("hide/show"),
+        "the footer hint names the toggle key; got:\n{out}"
+    );
+}
+
+#[test]
+fn a_hidden_scene_row_is_muted_while_a_visible_one_keeps_the_body_color() {
+    use std::collections::HashSet;
+
+    let model = editing_scene_profile("streaming");
+    let theme = model.theme;
+    let t = draw_scene_profile(&model);
+
+    let hidden: HashSet<_> = row_foregrounds(&t, row_containing(&t, "Utility BG"))
+        .into_iter()
+        .flatten()
+        .collect();
+    assert!(
+        hidden.contains(&theme.muted),
+        "a hidden scene is drawn muted; got {hidden:?}"
+    );
+    assert!(
+        !hidden.contains(&theme.fg),
+        "and nothing on that row is painted in the body color; got {hidden:?}"
+    );
+
+    let visible: HashSet<_> = row_foregrounds(&t, row_containing(&t, "Cam"))
+        .into_iter()
+        .flatten()
+        .collect();
+    assert!(
+        visible.contains(&theme.fg),
+        "a scene the profile shows keeps the body color; got {visible:?}"
+    );
+}
+
+#[test]
+fn scene_profile_naming_stage_shows_the_typed_name_over_the_scene_list() {
+    let mut model = model_with_scene_profiles();
+    model.open_scene_profiles();
+    // Row 0 starts a profile that does not exist yet, which asks for a name
+    // first.
+    model.scene_profile_confirm_picker();
+    for c in "night shift".chars() {
+        model.scene_profile_edit_name(|name| name.push(c));
+    }
+
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.contains("New Scene Profile"),
+        "the title says this one is new; got:\n{out}"
+    );
+    assert!(
+        out.contains("name: night shift"),
+        "the field shows what was typed, spaces included; got:\n{out}"
+    );
+    assert!(out.contains('█'), "the field carries a cursor; got:\n{out}");
+    assert!(
+        out.contains("Main"),
+        "the scene list stays underneath; got:\n{out}"
+    );
+    assert!(
+        out.contains("accept"),
+        "the footer hint changes with the stage; got:\n{out}"
+    );
+}
+
+#[test]
+fn scene_profile_editor_is_ascii_in_simplified_mode() {
+    let mut model = model_with_scene_profiles();
+    model.advanced_ui = false;
+    model.show_icons = false;
+    model.open_scene_profiles();
+
+    let picker = buf_string(&draw_scene_profile(&model));
+    assert!(
+        picker.is_ascii(),
+        "simplified picker emitted non-ASCII characters:\n{picker}"
+    );
+    assert!(
+        picker.contains("+ new scene profile"),
+        "the new-profile row falls back to a plain plus; got:\n{picker}"
+    );
+    assert!(
+        picker.contains("* active"),
+        "and the active marker to a star; got:\n{picker}"
+    );
+
+    model.scene_profile_set_cursor(1);
+    model.scene_profile_confirm_picker();
+    let scenes = buf_string(&draw_scene_profile(&model));
+    assert!(
+        scenes.is_ascii(),
+        "simplified toggle stage emitted non-ASCII characters:\n{scenes}"
+    );
+    let utility = scenes
+        .lines()
+        .find(|line| line.contains("Utility BG"))
+        .expect("the hidden scene is listed");
+    assert!(
+        utility.contains("- Utility BG"),
+        "a hidden scene is marked with a dash in ASCII mode; got: {utility}"
+    );
+    let main = scenes
+        .lines()
+        .find(|line| line.contains("Main"))
+        .expect("the visible scene is listed");
+    assert!(
+        main.contains("* Main"),
+        "a visible scene is marked with a star in ASCII mode; got: {main}"
+    );
+}
+
+#[test]
+fn scene_profile_editor_renders_without_a_snapshot() {
+    let mut model = model_daemon_disconnected();
+    model.open_scene_profiles();
+
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.contains("no scene profiles yet"),
+        "a daemon with nothing to say still gets the empty note; got:\n{out}"
+    );
+
+    // And the stage that lists scenes has none to list, which must not panic
+    // either.
+    model.scene_profile_confirm_picker();
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.contains("name:"),
+        "a new profile still asks for a name; got:\n{out}"
+    );
+}
+
+#[test]
+fn scene_profile_editor_survives_a_degenerate_area() {
+    let mut model = model_with_scene_profiles();
+    model.open_scene_profiles();
+    let mut t = term(6, 3);
+    t.draw(|f| {
+        let _ = widgets::scene_profile::render(f, f.area(), &model);
+    })
+    .unwrap();
+}
+
+/// The modal is not mouse-inert, but it is modal: nothing that lands on it
+/// reaches the dashboard rects still sitting underneath.
+#[test]
+fn clicking_a_row_in_the_scene_profile_editor_moves_its_cursor() {
+    use obsctl_rs::tui::input::TuiAction;
+    use obsctl_rs::tui::mouse::{HitView, Hitboxes, handle_mouse};
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let mut model = model_with_scene_profiles();
+    model.open_scene_profiles();
+    // The panels keep the rects the frame drew them at; the view says the
+    // modal is on top of them, and `scene_profile_list` is where its rows are.
+    let hits = Hitboxes {
+        view: HitView::SceneProfile,
+        scenes: Rect::new(0, 0, 40, 10),
+        scene_profile_list: Rect::new(10, 2, 30, 6),
+        ..Hitboxes::default()
+    };
+    let at = |kind, column, row| {
+        handle_mouse(
+            &model,
+            &hits,
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+    };
+
+    // Row 2 of the list is the third row: "new scene profile", then the two
+    // profiles the snapshot defines.
+    assert_eq!(
+        at(MouseEventKind::Down(MouseButton::Left), 15, 4),
+        Some(TuiAction::SceneProfileSelect(2))
+    );
+    assert_eq!(
+        at(MouseEventKind::ScrollDown, 15, 4),
+        Some(TuiAction::SceneProfileNavDown(3))
+    );
+    // Right-click is Esc, which on the picker closes the editor.
+    assert_eq!(
+        at(MouseEventKind::Down(MouseButton::Right), 15, 4),
+        Some(TuiAction::CloseSceneProfiles)
+    );
+
+    // Outside the list: the border, the hint line, and the dashboard behind
+    // the popup all swallow the event rather than acting on the panel the
+    // frame drew there.
+    assert_eq!(at(MouseEventKind::Down(MouseButton::Left), 5, 3), None);
+    assert_eq!(at(MouseEventKind::ScrollUp, 5, 3), None);
+}
+
+/// A click while a name is being typed does not drag the scene cursor out
+/// from under the half-typed name.
+#[test]
+fn clicking_during_the_naming_stage_does_nothing() {
+    use obsctl_rs::tui::mouse::{HitView, Hitboxes, handle_mouse};
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let mut model = model_with_scene_profiles();
+    model.open_scene_profiles();
+    // Row 0 is "new scene profile", which opens straight onto the naming
+    // stage because a profile that does not exist yet has no name.
+    model.scene_profile_confirm_picker();
+
+    let hits = Hitboxes {
+        view: HitView::SceneProfile,
+        scene_profile_list: Rect::new(10, 2, 30, 6),
+        ..Hitboxes::default()
+    };
+    let action = handle_mouse(
+        &model,
+        &hits,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    assert_eq!(action, None);
+}

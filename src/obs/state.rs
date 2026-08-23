@@ -25,6 +25,17 @@ pub struct ObsSnapshot {
     /// Name of the currently active OBS scene collection.
     #[serde(default)]
     pub current_scene_collection: Option<String>,
+    /// Every scene profile the daemon's config defines. Carried in full — the
+    /// hidden lists included — so a client can edit one without a second
+    /// round-trip to fetch what it currently hides.
+    #[serde(default)]
+    pub scene_profiles: Vec<SceneProfileState>,
+    /// Which scene profile is switched on, spelled as `scene_profiles` spells
+    /// it. `None` when no profile is active, and also when the config names one
+    /// that is not defined — the snapshot never advertises a profile that is
+    /// not in the list beside it.
+    #[serde(default)]
+    pub active_scene_profile: Option<String>,
     pub last_error: Option<String>,
     /// CPU/memory/disk/render performance stats, polled periodically from
     /// `GetStats`. `None` until the first poll completes after connecting.
@@ -60,6 +71,8 @@ impl Default for ObsSnapshot {
             current_profile: None,
             scene_collections: Vec::new(),
             current_scene_collection: None,
+            scene_profiles: Vec::new(),
+            active_scene_profile: None,
             last_error: None,
             stats: None,
             stream_bitrate_kbps: None,
@@ -102,6 +115,22 @@ impl ObsStats {
             output_total_frames: u("outputTotalFrames"),
         }
     }
+}
+
+/// One obsctl scene profile — a named set of scene-visibility choices — as
+/// clients see it. Nothing to do with an OBS profile, which is what
+/// [`ObsSnapshot::profiles`] holds.
+///
+/// It lives here, beside the rest of the snapshot, because `obs::state` is the
+/// one module both the daemon and the TUI are allowed to import: the TUI needs
+/// the hidden lists to open the profile editor with the right rows already
+/// marked, and fetching them separately would let the editor disagree with the
+/// scene list it is drawn over.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SceneProfileState {
+    pub name: String,
+    /// Scene names this profile hides, spelled as OBS spells them.
+    pub hidden: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
