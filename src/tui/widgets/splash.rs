@@ -10,9 +10,6 @@ use rust_i18n::t;
 
 use crate::tui::{anim, spinner, theme::Theme, widgets::chrome};
 
-const TAGLINE: &str = "Broadcast control, without breaking flow.";
-const APP_DESCRIPTION: &str =
-    "Scenes, audio, profiles, recording, and live telemetry — one command center.";
 const PROGRESS_BAR_WIDTH: usize = 30;
 
 /// Width of the shimmering "preparing" noise band under the boot label.
@@ -95,7 +92,7 @@ pub fn render_with_appearance(
         .title(Line::from(vec![
             Span::styled(format!(" {orbit} "), Style::default().fg(theme.warning)),
             Span::styled(
-                "INITIALIZING BROADCAST CONTROL",
+                t!("tui.splash.initializing_title").into_owned(),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
@@ -119,7 +116,13 @@ pub fn render_with_appearance(
     );
 
     lines.push(Line::raw(""));
-    lines.push(Line::styled(TAGLINE, Style::default().fg(theme.fg)).alignment(Alignment::Center));
+    lines.push(
+        Line::styled(
+            t!("tui.splash.tagline").into_owned(),
+            Style::default().fg(theme.fg),
+        )
+        .alignment(Alignment::Center),
+    );
     lines.push(live_identity_line(frame, theme, show_icons));
 
     if inner.height >= 7 {
@@ -134,17 +137,32 @@ pub fn render_with_appearance(
         ));
     }
 
-    let progress = (frame as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
-    lines.push(progress_line(progress, theme, frame, true).alignment(Alignment::Center));
-    lines.push(
+    lines.extend(footer_lines(
+        progress(frame, total_frames),
+        theme,
+        frame,
+        show_icons,
+    ));
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// How far through the boot animation `frame` is, as 0..=1.
+fn progress(frame: u64, total_frames: u64) -> f32 {
+    (frame as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0)
+}
+
+/// The two rows both Unicode splash variants end on: the gradient progress
+/// bar and the muted boot-stage message under it.
+fn footer_lines(progress: f32, theme: Theme, frame: u64, show_icons: bool) -> [Line<'static>; 2] {
+    [
+        progress_line(progress, theme, frame, true).alignment(Alignment::Center),
         Line::styled(
             boot_message(progress, show_icons),
             Style::default().fg(theme.muted),
         )
         .alignment(Alignment::Center),
-    );
-
-    f.render_widget(Paragraph::new(lines), inner);
+    ]
 }
 
 fn render_ascii(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
@@ -160,12 +178,12 @@ fn render_ascii(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
         .borders(Borders::ALL)
         .border_set(chrome::ASCII_BORDER)
         .border_style(Style::default().fg(theme.accent))
-        .title(" OBSCTL STARTUP ");
+        .title(t!("tui.splash.startup_title_ascii").into_owned());
     let Some(inner) = chrome::frame(f, area, card) else {
         return;
     };
 
-    let progress = (frame as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
+    let progress = progress(frame, total_frames);
     let tick = spinner::splash_frame(false, frame);
     let mut lines = ASCII_LOGO
         .iter()
@@ -180,9 +198,13 @@ fn render_ascii(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
         })
         .collect::<Vec<_>>();
     lines.extend([
-        Line::styled(TAGLINE, Style::default().fg(theme.fg)).alignment(Alignment::Center),
         Line::styled(
-            "Scenes, audio, profiles, recording, and live telemetry.",
+            t!("tui.splash.tagline").into_owned(),
+            Style::default().fg(theme.fg),
+        )
+        .alignment(Alignment::Center),
+        Line::styled(
+            t!("tui.splash.description_ascii").into_owned(),
             Style::default().fg(theme.muted),
         )
         .alignment(Alignment::Center),
@@ -203,7 +225,7 @@ fn render_ascii(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64) {
     lines.extend([
         progress_line(progress, theme, frame, false).alignment(Alignment::Center),
         Line::styled(
-            format!("{tick} initializing studio link"),
+            t!("tui.splash.initializing_studio_link", tick = tick).into_owned(),
             Style::default().fg(theme.muted),
         )
         .alignment(Alignment::Center),
@@ -238,10 +260,19 @@ fn render_large(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64, show
 
     f.render_widget(
         Paragraph::new(vec![
-            anim::gradient_line(TAGLINE, theme.accent_alt, theme.info, frame, true)
-                .alignment(Alignment::Center),
-            Line::styled(APP_DESCRIPTION, Style::default().fg(theme.muted))
-                .alignment(Alignment::Center),
+            anim::gradient_line(
+                &t!("tui.splash.tagline"),
+                theme.accent_alt,
+                theme.info,
+                frame,
+                true,
+            )
+            .alignment(Alignment::Center),
+            Line::styled(
+                t!("tui.splash.description").into_owned(),
+                Style::default().fg(theme.muted),
+            )
+            .alignment(Alignment::Center),
             live_identity_line(frame, theme, show_icons),
         ]),
         sections[1],
@@ -255,7 +286,7 @@ fn render_large(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64, show
         .border_style(Style::default().fg(rail_color))
         .style(Style::default().bg(anim::blend(theme.bg, theme.border, 0.34)))
         .title(Line::styled(
-            " STUDIO LINK // SECURE SESSION ",
+            t!("tui.splash.studio_link_title").into_owned(),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -264,7 +295,6 @@ fn render_large(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64, show
         return;
     };
 
-    let progress = (frame as f32 / total_frames.max(1) as f32).clamp(0.0, 1.0);
     let mut lines = vec![
         loader_line("SIGNAL", slither(frame, 32), theme.accent, theme),
         loader_line("LIQUID", liquid_wave(frame, 32), theme.accent_alt, theme),
@@ -275,14 +305,12 @@ fn render_large(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64, show
         (inner.width as usize).min(PREPARING_BAND_WIDTH),
         show_icons,
     ));
-    lines.extend([
-        progress_line(progress, theme, frame, true).alignment(Alignment::Center),
-        Line::styled(
-            boot_message(progress, show_icons),
-            Style::default().fg(theme.muted),
-        )
-        .alignment(Alignment::Center),
-    ]);
+    lines.extend(footer_lines(
+        progress(frame, total_frames),
+        theme,
+        frame,
+        show_icons,
+    ));
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -461,15 +489,15 @@ fn progress_line(progress: f32, theme: Theme, frame: u64, rich: bool) -> Line<'s
 
 fn boot_message(progress: f32, show_icons: bool) -> String {
     let (icon, message) = if progress < 0.25 {
-        ("◌", "loading control surfaces")
+        ("◌", t!("tui.splash.boot_loading"))
     } else if progress < 0.5 {
-        ("◍", "warming animation engine")
+        ("◍", t!("tui.splash.boot_warming"))
     } else if progress < 0.75 {
-        ("◉", "syncing OBS telemetry")
+        ("◉", t!("tui.splash.boot_syncing"))
     } else if progress < 1.0 {
-        ("◎", "painting command center")
+        ("◎", t!("tui.splash.boot_painting"))
     } else {
-        ("✓", "ready")
+        ("✓", t!("tui.splash.boot_ready"))
     };
     if show_icons {
         format!("{icon}  {message}")

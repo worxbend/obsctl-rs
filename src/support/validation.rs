@@ -193,7 +193,9 @@ pub fn read_env_token(name: &str) -> Option<String> {
 
 /// Read an environment variable intended to be used as a path token.
 ///
-/// This currently applies the same validation as `read_env_token`.
+/// Applies the same validation as [`read_env_token`], and additionally rejects
+/// values containing `.` or `..` path components, so the result cannot escape
+/// the directory it is joined onto.
 pub fn read_env_path_token(name: &str) -> Option<String> {
     let value = read_env_token(name)?;
     if crate::support::fs::has_path_traversal(Path::new(&value)) {
@@ -213,17 +215,14 @@ pub fn read_env_path_token(name: &str) -> Option<String> {
 /// - Present and valid value -> `Ok(Some(value))`
 pub fn read_password_env_value(name: &str) -> Result<Option<String>, ValidationError> {
     validate_env_var_name(name)?;
-    let value = match read_env_value(name)? {
-        Some(value) => {
-            if value.chars().count() > MAX_PASSWORD_LENGTH {
-                return Err(ValidationError::MaxLengthExceeded(MAX_PASSWORD_LENGTH));
-            }
-            validate_no_control_characters(&value)?;
-            Ok(Some(value))
-        }
-        None => Ok(None),
-    }?;
-    Ok(value)
+    let Some(value) = read_env_value(name)? else {
+        return Ok(None);
+    };
+    if value.chars().count() > MAX_PASSWORD_LENGTH {
+        return Err(ValidationError::MaxLengthExceeded(MAX_PASSWORD_LENGTH));
+    }
+    validate_no_control_characters(&value)?;
+    Ok(Some(value))
 }
 
 /// Read an environment variable as UTF-8 text.

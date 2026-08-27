@@ -20,11 +20,12 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     } else {
         theme.border
     };
-    let title_text = chrome::glyph(
+    let title_text = t!(chrome::glyph(
         model,
-        " ◈ OBSCTL // BROADCAST COMMAND CENTER ",
-        " OBSCTL // BROADCAST COMMAND CENTER ",
-    );
+        "tui.header.title",
+        "tui.header.title_ascii"
+    ))
+    .into_owned();
     let title = chrome::heading(model, title_text, theme.accent, theme.accent_alt);
     let block = chrome::bordered(model, BorderType::Rounded, border, title);
     let Some(inner) = chrome::frame(f, area, block) else {
@@ -40,7 +41,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  studio automation console",
+            t!("tui.header.subtitle").into_owned(),
             Style::default().fg(theme.muted),
         ),
         Span::styled(

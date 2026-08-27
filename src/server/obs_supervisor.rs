@@ -226,10 +226,7 @@ impl ObsSupervisor {
         *self.obs_handle.lock().await = None;
 
         let (level, message, last_error) = reason.report();
-        match level {
-            LogLevel::Info => self.log.info(message),
-            _ => self.log.warn(message),
-        }
+        self.log.log(level, message);
         self.state
             .mark_disconnected(last_error.map(str::to_string))
             .await;
@@ -370,10 +367,7 @@ impl ObsSupervisor {
     /// `wait_before_retry` is a single line.
     async fn stop_supervising(&self, end: SupervisionEnd) -> ControlFlow<()> {
         self.reconnecting.store(false, Ordering::Relaxed);
-        match end.log_level() {
-            LogLevel::Info => self.log.info(end.announcement()),
-            _ => self.log.warn(end.announcement()),
-        }
+        self.log.log(end.log_level(), end.announcement());
         self.state
             .mark_disconnected(Some(end.reason().to_string()))
             .await;
@@ -795,35 +789,52 @@ async fn fetch_input_state(client: &ObsClient, name: &str) -> Result<RawInputSta
     let mute_request = requests::get_input_mute(name)?;
     let volume_request = requests::get_input_volume(name)?;
 
-    let muted = client.request(mute_request).await.ok().and_then(|v| {
-        match v.get("inputMuted").and_then(|b| b.as_bool()) {
-            Some(muted) => Some(muted),
-            None => {
-                warn!("Malformed GetInputMute response for {name}: missing `inputMuted`");
-                None
-            }
+    /// Request one field, warning — with the request and field spelled out —
+    /// when the reply arrived but did not carry it in the expected shape.
+    async fn field_or_warn<T>(
+        client: &ObsClient,
+        request: crate::obs::protocol::RequestData,
+        request_name: &str,
+        input_name: &str,
+        field: &str,
+        get: impl FnOnce(&serde_json::Value) -> Option<T>,
+    ) -> Option<T> {
+        let response = client.request(request).await.ok()?;
+        let value = get(&response);
+        if value.is_none() {
+            warn!("Malformed {request_name} response for {input_name}: missing `{field}`");
         }
-    });
+        value
+    }
 
-    let volume_mul = client
-        .request(volume_request)
-        .await
-        .ok()
-        .and_then(
-            |v| match v.get("inputVolumeMul").and_then(|f| f.as_f64()) {
-                Some(volume_mul) if volume_mul.is_finite() && volume_mul >= 0.0 => Some(volume_mul),
-                None => {
-                    warn!("Malformed GetInputVolume response for {name}: missing `inputVolumeMul`");
-                    None
-                }
-                Some(_) => {
-                    warn!(
-                        "Malformed GetInputVolume response for {name}: non-finite or negative `inputVolumeMul`"
-                    );
-                    None
-                }
-            },
-        );
+    let muted = field_or_warn(
+        client,
+        mute_request,
+        "GetInputMute",
+        name,
+        "inputMuted",
+        |v| v.get("inputMuted").and_then(|b| b.as_bool()),
+    )
+    .await;
+
+    let volume_mul = field_or_warn(
+        client,
+        volume_request,
+        "GetInputVolume",
+        name,
+        "inputVolumeMul",
+        |v| v.get("inputVolumeMul").and_then(|f| f.as_f64()),
+    )
+    .await
+    .filter(|volume_mul| {
+        let usable = volume_mul.is_finite() && *volume_mul >= 0.0;
+        if !usable {
+            warn!(
+                "Malformed GetInputVolume response for {name}: non-finite or negative `inputVolumeMul`"
+            );
+        }
+        usable
+    });
 
     Ok(RawInputState {
         name: name.to_string(),
@@ -834,6 +845,44 @@ async fn fetch_input_state(client: &ObsClient, name: &str) -> Result<RawInputSta
 
 const STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Derives a stream bitrate from successive `GetStreamStatus.outputBytes`
+/// readings, since obs-websocket does not report bitrate directly.
+///
+/// Each poll hands in the latest byte counter; the delta since the previous
+/// poll, over the elapsed time, is the bitrate. Two situations produce no
+/// sample on purpose: an inactive stream clears the baseline entirely (the
+/// counter restarts from zero on the next stream, so the old baseline would
+/// yield a huge negative delta), and a counter that went *backwards* while
+/// active means the stream restarted between polls — that reading becomes the
+/// new baseline instead of a sample.
+struct BitrateTracker {
+    last: Option<(u64, tokio::time::Instant)>,
+}
+
+impl BitrateTracker {
+    fn new() -> Self {
+        Self { last: None }
+    }
+
+    /// Feed one `GetStreamStatus` reading; returns the derived kbps when two
+    /// comparable readings exist.
+    fn sample(&mut self, active: bool, bytes: u64, now: tokio::time::Instant) -> Option<f64> {
+        if !active {
+            self.last = None;
+            return None;
+        }
+        let kbps = self.last.and_then(|(prev_bytes, prev_time)| {
+            if bytes < prev_bytes {
+                return None; // stream (re)started; skip this sample
+            }
+            let elapsed = now.duration_since(prev_time).as_secs_f64();
+            (elapsed > 0.0).then(|| (bytes - prev_bytes) as f64 * 8.0 / 1000.0 / elapsed)
+        });
+        self.last = Some((bytes, now));
+        kbps
+    }
+}
+
 /// Poll `GetStats`/`GetStreamStatus`/`GetRecordStatus` on a fixed interval
 /// and publish the results via `StateStore::update_stats`. Stream bitrate
 /// isn't available directly from obs-websocket, so it's derived from the
@@ -841,7 +890,7 @@ const STATS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 /// OBS's own stats dock and most third-party remotes use).
 fn spawn_stats_poller(client: ObsClient, state: StateStore) {
     tokio::spawn(async move {
-        let mut last_bytes: Option<(u64, tokio::time::Instant)> = None;
+        let mut bitrate = BitrateTracker::new();
         let mut interval = tokio::time::interval(STATS_POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -862,20 +911,7 @@ fn spawn_stats_poller(client: ObsClient, state: StateStore) {
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false);
                 let bytes = v.get("outputBytes").and_then(|b| b.as_u64())?;
-                if !active {
-                    last_bytes = None;
-                    return None;
-                }
-                let now = tokio::time::Instant::now();
-                let kbps = last_bytes.and_then(|(prev_bytes, prev_time)| {
-                    if bytes < prev_bytes {
-                        return None; // stream (re)started; skip this sample
-                    }
-                    let elapsed = now.duration_since(prev_time).as_secs_f64();
-                    (elapsed > 0.0).then(|| (bytes - prev_bytes) as f64 * 8.0 / 1000.0 / elapsed)
-                });
-                last_bytes = Some((bytes, now));
-                kbps
+                bitrate.sample(active, bytes, tokio::time::Instant::now())
             });
             let stream_duration_ms = stream_resp.as_ref().and_then(output_duration_if_active);
 
@@ -928,5 +964,52 @@ mod tests {
     fn output_duration_if_active_defaults_missing_active_to_false() {
         let v = serde_json::json!({ "outputDuration": 5000 });
         assert_eq!(output_duration_if_active(&v), None);
+    }
+
+    #[test]
+    fn bitrate_tracker_derives_kbps_from_the_byte_delta() {
+        let mut tracker = BitrateTracker::new();
+        let start = tokio::time::Instant::now();
+
+        // The first reading is a baseline: nothing to compare against yet.
+        assert_eq!(tracker.sample(true, 1_000, start), None);
+
+        // 250 000 bytes over 2 s = 2 000 000 bits / 2 s = 1000 kbps.
+        let kbps = tracker
+            .sample(true, 251_000, start + std::time::Duration::from_secs(2))
+            .expect("two active readings must produce a sample");
+        assert!((kbps - 1000.0).abs() < f64::EPSILON, "got {kbps}");
+    }
+
+    #[test]
+    fn bitrate_tracker_skips_the_sample_when_the_counter_goes_backwards() {
+        let mut tracker = BitrateTracker::new();
+        let start = tokio::time::Instant::now();
+
+        assert_eq!(tracker.sample(true, 500_000, start), None);
+        // The counter restarted (stream restart): no sample, but the reading
+        // becomes the new baseline...
+        let later = start + std::time::Duration::from_secs(2);
+        assert_eq!(tracker.sample(true, 1_000, later), None);
+        // ...so the next delta is measured from it.
+        let kbps = tracker
+            .sample(true, 251_000, later + std::time::Duration::from_secs(2))
+            .expect("the restart reading must have become the baseline");
+        assert!((kbps - 1000.0).abs() < f64::EPSILON, "got {kbps}");
+    }
+
+    #[test]
+    fn bitrate_tracker_resets_its_baseline_while_inactive() {
+        let mut tracker = BitrateTracker::new();
+        let start = tokio::time::Instant::now();
+
+        assert_eq!(tracker.sample(true, 500_000, start), None);
+        // An inactive poll clears the baseline entirely.
+        let later = start + std::time::Duration::from_secs(2);
+        assert_eq!(tracker.sample(false, 500_000, later), None);
+        // The next active reading starts over rather than comparing against
+        // the pre-stop counter.
+        let resumed = later + std::time::Duration::from_secs(2);
+        assert_eq!(tracker.sample(true, 900_000, resumed), None);
     }
 }

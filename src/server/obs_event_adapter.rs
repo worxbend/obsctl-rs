@@ -110,19 +110,18 @@ pub fn needs_full_refresh(event: &ObsEvent) -> bool {
 /// together because adding a variant means answering all three questions, and
 /// having to open one file to do it is the reminder that there are three.
 pub fn describe_obs_event(event: &ObsEvent) -> Option<String> {
-    use crate::obs::client::ObsEvent::*;
     match event {
-        CurrentProgramSceneChanged { scene_name } => {
+        ObsEvent::CurrentProgramSceneChanged { scene_name } => {
             Some(format!("OBS: scene changed → {scene_name}"))
         }
-        SceneListChanged => Some("OBS: scene list changed".to_string()),
-        InputCreated { input_name } => Some(format!("OBS: input created: {input_name}")),
-        InputRemoved { input_name } => Some(format!("OBS: input removed: {input_name}")),
-        InputMuteStateChanged { input_name, muted } => {
+        ObsEvent::SceneListChanged => Some("OBS: scene list changed".to_string()),
+        ObsEvent::InputCreated { input_name } => Some(format!("OBS: input created: {input_name}")),
+        ObsEvent::InputRemoved { input_name } => Some(format!("OBS: input removed: {input_name}")),
+        ObsEvent::InputMuteStateChanged { input_name, muted } => {
             let state = if *muted { "muted" } else { "unmuted" };
             Some(format!("OBS: {input_name} {state}"))
         }
-        InputVolumeChanged {
+        ObsEvent::InputVolumeChanged {
             input_name,
             volume_db,
             ..
@@ -134,26 +133,28 @@ pub fn describe_obs_event(event: &ObsEvent) -> Option<String> {
             };
             Some(format!("OBS: volume changed: {input_name} → {db}"))
         }
-        StreamStateChanged { active } => {
+        ObsEvent::StreamStateChanged { active } => {
             let state = if *active { "started" } else { "stopped" };
             Some(format!("OBS: streaming {state}"))
         }
-        RecordStateChanged { active } => {
+        ObsEvent::RecordStateChanged { active } => {
             let state = if *active { "started" } else { "stopped" };
             Some(format!("OBS: recording {state}"))
         }
-        CurrentProfileChanged { profile_name } => {
+        ObsEvent::CurrentProfileChanged { profile_name } => {
             Some(format!("OBS: profile changed → {profile_name}"))
         }
-        ProfileListChanged => Some("OBS: profile list changed".to_string()),
-        CurrentSceneCollectionChanged {
+        ObsEvent::ProfileListChanged => Some("OBS: profile list changed".to_string()),
+        ObsEvent::CurrentSceneCollectionChanged {
             scene_collection_name,
         } => Some(format!(
             "OBS: scene collection changed → {scene_collection_name}"
         )),
-        SceneCollectionListChanged => Some("OBS: scene collection list changed".to_string()),
+        ObsEvent::SceneCollectionListChanged => {
+            Some("OBS: scene collection list changed".to_string())
+        }
         // High-frequency or uninteresting — don't flood the log.
-        InputVolumeMeters { .. } | Other { .. } => None,
+        ObsEvent::InputVolumeMeters { .. } | ObsEvent::Other { .. } => None,
     }
 }
 

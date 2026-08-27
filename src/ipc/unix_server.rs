@@ -352,43 +352,71 @@ async fn handle_command(
             .await;
     }
 
-    let writer = writer.clone();
-    let id_clone = id.clone();
-    let (reply_tx, reply_rx) = oneshot::channel();
-    if command_tx
-        .send(CommandDispatch {
-            id,
-            payload: command,
-            reply: reply_tx,
-        })
-        .await
-        .is_err()
-    {
+    let request_id = id.clone();
+    let dispatched = dispatch_and_forward(command_tx, writer, id, command, |reply, request_id| {
+        Some(reply.unwrap_or_else(|| {
+            err_response(
+                request_id.to_string(),
+                PublicErrorCode::ServerError,
+                "command handler dropped",
+            )
+        }))
+    })
+    .await;
+    if dispatched.is_err() {
         return writer
             .reject(
-                id_clone,
+                request_id,
                 PublicErrorCode::ServerError,
                 "command handler unavailable",
             )
             .await;
     }
 
-    // Waiting for the reply here would stop this session reading anything
-    // else until the command finished, so the wait is spawned and the read
-    // loop goes straight back to the socket.
+    SessionControl::Continue
+}
+
+/// Hand one dispatch to the executor and spawn a task that waits for the
+/// reply, sanitizes it, and sends whatever `on_reply` makes of it (`None`
+/// drops the reply). `on_reply` sees `None` when the handler was dropped
+/// before answering. Returns `Err(())` without sending anything when the
+/// executor channel is closed — each caller keeps its own failure behavior.
+///
+/// Waiting for the reply inline would stop the session reading anything
+/// else until the command finished, so the wait is spawned and the read
+/// loop goes straight back to the socket.
+async fn dispatch_and_forward(
+    command_tx: &mpsc::Sender<CommandDispatch>,
+    writer: &SessionWriter,
+    request_id: String,
+    payload: CommandPayload,
+    on_reply: impl FnOnce(Option<ServerMessage>, &str) -> Option<ServerMessage> + Send + 'static,
+) -> Result<(), ()> {
+    let writer = writer.clone();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if command_tx
+        .send(CommandDispatch {
+            id: request_id.clone(),
+            payload,
+            reply: reply_tx,
+        })
+        .await
+        .is_err()
+    {
+        return Err(());
+    }
+
     tokio::spawn(async move {
-        let response = match reply_rx.await {
-            Ok(r) => sanitize_response_id(r, &id_clone),
-            Err(_) => err_response(
-                id_clone,
-                PublicErrorCode::ServerError,
-                "command handler dropped",
-            ),
-        };
-        writer.send(&response).await;
+        let reply = reply_rx
+            .await
+            .ok()
+            .map(|r| sanitize_response_id(r, &request_id));
+        if let Some(message) = on_reply(reply, &request_id) {
+            writer.send(&message).await;
+        }
     });
 
-    SessionControl::Continue
+    Ok(())
 }
 
 /// Record what this session wants pushed to it, acknowledge the request, and —
@@ -439,39 +467,31 @@ async fn handle_subscribe(
 
 /// Push the current snapshot to a session that has just subscribed to `state`.
 async fn send_initial_state(command_tx: &mpsc::Sender<CommandDispatch>, writer: &SessionWriter) {
-    let writer = writer.clone();
-    let (reply_tx, reply_rx) = oneshot::channel();
-    let dispatch = CommandDispatch {
-        id: STATE_INIT_REQUEST_ID.to_string(),
-        payload: CommandPayload::simple(ServerCommand::GetSnapshot),
-        reply: reply_tx,
-    };
-    if command_tx.send(dispatch).await.is_err() {
-        return;
-    }
-
-    tokio::spawn(async move {
-        // get_snapshot returns a Response; re-wrap the payload as a
-        // state Event so next_event() on the client side accepts it.
-        if let Ok(response) = reply_rx.await {
-            match sanitize_response_id(response, STATE_INIT_REQUEST_ID) {
-                ServerMessage::Response {
-                    ok: true,
-                    result: Some(data),
-                    ..
-                } => {
-                    let state_event = ServerMessage::Event {
-                        topic: Topic::State,
-                        data,
-                    };
-                    writer.send(&state_event).await;
-                }
-                _ => {
-                    warn!("Ignoring malformed state-init response");
-                }
+    // get_snapshot returns a Response; re-wrap the payload as a
+    // state Event so next_event() on the client side accepts it.
+    // An unreachable executor or a dropped handler is ignored silently:
+    // this push is best-effort and the session stays usable without it.
+    let _ = dispatch_and_forward(
+        command_tx,
+        writer,
+        STATE_INIT_REQUEST_ID.to_string(),
+        CommandPayload::simple(ServerCommand::GetSnapshot),
+        |reply, _| match reply? {
+            ServerMessage::Response {
+                ok: true,
+                result: Some(data),
+                ..
+            } => Some(ServerMessage::Event {
+                topic: Topic::State,
+                data,
+            }),
+            _ => {
+                warn!("Ignoring malformed state-init response");
+                None
             }
-        }
-    });
+        },
+    )
+    .await;
 }
 
 fn err_response(id: String, code: PublicErrorCode, message: &str) -> ServerMessage {
@@ -529,6 +549,29 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+
+    /// Decode a wire frame and assert it is an `IPC_PROTOCOL_ERROR` response
+    /// carrying `expected_id`.
+    fn assert_ipc_protocol_error(frame: &str, expected_id: &str) {
+        let msg = decode::<ServerMessage>(frame).unwrap();
+        assert_ipc_protocol_error_message(msg, expected_id);
+    }
+
+    /// Assert an already-decoded message is an `IPC_PROTOCOL_ERROR` response
+    /// carrying `expected_id`.
+    fn assert_ipc_protocol_error_message(message: ServerMessage, expected_id: &str) {
+        match message {
+            ServerMessage::Response { id, ok, error, .. } => {
+                assert_eq!(id, expected_id);
+                assert!(!ok);
+                assert_eq!(
+                    error.unwrap().code,
+                    PublicErrorCode::IpcProtocolError.as_str().to_string()
+                );
+            }
+            _ => panic!("expected protocol response"),
+        }
+    }
 
     #[tokio::test]
     async fn bind_and_accept() {
@@ -600,18 +643,7 @@ mod tests {
         assert_eq!(handled, SessionControl::Close);
 
         let resp = write_rx.recv().await.unwrap();
-        let msg = decode::<ServerMessage>(&resp).unwrap();
-        match msg {
-            ServerMessage::Response { id, ok, error, .. } => {
-                assert_eq!(id, "sub-1");
-                assert!(!ok);
-                assert_eq!(
-                    error.unwrap().code,
-                    PublicErrorCode::IpcProtocolError.as_str().to_string()
-                );
-            }
-            _ => panic!("expected protocol response"),
-        }
+        assert_ipc_protocol_error(&resp, "sub-1");
     }
 
     #[tokio::test]
@@ -638,18 +670,7 @@ mod tests {
         assert_eq!(handled, SessionControl::Close);
 
         let resp = write_rx.recv().await.unwrap();
-        let msg = decode::<ServerMessage>(&resp).unwrap();
-        match msg {
-            ServerMessage::Response { id, ok, error, .. } => {
-                assert_eq!(id, "sub-2");
-                assert!(!ok);
-                assert_eq!(
-                    error.unwrap().code,
-                    PublicErrorCode::IpcProtocolError.as_str().to_string()
-                );
-            }
-            _ => panic!("expected protocol response"),
-        }
+        assert_ipc_protocol_error(&resp, "sub-2");
     }
 
     #[tokio::test]
@@ -721,18 +742,7 @@ mod tests {
             .await;
 
         let resp = write_rx.recv().await.unwrap();
-        let msg = decode::<ServerMessage>(&resp).unwrap();
-        match msg {
-            ServerMessage::Response { id, ok, error, .. } => {
-                assert_eq!(id, "oversized-1");
-                assert!(!ok);
-                assert_eq!(
-                    error.unwrap().code,
-                    PublicErrorCode::IpcProtocolError.as_str().to_string()
-                );
-            }
-            _ => panic!("expected protocol response"),
-        }
+        assert_ipc_protocol_error(&resp, "oversized-1");
         assert!(resp.len() <= MAX_IPC_LINE_BYTES);
     }
 
@@ -776,18 +786,7 @@ mod tests {
         assert_eq!(handled, SessionControl::Close);
 
         let resp = write_rx.recv().await.unwrap();
-        let msg = decode::<ServerMessage>(&resp).unwrap();
-        match msg {
-            ServerMessage::Response { id, ok, error, .. } => {
-                assert_eq!(id, "has space");
-                assert!(!ok);
-                assert_eq!(
-                    error.unwrap().code,
-                    PublicErrorCode::IpcProtocolError.as_str().to_string()
-                );
-            }
-            _ => panic!("expected protocol response"),
-        }
+        assert_ipc_protocol_error(&resp, "has space");
     }
 
     #[tokio::test]
@@ -814,18 +813,7 @@ mod tests {
         assert_eq!(handled, SessionControl::Close);
 
         let resp = write_rx.recv().await.unwrap();
-        let msg = decode::<ServerMessage>(&resp).unwrap();
-        match msg {
-            ServerMessage::Response { id, ok, error, .. } => {
-                assert_eq!(id, "cmd-1");
-                assert!(!ok);
-                assert_eq!(
-                    error.unwrap().code,
-                    PublicErrorCode::IpcProtocolError.as_str().to_string()
-                );
-            }
-            _ => panic!("expected protocol response"),
-        }
+        assert_ipc_protocol_error(&resp, "cmd-1");
     }
 
     #[tokio::test]
@@ -863,18 +851,7 @@ mod tests {
             .unwrap();
 
         let resp = write_rx.recv().await.unwrap();
-        let msg = decode::<ServerMessage>(&resp).unwrap();
-        match msg {
-            ServerMessage::Response { id, ok, error, .. } => {
-                assert_eq!(id, "cmd-1");
-                assert!(!ok);
-                assert_eq!(
-                    error.unwrap().code,
-                    PublicErrorCode::IpcProtocolError.as_str().to_string()
-                );
-            }
-            _ => panic!("expected protocol response"),
-        }
+        assert_ipc_protocol_error(&resp, "cmd-1");
     }
 
     #[test]
@@ -889,17 +866,7 @@ mod tests {
             "expected-id",
         );
 
-        match response {
-            ServerMessage::Response { id, ok, error, .. } => {
-                assert_eq!(id, "expected-id");
-                assert!(!ok);
-                assert_eq!(
-                    error.unwrap().code,
-                    PublicErrorCode::IpcProtocolError.as_str().to_string()
-                );
-            }
-            _ => panic!("expected protocol error response"),
-        }
+        assert_ipc_protocol_error_message(response, "expected-id");
     }
 
     #[test]
@@ -912,17 +879,7 @@ mod tests {
             "expected-id",
         );
 
-        match response {
-            ServerMessage::Response { id, ok, error, .. } => {
-                assert_eq!(id, "expected-id");
-                assert!(!ok);
-                assert_eq!(
-                    error.unwrap().code,
-                    PublicErrorCode::IpcProtocolError.as_str().to_string()
-                );
-            }
-            _ => panic!("expected protocol error response"),
-        }
+        assert_ipc_protocol_error_message(response, "expected-id");
     }
 
     #[cfg(unix)]

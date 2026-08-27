@@ -28,7 +28,7 @@ pub async fn run(options: ServerOptions) -> i32 {
         .config_path
         .clone()
         .or_else(crate::config::paths::config_path)
-        .unwrap_or_else(dirs_next_config_path);
+        .unwrap_or_else(fallback_config_path);
 
     let (config, socket_path, _) = match loader::load_or_default_with_runtime(&config_path) {
         Ok(c) => c,
@@ -234,7 +234,7 @@ async fn join_by(
     }
 }
 
-fn dirs_next_config_path() -> PathBuf {
+fn fallback_config_path() -> PathBuf {
     crate::config::paths::default_config_path()
         .unwrap_or_else(|| PathBuf::from("/tmp/obsctl_config.yml"))
 }

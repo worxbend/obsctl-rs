@@ -36,8 +36,9 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> (Rect, usize) {
             .title(title),
         model,
     );
-    let inner = outer.inner(area);
-    f.render_widget(outer, area);
+    let Some(inner) = chrome::frame(f, area, outer) else {
+        return (Rect::default(), 0);
+    };
 
     let sections = Layout::default()
         .direction(Direction::Horizontal)

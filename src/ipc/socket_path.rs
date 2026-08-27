@@ -328,25 +328,9 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn with_xdg_runtime_dir<R>(value: Option<&Path>, f: impl FnOnce() -> R) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = env::var_os("XDG_RUNTIME_DIR");
-        if let Some(path) = value {
-            unsafe { env::set_var("XDG_RUNTIME_DIR", path) };
-        } else {
-            unsafe { env::remove_var("XDG_RUNTIME_DIR") };
-        }
-        let result = f();
-        match previous {
-            Some(prev) => unsafe { env::set_var("XDG_RUNTIME_DIR", prev) },
-            None => unsafe { env::remove_var("XDG_RUNTIME_DIR") },
-        }
-        result
+        with_xdg_runtime_dir_os(value.map(|path| path.as_os_str().to_os_string()), f)
     }
 
-    #[cfg(unix)]
     fn with_xdg_runtime_dir_os<R>(value: Option<std::ffi::OsString>, f: impl FnOnce() -> R) -> R {
         let _lock = crate::support::validation::test_env_lock()
             .lock()

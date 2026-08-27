@@ -95,55 +95,7 @@ pub async fn connect(
 mod tests {
     use super::*;
     use crate::support::validation::MAX_PASSWORD_LENGTH;
-
-    fn with_env_var<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = std::env::var_os(name);
-        if let Some(value) = value {
-            unsafe { std::env::set_var(name, value) };
-        } else {
-            unsafe { std::env::remove_var(name) };
-        }
-
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var(name, previous) },
-            None => unsafe { std::env::remove_var(name) },
-        }
-
-        result
-    }
-
-    #[cfg(unix)]
-    fn with_env_var_os<R>(
-        name: &str,
-        value: Option<std::ffi::OsString>,
-        f: impl FnOnce() -> R,
-    ) -> R {
-        let _lock = crate::support::validation::test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let previous = std::env::var_os(name);
-        if let Some(value) = value {
-            unsafe { std::env::set_var(name, value) };
-        } else {
-            unsafe { std::env::remove_var(name) };
-        }
-
-        let result = f();
-
-        match previous {
-            Some(previous) => unsafe { std::env::set_var(name, previous) },
-            None => unsafe { std::env::remove_var(name) },
-        }
-
-        result
-    }
+    use crate::support::validation::test_env::{with_env_var, with_env_var_os};
 
     #[test]
     fn obs_connection_params_debug_redacts_password() {

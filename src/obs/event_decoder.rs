@@ -183,10 +183,12 @@ pub(crate) fn translate_event(payload: EventPayload) -> Option<ObsEvent> {
             scene_collection_name: payload.required_str("sceneCollectionName")?,
         },
         "SceneCollectionListChanged" => ObsEvent::SceneCollectionListChanged,
-        _ => ObsEvent::Other {
-            event_type: payload.event_type.clone(),
-            data: payload.data.clone(),
-        },
+        _ => {
+            // Every unrecognized OBS event lands here, so move the owned
+            // payload into the event instead of cloning it.
+            let EventPayload { event_type, data } = payload;
+            ObsEvent::Other { event_type, data }
+        }
     };
     Some(event)
 }

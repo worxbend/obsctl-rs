@@ -44,7 +44,6 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use rust_i18n::t;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     obs::state::AudioState,
@@ -285,7 +284,7 @@ fn render_strip(
     // Ratatui clips an over-long title from the left, which would leave a
     // name reading as "…r Capture"; trim it to what the border can hold
     // (two corners and a space either side) before handing it over.
-    let name = truncate_to_cells(&input.name, usize::from(rect.width).saturating_sub(4));
+    let name = chrome::truncate_to_cells(&input.name, usize::from(rect.width).saturating_sub(4));
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -328,14 +327,14 @@ fn strip_lines(
         // strips beside it keep their meters at the same height.
         let tag = strip_tag(input).unwrap_or_default();
         lines.push(Line::from(Span::styled(
-            pad_center(&tag, width),
+            chrome::pad_center(&tag, width),
             Style::default().fg(theme.muted),
         )));
     }
 
     if plan.gain {
         lines.push(Line::from(Span::styled(
-            pad_center(&gain_text(input), width),
+            chrome::pad_center(&gain_text(input), width),
             Style::default().fg(if muted { theme.muted } else { theme.info }),
         )));
     }
@@ -634,37 +633,6 @@ fn scale_labels(rows: usize) -> Vec<Option<String>> {
     labels
 }
 
-/// Longest prefix of `text` that fits in `cells` terminal cells.
-///
-/// Counting characters is not the same as counting cells: an emoji or a CJK
-/// ideograph occupies two. Truncating by character would let a name overflow
-/// its strip, and ratatui would then clip the row's last cell.
-fn truncate_to_cells(text: &str, cells: usize) -> String {
-    let mut used = 0;
-    let mut out = String::new();
-    for ch in text.chars() {
-        let width = ch.width().unwrap_or(0);
-        if used + width > cells {
-            break;
-        }
-        used += width;
-        out.push(ch);
-    }
-    out
-}
-
-/// Center `text` in exactly `width` cells, truncating when it does not fit.
-fn pad_center(text: &str, width: usize) -> String {
-    let trimmed = truncate_to_cells(text, width);
-    let len = trimmed.width();
-    let left = width.saturating_sub(len) / 2;
-    let right = width.saturating_sub(left + len);
-    let mut padded = " ".repeat(left);
-    padded.push_str(&trimmed);
-    padded.push_str(&" ".repeat(right));
-    padded
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,16 +773,6 @@ mod tests {
         assert_eq!(twelve[0].as_deref(), Some("0"));
 
         assert!(scale_labels(0).is_empty());
-    }
-
-    #[test]
-    fn pad_center_always_returns_exactly_the_requested_width() {
-        assert_eq!(pad_center("Mic", 9), "   Mic   ");
-        // An odd remainder favours the right, so the text never drifts left
-        // of centre as a strip widens.
-        assert_eq!(pad_center("Mic", 4), "Mic ");
-        assert_eq!(pad_center("Desktop Audio", 9).chars().count(), 9);
-        assert_eq!(pad_center("Mic", 0), "");
     }
 
     #[test]

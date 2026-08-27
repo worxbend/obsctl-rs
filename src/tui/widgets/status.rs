@@ -191,19 +191,12 @@ fn state_line(
 }
 
 fn detail_text(state: BroadcastState, model: &TuiModel) -> String {
-    match state {
-        BroadcastState::Idle => t!("tui.status.idle_hint").into_owned(),
-        BroadcastState::Live => chrome::format_duration(model.stream_duration_ms()),
-        BroadcastState::Rec => chrome::format_duration(model.record_duration_ms()),
-    }
+    chrome::broadcast_detail(state, model, t!("tui.status.idle_hint"))
 }
 
 /// Distinct hues per state, so LIVE and REC stay tellable apart at a glance
 /// even when both are showing.
 fn color(state: BroadcastState, theme: Theme, pulse: f32) -> Color {
-    match state {
-        BroadcastState::Idle => anim::blend(theme.muted, theme.info, pulse * 0.45),
-        BroadcastState::Live => anim::blend(theme.danger, theme.warning, pulse * 0.4),
-        BroadcastState::Rec => anim::blend(theme.warning, theme.danger, pulse * 0.4),
-    }
+    chrome::broadcast_pulse_color(state, theme, pulse, 0.4)
+        .unwrap_or_else(|| anim::blend(theme.muted, theme.info, pulse * 0.45))
 }

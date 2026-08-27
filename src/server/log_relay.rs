@@ -49,6 +49,22 @@ impl ServerLog {
         self.publish(LogLevel::Warn, message);
     }
 
+    /// Route a message by an already-known level: milestones through
+    /// [`Self::info`], everything else through [`Self::warn`]. For the callers
+    /// that carry a [`LogLevel`] value instead of choosing a method at the
+    /// call site.
+    pub fn log(&self, level: LogLevel, message: impl Into<String>) {
+        match level {
+            LogLevel::Info => self.info(message),
+            // The relay only speaks in milestones and warnings — see the two
+            // methods above — so a level below Info is voiced as a warning
+            // too, exactly as the call sites did before this method existed.
+            LogLevel::Trace | LogLevel::Debug | LogLevel::Warn | LogLevel::Error => {
+                self.warn(message)
+            }
+        }
+    }
+
     fn publish(&self, level: LogLevel, message: String) {
         self.hub
             .publish_log(LogEvent::new(level, message).with_target(self.target));

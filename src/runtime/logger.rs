@@ -20,31 +20,38 @@ pub fn init_server(level: &str, log_file: Option<PathBuf>) {
         .with_ansi(true)
         .with_target(false);
 
-    if let Some(path) = log_file {
-        match open_safe_log_file(&path) {
-            Ok(file) => {
-                let file_layer = fmt::layer()
-                    .with_writer(std::sync::Mutex::new(file))
-                    .with_ansi(false)
-                    .with_target(true);
-
-                let _ = tracing_subscriber::registry()
-                    .with(filter)
-                    .with(stderr_layer)
-                    .with(file_layer)
-                    .try_init();
-                return;
-            }
-            Err(error) => {
-                tracing::warn!("failed to initialize log file {path:?}: {error}");
-            }
+    // Open the log file first but hold any error until after `try_init`: a
+    // `warn!` emitted before a subscriber exists is silently dropped.
+    let mut open_error = None;
+    let file = log_file.and_then(|path| match open_safe_log_file(&path) {
+        Ok(file) => Some(file),
+        Err(error) => {
+            open_error = Some((path, error));
+            None
         }
+    });
+
+    if let Some(file) = file {
+        let file_layer = fmt::layer()
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .with_target(true);
+
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(stderr_layer)
+            .with(file_layer)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(stderr_layer)
+            .try_init();
     }
 
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(stderr_layer)
-        .try_init();
+    if let Some((path, error)) = open_error {
+        tracing::warn!("failed to initialize log file {path:?}: {error}");
+    }
 }
 
 /// Minimal tracing init for CLI/TUI mode (stderr only).

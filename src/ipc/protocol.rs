@@ -460,26 +460,25 @@ where
     Ok(normalized)
 }
 
+/// Shared shape of the request-id and command-name checks. The error strings
+/// cross the wire, so `what` must produce exactly the messages clients
+/// already see ("<what> must not be empty", "<what> is too long", ...).
+fn validate_bounded_token(value: &str, max_bytes: usize, what: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{what} must not be empty"));
+    }
+    if value.len() > max_bytes {
+        return Err(format!("{what} is too long"));
+    }
+    validate_no_control_or_whitespace(value).map_err(|error| format!("{what} {error}"))
+}
+
 pub fn validate_ipc_request_id(id: &str) -> Result<(), String> {
-    if id.is_empty() {
-        return Err("request id must not be empty".to_string());
-    }
-    if id.len() > MAX_IPC_REQUEST_ID_BYTES {
-        return Err("request id is too long".to_string());
-    }
-    validate_no_control_or_whitespace(id).map_err(|error| format!("request id {error}"))?;
-    Ok(())
+    validate_bounded_token(id, MAX_IPC_REQUEST_ID_BYTES, "request id")
 }
 
 pub fn validate_command_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("command name must not be empty".to_string());
-    }
-    if name.len() > MAX_COMMAND_NAME_BYTES {
-        return Err("command name is too long".to_string());
-    }
-    validate_no_control_or_whitespace(name).map_err(|error| format!("command name {error}"))?;
-    Ok(())
+    validate_bounded_token(name, MAX_COMMAND_NAME_BYTES, "command name")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -753,7 +752,9 @@ impl PublicErrorCode {
     /// This is the boundary where internal variants are collapsed into stable
     /// wire-visible classes. Preserve existing strings unless a compatibility
     /// test documents an intentional public contract change.
-    pub fn from_obsctl_error(error: &ObsctlError) -> Self {
+    ///
+    /// Private on purpose: `public_error_code` is the single public entry.
+    fn from_obsctl_error(error: &ObsctlError) -> Self {
         match error {
             ObsctlError::ConfigNotFound(_) | ObsctlError::ConfigInvalid(_) => Self::ConfigInvalid,
             ObsctlError::ServerUnavailable { .. } | ObsctlError::IpcConnectionFailed(_) => {

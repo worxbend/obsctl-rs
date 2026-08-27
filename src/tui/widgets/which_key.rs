@@ -8,8 +8,20 @@ use ratatui::{
 
 use crate::tui::{keymap, model::TuiModel, widgets::chrome};
 
+/// Columns the key part of a cell takes: ` key ` with the key right-aligned
+/// in three columns.
+const KEY_COLS: u16 = 5;
+/// Columns the `→ ` arrow between key and label takes.
+const ARROW_COLS: u16 = 2;
+/// Columns a label is padded to; a group's `+` prefix counts as one of them.
+const LABEL_COLS: u16 = 16;
 /// Columns one `key → label` cell occupies, including its gutter.
+///
+/// Not derived from the parts on purpose: the difference is the gutter
+/// between neighbouring cells, and shrinking it would repack every row.
 const CELL_WIDTH: u16 = 26;
+// The parts must fit inside the cell, gutter included.
+const _: () = assert!(KEY_COLS + ARROW_COLS + LABEL_COLS <= CELL_WIDTH);
 /// Widest the popup grows, however much room the terminal has.
 const MAX_WIDTH: u16 = 78;
 
@@ -52,12 +64,12 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
                 // leading `+`; keep that vocabulary so muscle memory carries.
                 let (label, style) = if e.group {
                     (
-                        format!("+{:<width$}", e.label, width = 15),
+                        format!("+{:<width$}", e.label, width = LABEL_COLS as usize - 1),
                         Style::default().fg(theme.accent_alt),
                     )
                 } else {
                     (
-                        format!("{:<width$}", e.label, width = 16),
+                        format!("{:<width$}", e.label, width = LABEL_COLS as usize),
                         Style::default().fg(theme.fg),
                     )
                 };

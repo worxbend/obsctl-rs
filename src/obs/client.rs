@@ -245,7 +245,7 @@ fn decode_frame(msg: Message) -> Option<Result<ObsMessage>> {
         Message::Binary(bin) => serde_json::from_slice::<ObsMessage>(&bin),
         Message::Close(_) => {
             return Some(Err(ObsctlError::ConnectionFailed(
-                "WebSocket closed during handshake".to_string(),
+                "WebSocket closed by peer".to_string(),
             )));
         }
         Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => return None,
@@ -393,11 +393,6 @@ async fn dispatch_event(data: Value, event_tx: &mpsc::Sender<ObsEvent>) {
     let _ = event_tx.send(event).await;
 }
 
-/// Probe a WebSocket message without error – used in fake server tests.
-pub fn parse_ws_message(text: &str) -> Option<ObsMessage> {
-    serde_json::from_str(text).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,24 +440,34 @@ mod tests {
         ));
     }
 
+    /// Run `dispatch_event` on `data` and return the event it forwarded, or
+    /// `None` when the payload was dropped. Each of the tests below used to
+    /// hand-roll a Tokio runtime, a channel, and a receive timeout to observe
+    /// this one function; the plumbing lives here instead.
+    fn dispatched(data: Value) -> Option<ObsEvent> {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            dispatch_event(data, &tx).await;
+            timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .ok()
+                .flatten()
+        })
+    }
+
     #[test]
     fn obs_event_dispatches_scene_change() {
         let data = serde_json::json!({
             "eventType": "CurrentProgramSceneChanged",
             "eventData": { "sceneName": "Main" }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            let event = rx.recv().await.unwrap();
-            match event {
-                ObsEvent::CurrentProgramSceneChanged { scene_name } => {
-                    assert_eq!(scene_name, "Main");
-                }
-                _ => panic!("wrong event type"),
-            }
-        });
+        assert_eq!(
+            dispatched(data),
+            Some(ObsEvent::CurrentProgramSceneChanged {
+                scene_name: "Main".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -471,18 +476,12 @@ mod tests {
             "eventType": "CurrentProfileChanged",
             "eventData": { "profileName": "Streaming" }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            let event = rx.recv().await.unwrap();
-            match event {
-                ObsEvent::CurrentProfileChanged { profile_name } => {
-                    assert_eq!(profile_name, "Streaming");
-                }
-                _ => panic!("wrong event type"),
-            }
-        });
+        assert_eq!(
+            dispatched(data),
+            Some(ObsEvent::CurrentProfileChanged {
+                profile_name: "Streaming".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -491,13 +490,7 @@ mod tests {
             "eventType": "ProfileListChanged",
             "eventData": {}
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            let event = rx.recv().await.unwrap();
-            assert!(matches!(event, ObsEvent::ProfileListChanged));
-        });
+        assert_eq!(dispatched(data), Some(ObsEvent::ProfileListChanged));
     }
 
     #[test]
@@ -506,20 +499,12 @@ mod tests {
             "eventType": "CurrentSceneCollectionChanged",
             "eventData": { "sceneCollectionName": "Podcast" }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            let event = rx.recv().await.unwrap();
-            match event {
-                ObsEvent::CurrentSceneCollectionChanged {
-                    scene_collection_name,
-                } => {
-                    assert_eq!(scene_collection_name, "Podcast");
-                }
-                _ => panic!("wrong event type"),
-            }
-        });
+        assert_eq!(
+            dispatched(data),
+            Some(ObsEvent::CurrentSceneCollectionChanged {
+                scene_collection_name: "Podcast".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -528,13 +513,7 @@ mod tests {
             "eventType": "SceneCollectionListChanged",
             "eventData": {}
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            let event = rx.recv().await.unwrap();
-            assert!(matches!(event, ObsEvent::SceneCollectionListChanged));
-        });
+        assert_eq!(dispatched(data), Some(ObsEvent::SceneCollectionListChanged));
     }
 
     #[test]
@@ -543,19 +522,13 @@ mod tests {
             "eventType": "InputMuteStateChanged",
             "eventData": { "inputName": "Mic", "inputMuted": true }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            let event = rx.recv().await.unwrap();
-            match event {
-                ObsEvent::InputMuteStateChanged { input_name, muted } => {
-                    assert_eq!(input_name, "Mic");
-                    assert!(muted);
-                }
-                _ => panic!("wrong event type"),
-            }
-        });
+        assert_eq!(
+            dispatched(data),
+            Some(ObsEvent::InputMuteStateChanged {
+                input_name: "Mic".to_string(),
+                muted: true,
+            })
+        );
     }
 
     #[test]
@@ -564,12 +537,7 @@ mod tests {
             "eventType": "CurrentProgramSceneChanged",
             "eventData": {}
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 
     #[test]
@@ -578,12 +546,7 @@ mod tests {
             "eventType": "StreamStateChanged",
             "eventData": {}
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 
     #[test]
@@ -594,12 +557,7 @@ mod tests {
                 "inputs": [ { "inputName": "Mic" } ]
             }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 
     #[test]
@@ -619,12 +577,7 @@ mod tests {
                 ]
             }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 
     #[test]
@@ -633,12 +586,7 @@ mod tests {
             "eventType": "CurrentProgramSceneChanged",
             "eventData": { "sceneName": "Main\nScene" }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 
     #[test]
@@ -654,12 +602,7 @@ mod tests {
                 ]
             }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 
     #[test]
@@ -674,23 +617,14 @@ mod tests {
                 "inputVolumeDb": -12.3
             }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            let event = timeout(Duration::from_millis(50), rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                event,
-                ObsEvent::InputVolumeChanged {
-                    input_name: "Mic".to_string(),
-                    volume_mul: 0.25,
-                    volume_db: -12.3,
-                }
-            );
-        });
+        assert_eq!(
+            dispatched(data),
+            Some(ObsEvent::InputVolumeChanged {
+                input_name: "Mic".to_string(),
+                volume_mul: 0.25,
+                volume_db: -12.3,
+            })
+        );
     }
 
     #[test]
@@ -703,12 +637,7 @@ mod tests {
                 "inputVolumeDb": -12.3
             }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 
     #[test]
@@ -721,20 +650,14 @@ mod tests {
                 ]
             }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            let event = rx.recv().await.expect("event should not be dropped");
-            match event {
-                ObsEvent::InputVolumeMeters { inputs } => {
-                    assert_eq!(inputs.len(), 1);
-                    assert_eq!(inputs[0].0, "Mic");
-                    assert!((inputs[0].1 - 0.1).abs() < 1e-4, "got {}", inputs[0].1);
-                }
-                _ => panic!("wrong event type"),
+        match dispatched(data).expect("event should not be dropped") {
+            ObsEvent::InputVolumeMeters { inputs } => {
+                assert_eq!(inputs.len(), 1);
+                assert_eq!(inputs[0].0, "Mic");
+                assert!((inputs[0].1 - 0.1).abs() < 1e-4, "got {}", inputs[0].1);
             }
-        });
+            _ => panic!("wrong event type"),
+        }
     }
 
     #[test]
@@ -747,18 +670,12 @@ mod tests {
                 ]
             }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            let event = rx.recv().await.expect("event should not be dropped");
-            match event {
-                ObsEvent::InputVolumeMeters { inputs } => {
-                    assert_eq!(inputs, vec![("Mic".to_string(), 0.0)]);
-                }
-                _ => panic!("wrong event type"),
-            }
-        });
+        assert_eq!(
+            dispatched(data),
+            Some(ObsEvent::InputVolumeMeters {
+                inputs: vec![("Mic".to_string(), 0.0)],
+            })
+        );
     }
 
     #[test]
@@ -778,12 +695,7 @@ mod tests {
                 ]
             }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 
     #[test]
@@ -791,12 +703,7 @@ mod tests {
         let data = serde_json::json!({
             "eventType": "CurrentProgramSceneChanged\n"
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 
     #[test]
@@ -806,12 +713,7 @@ mod tests {
             "eventType": event_type,
             "eventData": { "sceneName": "Main" }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 
     #[test]
@@ -820,11 +722,6 @@ mod tests {
             "eventType": "CurrentProgramSceneChanged",
             "eventData": { "sceneName": "a".repeat(300) }
         });
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let (tx, mut rx) = mpsc::channel(8);
-            dispatch_event(data, &tx).await;
-            assert!(timeout(Duration::from_millis(50), rx.recv()).await.is_err());
-        });
+        assert_eq!(dispatched(data), None);
     }
 }

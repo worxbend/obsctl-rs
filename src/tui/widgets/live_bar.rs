@@ -95,23 +95,16 @@ fn badges(model: &TuiModel, pulse: f32) -> Vec<Span<'static>> {
             spans.push(Span::raw(" "));
         }
         let frame = spinner::frame(*state, model.rich_ui(), model.anim.frame);
-        let detail = match state {
-            spinner::BroadcastState::Idle => String::new(),
-            spinner::BroadcastState::Live => chrome::format_duration(model.stream_duration_ms()),
-            spinner::BroadcastState::Rec => chrome::format_duration(model.record_duration_ms()),
-        };
+        let detail = chrome::broadcast_detail(*state, model, "");
         let text = if detail.is_empty() {
             format!(" {frame} {} ", state.label())
         } else {
             format!(" {frame} {} {detail} ", state.label())
         };
-        let style = match state {
-            spinner::BroadcastState::Idle => Style::default().fg(theme.muted),
-            spinner::BroadcastState::Live => Style::default()
-                .fg(anim::blend(theme.danger, theme.warning, pulse * 0.45))
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-            spinner::BroadcastState::Rec => Style::default()
-                .fg(anim::blend(theme.warning, theme.danger, pulse * 0.45))
+        let style = match chrome::broadcast_pulse_color(*state, theme, pulse, 0.45) {
+            None => Style::default().fg(theme.muted),
+            Some(color) => Style::default()
+                .fg(color)
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED),
         };
         spans.push(Span::styled(text, style));

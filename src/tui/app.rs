@@ -16,6 +16,7 @@ use crossterm::{
 };
 use futures_util::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
+use rust_i18n::t;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -239,7 +240,7 @@ async fn start_session(options: &TuiOptions, socket_path: &Path) -> (TuiModel, L
 /// user looks (the status line and the log pane) rather than aborting startup.
 fn report_connect_failure(model: &mut TuiModel, error: impl std::fmt::Display) {
     model.connected_to_daemon = false;
-    let msg = format!("Cannot connect to daemon: {error}");
+    let msg = t!("tui.session.cannot_connect", error = error.to_string()).into_owned();
     model.set_last_result(msg.clone());
     model.push_log(TuiLogEntry {
         level: LogLevel::Error,
@@ -304,7 +305,9 @@ async fn run_loop(
                     Some(Ok(msg)) => Flow::redraw_if(apply_server_message(&mut model, msg)),
                     Some(Err(e)) => {
                         model.connected_to_daemon = false;
-                        model.set_last_result(format!("Daemon disconnected: {e}"));
+                        model.set_last_result(
+                            t!("tui.session.daemon_disconnected", error = e).into_owned(),
+                        );
                         Flow::redraw()
                     }
                     None => {

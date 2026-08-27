@@ -4,6 +4,7 @@ use super::errors::ObsctlError;
 use super::names::{ResourceKind, normalized_name};
 use super::result::Result;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AliasEntry {
     pub name: String,
     pub alias: Option<String>,
@@ -188,31 +189,31 @@ mod tests {
     #[test]
     fn exact_shortcut_wins() {
         let entries = vec![entry("Main Scene", Some("main"), Some("m"))];
-        assert_eq!(resolve("m", &entries).unwrap().name, "Main Scene");
+        assert_eq!(resolve("m", &entries).unwrap(), &entries[0]);
     }
 
     #[test]
     fn exact_alias_wins() {
         let entries = vec![entry("Main Scene", Some("main"), None)];
-        assert_eq!(resolve("main", &entries).unwrap().name, "Main Scene");
+        assert_eq!(resolve("main", &entries).unwrap(), &entries[0]);
     }
 
     #[test]
     fn exact_obs_name() {
         let entries = vec![entry("Main Scene", None, None)];
-        assert_eq!(resolve("Main Scene", &entries).unwrap().name, "Main Scene");
+        assert_eq!(resolve("Main Scene", &entries).unwrap(), &entries[0]);
     }
 
     #[test]
     fn case_insensitive_alias_match() {
         let entries = vec![entry("Main Scene", Some("MainCam"), None)];
-        assert_eq!(resolve("maincam", &entries).unwrap().name, "Main Scene");
+        assert_eq!(resolve("maincam", &entries).unwrap(), &entries[0]);
     }
 
     #[test]
     fn case_insensitive_obs_name_match() {
         let entries = vec![entry("Main Scene", None, None)];
-        assert_eq!(resolve("main scene", &entries).unwrap().name, "Main Scene");
+        assert_eq!(resolve("main scene", &entries).unwrap(), &entries[0]);
     }
 
     #[test]
@@ -240,13 +241,13 @@ mod tests {
     #[test]
     fn resolve_allows_target_whitespace_trimming_for_exact_match_fallback() {
         let entries = vec![entry("Main Scene", Some(" main "), None)];
-        assert_eq!(resolve("main", &entries).unwrap().name, "Main Scene");
+        assert_eq!(resolve("main", &entries).unwrap(), &entries[0]);
     }
 
     #[test]
     fn resolve_case_insensitive_match_uses_trimmed_alias() {
         let entries = vec![entry("Main Scene", Some("MainCam"), None)];
-        assert_eq!(resolve(" maincam ", &entries).unwrap().name, "Main Scene");
+        assert_eq!(resolve(" maincam ", &entries).unwrap(), &entries[0]);
     }
 
     #[test]
@@ -294,7 +295,7 @@ mod tests {
             resolve("M", &entries),
             Err(ObsctlError::SceneNotFound(_))
         ));
-        assert_eq!(resolve("m", &entries).unwrap().name, "Main Scene");
+        assert_eq!(resolve("m", &entries).unwrap(), &entries[0]);
     }
 
     /// Two entries differing only in case are a config mistake, and the error

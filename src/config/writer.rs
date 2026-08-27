@@ -7,11 +7,15 @@ use crate::support::fs;
 
 use super::model::Config;
 
+/// Stable name for writing a config file; delegates to [`write_atomic`].
 pub fn write(config: &Config, path: &Path) -> Result<()> {
     write_atomic(config, path)
 }
 
 pub fn write_atomic(config: &Config, path: &Path) -> Result<()> {
+    // `write_atomic_with_temp_file` re-checks the parent directory, but it
+    // reports failures as `Io` (exit code 1); checking here first keeps an
+    // unsafe config directory classified as `ConfigInvalid` (exit code 2).
     fs::ensure_private_parent(path).map_err(|e| ObsctlError::ConfigInvalid(e.to_string()))?;
 
     let content =
