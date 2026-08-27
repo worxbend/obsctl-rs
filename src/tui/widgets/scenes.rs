@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::ListItem,
+    widgets::{Block, ListItem, Padding, Wrap},
 };
 
 use rust_i18n::t;
@@ -78,16 +78,86 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
 
     let title = t!("tui.panels.scenes.title");
     let hint = t!(model.symbol("tui.panels.scenes.hint", "tui.panels.scenes.hint_ascii"));
-    let block = chrome::panel(
+    let badge = filter_badge(model);
+    let block = chrome::panel_badged(
         model.symbol("🎬", "S"),
         &title,
+        badge.as_deref(),
         &hint,
         model.scenes().len(),
         focused,
         model,
     );
 
+    if items.is_empty() && hidden_count(model) > 0 {
+        return render_everything_hidden(f, area, model, block);
+    }
     name_list::render_rows(f, area, model, FocusPanel::Scenes, block, items)
+}
+
+/// How many scenes the daemon knows about that this panel is not listing.
+fn hidden_count(model: &TuiModel) -> usize {
+    model
+        .all_scenes()
+        .len()
+        .saturating_sub(model.scenes().len())
+}
+
+/// The title badge naming what is being filtered out, or `None` when the user
+/// is looking at every scene there is.
+///
+/// Two things can shorten the list: the scene profile that is switched on, or
+/// a scene's own `hidden:` flag in the config. The first is worth naming — it
+/// is the one the user turned on and can turn off again — and the second at
+/// least gets a count, so a list that is missing rows never looks like a list
+/// that lost them.
+///
+/// An active profile is named whether or not it is hiding anything at the
+/// moment. This badge is the only thing on the dashboard that says a profile
+/// is in effect, and a profile hiding nothing — one whose entries all name
+/// scenes OBS has since renamed, say — is exactly the case a user needs told:
+/// without the badge it looks like no profile at all, and they go hunting for
+/// why the one they switched on is not working.
+fn filter_badge(model: &TuiModel) -> Option<String> {
+    let count = hidden_count(model);
+    let text = match (model.active_scene_profile(), count) {
+        (Some(name), 0) => t!("tui.panels.scenes.badge_profile_empty", name = name),
+        (Some(name), count) => t!(
+            "tui.panels.scenes.badge_profile",
+            name = name,
+            count = count
+        ),
+        (None, 0) => return None,
+        (None, count) => t!("tui.panels.scenes.badge_filtered", count = count),
+    };
+    Some(chrome::typographic(model, &text))
+}
+
+/// The body of a Scenes panel whose every scene is filtered out.
+///
+/// An empty list draws as blank space, which says nothing about why — and
+/// "why" is the whole question when a profile has just hidden the lot. This
+/// says which profile did it and which key undoes it. Returns a scroll offset
+/// of zero because there are no rows for a click to land on.
+fn render_everything_hidden(f: &mut Frame, area: Rect, model: &TuiModel, block: Block) -> usize {
+    let Some(inner) = chrome::frame(f, area, block) else {
+        return 0;
+    };
+    let text = match model.active_scene_profile() {
+        Some(name) => t!("tui.panels.scenes.all_hidden_by_profile", name = name),
+        None => t!("tui.panels.scenes.all_hidden"),
+    };
+    // Wrapped rather than clipped: this is the one place in the panel that has
+    // a sentence to deliver, and the Scenes pane is only half the dashboard
+    // wide. The padding is what keeps the second and third lines lined up
+    // under the first instead of running flush against the border.
+    f.render_widget(
+        chrome::placeholder(model, chrome::typographic(model, &text))
+            .wrap(Wrap { trim: false })
+            .block(Block::default().padding(Padding::horizontal(1))),
+        inner,
+    );
+    0
 }
 
 /// 1.0 right after `name` becomes active, decaying linearly to 0.0 over

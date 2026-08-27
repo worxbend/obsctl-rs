@@ -71,7 +71,7 @@ impl FocusPanel {
     /// Reading order of the 2x2 grid, used by Tab / Shift-Tab. Unlike the
     /// spatial moves above this one wraps, so repeated Tab visits every
     /// panel and comes back around.
-    pub const CYCLE: [Self; 4] = [Self::Scenes, Self::Audio, Self::Profiles, Self::Collections];
+    pub const CYCLE: [Self; 4] = Self::ALL;
 
     fn cycle_index(self) -> usize {
         Self::CYCLE.iter().position(|p| *p == self).unwrap_or(0)
@@ -257,6 +257,16 @@ pub struct SceneProfileEditor {
     /// A save whose `name` differs from this is a rename, which the dispatch
     /// carries out as a save followed by a delete of the old name.
     pub editing: Option<String>,
+    /// The profile `d` has asked to delete and is waiting for a `y` on, or
+    /// `None` when nothing is being confirmed.
+    ///
+    /// Deleting rewrites the config file and takes no backup, so there is
+    /// nothing to undo it with — and `d` sits next to `a`, which is the key a
+    /// user reaching for this modal presses most. One keystroke must not be
+    /// able to destroy a profile someone hand-built, so the keypress arms this
+    /// instead of sending anything, and the footer says whose life is on the
+    /// line until it is confirmed or cancelled.
+    pub pending_delete: Option<String>,
 }
 
 impl Default for SceneProfileEditor {
@@ -269,6 +279,7 @@ impl Default for SceneProfileEditor {
             name_before_edit: String::new(),
             hidden: BTreeSet::new(),
             editing: None,
+            pending_delete: None,
         }
     }
 }
@@ -309,7 +320,15 @@ pub enum SceneProfileRowKind {
     Profile {
         /// Whether this is the profile currently switched on.
         active: bool,
+        /// How many of the names this profile lists are scenes OBS actually
+        /// has — that is, how many rows the user will see disappear from the
+        /// dashboard when it is switched on.
         hidden_count: usize,
+        /// How many names the profile lists in total. Larger than
+        /// `hidden_count` when the config still names a scene OBS has since
+        /// renamed or deleted, so the row cannot promise to hide more than it
+        /// can.
+        listed_count: usize,
     },
     /// A scene on the toggle stage.
     Scene {
@@ -318,6 +337,30 @@ pub enum SceneProfileRowKind {
         /// Whether it is the scene OBS is showing right now.
         current: bool,
     },
+    /// A name the profile hides that no scene in the snapshot answers to,
+    /// listed after the real scenes on the toggle stage.
+    ///
+    /// Renaming a scene in OBS leaves the old spelling behind in the config
+    /// file, where it hides nothing. Such an entry has no scene to hang a
+    /// [`SceneProfileRowKind::Scene`] row off, so without a row of its own it
+    /// would be invisible in the editor and written straight back out by the
+    /// next save — permanent dead config only a hand edit could clear. `t` on
+    /// this row drops the entry.
+    MissingScene,
+}
+
+/// What the scene-profile cycle key does next, decided by
+/// [`TuiModel::next_scene_profile`] and carried out by the action layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceneProfileCycle {
+    /// The config defines no scene profiles, so there is nothing to cycle
+    /// through and the keypress has only an explanation to offer.
+    Undefined,
+    /// Switch this profile on.
+    Activate(String),
+    /// Switch scene-profile filtering off, leaving each scene's own `hidden:`
+    /// setting to decide again.
+    Baseline,
 }
 
 /// Whether two names mean the same scene profile. Differences of case or of
@@ -757,6 +800,12 @@ impl TuiModel {
         self.snapshot.as_ref()
     }
 
+    /// Read one field off the snapshot, or `default` while none has arrived —
+    /// the shape of every trivial accessor below.
+    fn snap<'a, T>(&'a self, f: impl FnOnce(&'a ObsSnapshot) -> T, default: T) -> T {
+        self.snapshot.as_ref().map(f).unwrap_or(default)
+    }
+
     /// Replace the snapshot and bring everything derived from it up to date.
     pub fn set_snapshot(&mut self, snapshot: ObsSnapshot) {
         self.snapshot = Some(snapshot);
@@ -785,48 +834,35 @@ impl TuiModel {
     }
 
     pub fn audio_inputs(&self) -> &[AudioState] {
-        self.snapshot
-            .as_ref()
-            .map(|s| s.audio_inputs.as_slice())
-            .unwrap_or(&[])
+        self.snap(|s| s.audio_inputs.as_slice(), &[])
     }
 
     pub fn profiles(&self) -> &[String] {
-        self.snapshot
-            .as_ref()
-            .map(|s| s.profiles.as_slice())
-            .unwrap_or(&[])
+        self.snap(|s| s.profiles.as_slice(), &[])
     }
 
     pub fn current_profile(&self) -> Option<&str> {
-        self.snapshot
-            .as_ref()
-            .and_then(|s| s.current_profile.as_deref())
+        self.snap(|s| s.current_profile.as_deref(), None)
     }
 
     pub fn scene_collections(&self) -> &[String] {
-        self.snapshot
-            .as_ref()
-            .map(|s| s.scene_collections.as_slice())
-            .unwrap_or(&[])
+        self.snap(|s| s.scene_collections.as_slice(), &[])
     }
 
     pub fn current_scene_collection(&self) -> Option<&str> {
-        self.snapshot
-            .as_ref()
-            .and_then(|s| s.current_scene_collection.as_deref())
+        self.snap(|s| s.current_scene_collection.as_deref(), None)
     }
 
     pub fn stats(&self) -> Option<&ObsStats> {
-        self.snapshot.as_ref().and_then(|s| s.stats.as_ref())
+        self.snap(|s| s.stats.as_ref(), None)
     }
 
     pub fn streaming(&self) -> bool {
-        self.snapshot.as_ref().is_some_and(|s| s.streaming)
+        self.snap(|s| s.streaming, false)
     }
 
     pub fn recording(&self) -> bool {
-        self.snapshot.as_ref().is_some_and(|s| s.recording)
+        self.snap(|s| s.recording, false)
     }
 
     /// Frames rendered and dropped since the current stream started.
@@ -844,25 +880,23 @@ impl TuiModel {
     }
 
     pub fn stream_bitrate_kbps(&self) -> Option<f64> {
-        self.snapshot.as_ref().and_then(|s| s.stream_bitrate_kbps)
+        self.snap(|s| s.stream_bitrate_kbps, None)
     }
 
     pub fn stream_duration_ms(&self) -> Option<u64> {
-        self.snapshot.as_ref().and_then(|s| s.stream_duration_ms)
+        self.snap(|s| s.stream_duration_ms, None)
     }
 
     pub fn record_duration_ms(&self) -> Option<u64> {
-        self.snapshot.as_ref().and_then(|s| s.record_duration_ms)
+        self.snap(|s| s.record_duration_ms, None)
     }
 
     pub fn current_scene(&self) -> Option<&str> {
-        self.snapshot
-            .as_ref()
-            .and_then(|s| s.current_scene.as_deref())
+        self.snap(|s| s.current_scene.as_deref(), None)
     }
 
     pub fn obs_connected(&self) -> bool {
-        self.snapshot.as_ref().map(|s| s.connected).unwrap_or(false)
+        self.snap(|s| s.connected, false)
     }
 
     /// Number of rows in `panel`'s list.
@@ -978,7 +1012,7 @@ impl TuiModel {
     /// theme so the caller can persist it to the config file — that write is
     /// the one part of this transition that is not model state.
     pub fn apply_theme_picker(&mut self) -> Theme {
-        let chosen = theme::ALL[self.settings_cursor.min(theme::ALL.len().saturating_sub(1))];
+        let chosen = theme::at(self.settings_cursor);
         self.theme = chosen;
         self.theme_preview_origin = None;
         self.view = View::Main;
@@ -991,9 +1025,8 @@ impl TuiModel {
     /// confirming puts the previous theme back — see
     /// [`cancel_theme_picker`](TuiModel::cancel_theme_picker).
     pub fn preview_theme(&mut self, index: usize) {
-        let max = theme::ALL.len().saturating_sub(1);
-        self.settings_cursor = index.min(max);
-        self.theme = theme::ALL[self.settings_cursor];
+        self.settings_cursor = index.min(theme::ALL.len().saturating_sub(1));
+        self.theme = theme::at(self.settings_cursor);
     }
 
     /// Keep cursors within valid list bounds; call after snapshot updates.
@@ -1100,25 +1133,52 @@ impl TuiModel {
     /// the editor has to show what it is choosing between, which is all of
     /// them.
     pub fn all_scenes(&self) -> &[SceneState] {
-        self.snapshot
-            .as_ref()
-            .map(|s| s.scenes.as_slice())
-            .unwrap_or(&[])
+        self.snap(|s| s.scenes.as_slice(), &[])
     }
 
     /// Every scene profile the daemon's config defines.
     pub fn scene_profiles(&self) -> &[SceneProfileState] {
-        self.snapshot
-            .as_ref()
-            .map(|s| s.scene_profiles.as_slice())
-            .unwrap_or(&[])
+        self.snap(|s| s.scene_profiles.as_slice(), &[])
     }
 
     /// The scene profile currently switched on, if any.
     pub fn active_scene_profile(&self) -> Option<&str> {
-        self.snapshot
-            .as_ref()
-            .and_then(|s| s.active_scene_profile.as_deref())
+        self.snap(|s| s.active_scene_profile.as_deref(), None)
+    }
+
+    /// Where the next press of the cycle key goes, given what is switched on
+    /// now. See [`TuiModel::next_scene_profile`].
+    ///
+    /// A three-state answer rather than an `Option<String>`, because "switch
+    /// scene-profile filtering off" and "there is nothing to switch to" are
+    /// different keypresses with different outcomes, and an empty name would
+    /// have had to stand in for one of them.
+    ///
+    /// The cycle runs through the profiles in the order the config file lists
+    /// them and then through the baseline — no profile at all — before coming
+    /// back to the first. The baseline is a stop rather than something to skip
+    /// past, since seeing the unfiltered list again is half of what a user
+    /// cycling profiles is checking.
+    pub fn next_scene_profile(&self) -> SceneProfileCycle {
+        let profiles = self.scene_profiles();
+        if profiles.is_empty() {
+            return SceneProfileCycle::Undefined;
+        }
+        let position = self.active_scene_profile().and_then(|active| {
+            profiles
+                .iter()
+                .position(|profile| same_scene_profile_name(&profile.name, active))
+        });
+        match position {
+            // Past the last profile is the baseline, not a wrap straight back
+            // to the first.
+            Some(index) if index + 1 >= profiles.len() => SceneProfileCycle::Baseline,
+            Some(index) => SceneProfileCycle::Activate(profiles[index + 1].name.clone()),
+            // Either nothing is switched on, or what is switched on names a
+            // profile the config no longer defines — a config edited out from
+            // under the daemon. Both start the cycle from the top.
+            None => SceneProfileCycle::Activate(profiles[0].name.clone()),
+        }
     }
 
     /// Names of the defined scene profiles, for the palette's completion pool.
@@ -1129,10 +1189,30 @@ impl TuiModel {
             .collect()
     }
 
-    /// Open the editor on its picker.
+    /// Open the editor on its picker, with the cursor on the profile the user
+    /// is most likely to be here about.
+    ///
+    /// Row 0 makes a *new* profile, so opening there left every key the footer
+    /// advertises — `a` activate, `d` delete, Enter edit — with no profile to
+    /// act on, and each of them did nothing at all. Starting on the switched-on
+    /// profile (or, when none is switched on, on the first one defined) means
+    /// the advertised keys work on the row the editor opens on; row 0 is one
+    /// `k` away.
     pub fn open_scene_profiles(&mut self) {
+        let active = self.active_scene_profile().and_then(|active| {
+            self.scene_profiles()
+                .iter()
+                .position(|profile| same_scene_profile_name(&profile.name, active))
+        });
+        // Row n of the profile list is picker row n + 1; row 0 is the only row
+        // left to open on when the config defines no profiles at all.
+        let row = match (active, self.scene_profiles().is_empty()) {
+            (Some(index), _) => index + 1,
+            (None, false) => 1,
+            (None, true) => 0,
+        };
         self.scene_profile = Some(SceneProfileEditor::default());
-        self.scene_profile_cursor_to(0);
+        self.scene_profile_cursor_to(row);
     }
 
     /// Close the editor, discarding whatever it was holding.
@@ -1166,7 +1246,8 @@ impl TuiModel {
                                 kind: SceneProfileRowKind::Profile {
                                     active: active
                                         .is_some_and(|a| same_scene_profile_name(a, &profile.name)),
-                                    hidden_count: profile.hidden.len(),
+                                    hidden_count: self.scenes_matching(&profile.hidden),
+                                    listed_count: profile.hidden.len(),
                                 },
                             }),
                     )
@@ -1176,18 +1257,31 @@ impl TuiModel {
             // instead of it, so it shows the same rows.
             SceneProfileStage::Scenes | SceneProfileStage::Naming => {
                 let current = self.current_scene();
-                self.all_scenes()
-                    .iter()
+                let scenes =
+                    self.all_scenes()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, scene)| SceneProfileRow {
+                            label: scene.name.clone(),
+                            selected: editor.scene_cursor == i,
+                            kind: SceneProfileRowKind::Scene {
+                                hidden: editor.hides(&scene.name),
+                                current: current.is_some_and(|c| c == scene.name),
+                            },
+                        });
+                // The entries naming nothing OBS has go last, so the rows a
+                // user actually chooses between keep the positions they had.
+                let offset = self.all_scenes().len();
+                let stale = self
+                    .scene_profile_stale_hidden()
+                    .into_iter()
                     .enumerate()
-                    .map(|(i, scene)| SceneProfileRow {
-                        label: scene.name.clone(),
-                        selected: editor.scene_cursor == i,
-                        kind: SceneProfileRowKind::Scene {
-                            hidden: editor.hides(&scene.name),
-                            current: current.is_some_and(|c| c == scene.name),
-                        },
-                    })
-                    .collect()
+                    .map(|(i, name)| SceneProfileRow {
+                        label: name.to_string(),
+                        selected: editor.scene_cursor == offset + i,
+                        kind: SceneProfileRowKind::MissingScene,
+                    });
+                scenes.chain(stale).collect()
             }
         }
     }
@@ -1200,12 +1294,128 @@ impl TuiModel {
         self.scene_profiles().get(index)
     }
 
+    /// The profile a delete is waiting to be confirmed for, or `None` when no
+    /// delete has been asked for. The widget reads this to draw the prompt and
+    /// the key handler reads it to know that the picker's keys mean something
+    /// else for one keystroke.
+    pub fn scene_profile_pending_delete(&self) -> Option<&str> {
+        self.scene_profile
+            .as_ref()
+            .and_then(|editor| editor.pending_delete.as_deref())
+    }
+
+    /// `d` on the picker: arm the delete for the profile under the cursor and
+    /// answer with its name, or `None` when the cursor is on the row that
+    /// names no profile.
+    ///
+    /// Nothing is sent here. The delete leaves the config file with one fewer
+    /// profile and no backup to restore it from, so it waits for a second,
+    /// deliberate keystroke.
+    pub fn scene_profile_request_delete(&mut self) -> Option<String> {
+        let name = self.selected_scene_profile().map(|p| p.name.clone())?;
+        let editor = self.scene_profile.as_mut()?;
+        editor.pending_delete = Some(name.clone());
+        Some(name)
+    }
+
+    /// `y` on the confirmation: hand the name back and disarm, so the caller
+    /// can send the delete.
+    ///
+    /// The name is the one that was armed rather than whatever the cursor is
+    /// on now. A snapshot landing between the `d` and the `y` can move the
+    /// rows, and the profile the user read in the prompt is the only one they
+    /// agreed to lose.
+    pub fn scene_profile_confirm_delete(&mut self) -> Option<String> {
+        self.scene_profile
+            .as_mut()
+            .and_then(|editor| editor.pending_delete.take())
+    }
+
+    /// Disarm a delete without sending it: `n`, `Esc`, or anything that moves
+    /// the cursor off the row the prompt named.
+    pub fn scene_profile_cancel_delete(&mut self) {
+        if let Some(editor) = self.scene_profile.as_mut() {
+            editor.pending_delete = None;
+        }
+    }
+
+    /// Whether there is a scene list to check a profile's entries against.
+    ///
+    /// Empty means the TUI has not been told what scenes exist — no snapshot
+    /// yet, or a daemon that has not finished talking to OBS. Nothing about a
+    /// profile's entries can be judged in that state: every one of them would
+    /// look like a name OBS does not have, which is a very different thing
+    /// from a name OBS genuinely lost.
+    fn scene_list_known(&self) -> bool {
+        !self.all_scenes().is_empty()
+    }
+
+    /// How many of `hidden` name a scene the snapshot actually has.
+    ///
+    /// A profile's `hidden` list is config, and config outlives the scenes it
+    /// names: a scene renamed in OBS leaves its old spelling behind, hiding
+    /// nothing. This is the count that matches what the user will see
+    /// disappear, which is the only number the picker may call "hidden".
+    ///
+    /// With no scene list to check against there is nothing to subtract, so
+    /// the entries are counted as they stand: a profile listing two scenes
+    /// reads "2 hidden" rather than "0 of 2 hidden", which would be the picker
+    /// telling the user their profile had gone stale because the daemon has
+    /// not finished connecting.
+    fn scenes_matching(&self, hidden: &[String]) -> usize {
+        if !self.scene_list_known() {
+            return hidden.len();
+        }
+        hidden
+            .iter()
+            .filter(|name| {
+                self.all_scenes()
+                    .iter()
+                    .any(|scene| same_scene_profile_name(&scene.name, name))
+            })
+            .count()
+    }
+
+    /// The names the editor is holding that no scene in the snapshot answers
+    /// to, in the order they get rows.
+    ///
+    /// `hidden` is a `BTreeSet`, so this is sorted and stays sorted from one
+    /// snapshot to the next — the cursor keeps pointing at the entry it was
+    /// on rather than sliding onto its neighbour.
+    ///
+    /// Empty while no scene list is known. Absence from a list that does not
+    /// exist is not evidence of anything, and these rows are an invitation to
+    /// press `t` and drop the entry — an invitation that, offered to a user
+    /// whose daemon is still connecting, would talk them into deleting a
+    /// perfectly good profile one entry at a time.
+    fn scene_profile_stale_hidden(&self) -> Vec<&str> {
+        let Some(editor) = self.scene_profile.as_ref() else {
+            return Vec::new();
+        };
+        if !self.scene_list_known() {
+            return Vec::new();
+        }
+        editor
+            .hidden
+            .iter()
+            .filter(|hidden| {
+                !self
+                    .all_scenes()
+                    .iter()
+                    .any(|scene| same_scene_profile_name(&scene.name, hidden))
+            })
+            .map(String::as_str)
+            .collect()
+    }
+
     /// How many rows the stage that is up has, which is what its cursor is
     /// clamped against.
     fn scene_profile_row_count(&self) -> usize {
         match self.scene_profile.as_ref().map(|editor| editor.stage) {
             Some(SceneProfileStage::Picker) => 1 + self.scene_profiles().len(),
-            Some(SceneProfileStage::Scenes | SceneProfileStage::Naming) => self.all_scenes().len(),
+            Some(SceneProfileStage::Scenes | SceneProfileStage::Naming) => {
+                self.all_scenes().len() + self.scene_profile_stale_hidden().len()
+            }
             None => 0,
         }
     }
@@ -1229,6 +1439,11 @@ impl TuiModel {
             return;
         };
         let clamped = index.min(rows.saturating_sub(1));
+        // Moving the cursor answers a pending delete with "no". The prompt
+        // names one profile, and once the cursor has left its row the prompt
+        // would be asking about a profile that is no longer the one the user
+        // is looking at.
+        editor.pending_delete = None;
         match editor.stage {
             SceneProfileStage::Picker => editor.picker_cursor = clamped,
             SceneProfileStage::Scenes | SceneProfileStage::Naming => editor.scene_cursor = clamped,
@@ -1393,12 +1608,21 @@ impl TuiModel {
         if !on_scenes {
             return;
         }
-        let cursor = self.scene_profile.as_ref().map(|e| e.scene_cursor);
-        let Some(name) = cursor
-            .and_then(|cursor| self.all_scenes().get(cursor))
-            .map(|scene| scene.name.clone())
-        else {
+        let Some(cursor) = self.scene_profile.as_ref().map(|e| e.scene_cursor) else {
             return;
+        };
+        // Past the last scene are the rows for names the profile hides that
+        // OBS has nothing to match — toggling one of those is the only way to
+        // get the entry out of the config file.
+        let name = match self.all_scenes().get(cursor) {
+            Some(scene) => scene.name.clone(),
+            None => match cursor
+                .checked_sub(self.all_scenes().len())
+                .and_then(|stale| self.scene_profile_stale_hidden().get(stale).copied())
+            {
+                Some(name) => name.to_string(),
+                None => return,
+            },
         };
 
         if let Some(editor) = self.scene_profile.as_mut() {
@@ -1419,6 +1643,9 @@ impl TuiModel {
                 }
             }
         }
+        // Dropping the last entry that named a scene OBS no longer has takes
+        // its row with it, and the cursor may have been the row that went.
+        self.scene_profile_cursor_to(self.scene_profile_cursor());
     }
 
     /// Esc on the scene stage: back to the picker, keeping the editor open.
@@ -2148,6 +2375,8 @@ mod tests {
     fn a_new_scene_profile_starts_from_the_scenes_already_hidden() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
+        // The picker opens on the active profile, so row 0 is one `k` up.
+        model.scene_profile_nav(-1, 1);
         model.scene_profile_confirm_picker();
 
         let editor = model.scene_profile.as_ref().unwrap();
@@ -2180,14 +2409,258 @@ mod tests {
         let rows = model.scene_profile_rows();
         assert_eq!(rows.len(), 2, "the new-profile row plus the one defined");
         assert_eq!(rows[0].kind, SceneProfileRowKind::NewProfile);
-        assert!(rows[0].selected, "the cursor starts on the new-profile row");
         assert_eq!(rows[1].label, "streaming");
         assert_eq!(
             rows[1].kind,
             SceneProfileRowKind::Profile {
                 active: true,
-                hidden_count: 1
+                hidden_count: 1,
+                listed_count: 1
             }
+        );
+    }
+
+    /// The keys the picker's footer advertises — `a`, `d`, Enter — all act on
+    /// the profile under the cursor, so opening on the row that names no
+    /// profile left every one of them inert. The editor opens on the profile
+    /// that is switched on instead.
+    #[test]
+    fn the_picker_opens_on_the_active_scene_profile() {
+        let mut model = scene_profile_model();
+        model.open_scene_profiles();
+
+        assert_eq!(model.scene_profile.as_ref().unwrap().picker_cursor, 1);
+        assert_eq!(
+            model.selected_scene_profile().map(|p| p.name.as_str()),
+            Some("streaming"),
+            "so the very next `a` has a profile to activate"
+        );
+        let rows = model.scene_profile_rows();
+        assert!(rows[1].selected);
+        assert!(!rows[0].selected, "and the new-profile row is not the one");
+
+        // Row 0 is still one `k` away.
+        model.scene_profile_nav(-1, 1);
+        assert_eq!(model.scene_profile.as_ref().unwrap().picker_cursor, 0);
+        assert_eq!(model.selected_scene_profile(), None);
+    }
+
+    /// With nothing switched on there is still a profile the user came here
+    /// for; with no profiles at all the only row there is is the one that
+    /// makes one.
+    #[test]
+    fn the_picker_opens_on_the_first_profile_when_none_is_active() {
+        let mut model = scene_profile_model();
+        model.update_snapshot(|snapshot| snapshot.active_scene_profile = None);
+        model.open_scene_profiles();
+        assert_eq!(model.scene_profile.as_ref().unwrap().picker_cursor, 1);
+
+        let mut empty = scene_profile_model();
+        empty.update_snapshot(|snapshot| {
+            snapshot.scene_profiles.clear();
+            snapshot.active_scene_profile = None;
+        });
+        empty.open_scene_profiles();
+        assert_eq!(empty.scene_profile.as_ref().unwrap().picker_cursor, 0);
+        assert_eq!(
+            empty.scene_profile_rows()[0].kind,
+            SceneProfileRowKind::NewProfile
+        );
+    }
+
+    /// An `active_scene_profile` naming a profile the config no longer defines
+    /// is stale state the daemon can hand over; the picker must not open on a
+    /// row that does not exist.
+    #[test]
+    fn an_active_profile_that_is_not_defined_does_not_move_the_cursor_past_the_rows() {
+        let mut model = scene_profile_model();
+        model.update_snapshot(|snapshot| {
+            snapshot.active_scene_profile = Some("gone".to_string());
+        });
+        model.open_scene_profiles();
+
+        assert_eq!(
+            model.scene_profile.as_ref().unwrap().picker_cursor,
+            1,
+            "the first profile defined, not a row off the end"
+        );
+    }
+
+    /// A profile that still names a scene OBS has renamed away hides fewer
+    /// scenes than it lists, and the picker has to say the number the user can
+    /// check against the dashboard.
+    #[test]
+    fn the_picker_counts_only_the_hidden_names_obs_still_has_a_scene_for() {
+        let mut model = scene_profile_model();
+        model.update_snapshot(|snapshot| {
+            snapshot.scene_profiles[0]
+                .hidden
+                .push("Renamed Away".to_string());
+        });
+        model.open_scene_profiles();
+
+        assert_eq!(
+            model.scene_profile_rows()[1].kind,
+            SceneProfileRowKind::Profile {
+                active: true,
+                hidden_count: 1,
+                listed_count: 2
+            }
+        );
+    }
+
+    /// A `hidden:` entry naming no scene OBS has gets a row of its own. Without
+    /// one it could not be seen or toggled, and the next save wrote it straight
+    /// back out — config that hides nothing and that only a hand edit cleared.
+    #[test]
+    fn a_hidden_entry_obs_has_no_scene_for_is_listed_and_can_be_dropped() {
+        let mut model = scene_profile_model();
+        model.update_snapshot(|snapshot| {
+            snapshot.scene_profiles[0]
+                .hidden
+                .push("Renamed Away".to_string());
+        });
+        model.open_scene_profiles();
+        model.scene_profile_confirm_picker();
+
+        let rows = model.scene_profile_rows();
+        assert_eq!(
+            labels(&rows),
+            vec!["Main", "Utility BG", "Renamed Away"],
+            "the stale entry goes after the scenes that do exist"
+        );
+        assert_eq!(rows[2].kind, SceneProfileRowKind::MissingScene);
+
+        // `t` on that row drops it, which is what takes it out of the payload
+        // the next save sends.
+        model.scene_profile_set_cursor(2);
+        model.scene_profile_toggle_hidden();
+        assert!(!model.scene_profile.as_ref().unwrap().hides("Renamed Away"));
+        assert_eq!(
+            labels(&model.scene_profile_rows()),
+            vec!["Main", "Utility BG"],
+            "and the row goes with it"
+        );
+        assert_eq!(
+            model.scene_profile.as_ref().unwrap().scene_cursor,
+            1,
+            "the cursor lands on the last row that is left, not past the end"
+        );
+    }
+
+    /// With no scene list to compare against, nothing about a profile's
+    /// entries is knowable — and the editor must not pretend otherwise.
+    ///
+    /// A TUI whose daemon has not finished talking to OBS holds a snapshot
+    /// with no scenes in it. Judging the entries by absence from that list
+    /// marked every one of them "not a scene OBS has — press t to drop it",
+    /// which is an invitation to dismantle a perfectly good profile while OBS
+    /// is merely disconnected.
+    #[test]
+    fn nothing_is_stale_while_the_scene_list_is_unknown() {
+        let mut model = scene_profile_model();
+        model.update_snapshot(|snapshot| {
+            snapshot.connected = false;
+            snapshot.scenes.clear();
+        });
+        model.open_scene_profiles();
+
+        // The picker counts the entries as the file lists them rather than
+        // reporting "0 of 1 hidden", which would read as a broken profile.
+        assert_eq!(
+            model.scene_profile_rows()[1].kind,
+            SceneProfileRowKind::Profile {
+                active: true,
+                hidden_count: 1,
+                listed_count: 1
+            }
+        );
+
+        // And the toggle stage offers no rows at all rather than one "drop
+        // this entry" row per name the profile holds.
+        model.scene_profile_confirm_picker();
+        assert!(model.scene_profile.as_ref().unwrap().hides("Main"));
+        assert!(
+            model.scene_profile_rows().is_empty(),
+            "no scenes are known, so there is nothing to list — least of all a
+             row inviting the user to delete an entry"
+        );
+
+        // `t` with the cursor nowhere in particular cannot drop the entry the
+        // profile is holding either.
+        model.scene_profile_toggle_hidden();
+        assert!(
+            model.scene_profile.as_ref().unwrap().hides("Main"),
+            "the entry survives a keypress made against an unknown scene list"
+        );
+    }
+
+    /// The cycle key walks the profiles in the order the config lists them,
+    /// stops off at the unfiltered list, and only then comes back round. Two
+    /// profiles therefore take three presses to return to where they started.
+    #[test]
+    fn the_cycle_key_visits_every_profile_and_the_unfiltered_list() {
+        let mut model = scene_profile_model();
+        model.update_snapshot(|snapshot| {
+            snapshot.scene_profiles.push(SceneProfileState {
+                name: "recording".to_string(),
+                hidden: Vec::new(),
+            });
+        });
+
+        // "streaming" is switched on, so the next stop is the profile after it.
+        assert_eq!(
+            model.next_scene_profile(),
+            SceneProfileCycle::Activate("recording".to_string())
+        );
+
+        model.update_snapshot(|snapshot| {
+            snapshot.active_scene_profile = Some("recording".to_string());
+        });
+        assert_eq!(
+            model.next_scene_profile(),
+            SceneProfileCycle::Baseline,
+            "past the last profile is no profile at all, not a wrap"
+        );
+
+        model.update_snapshot(|snapshot| snapshot.active_scene_profile = None);
+        assert_eq!(
+            model.next_scene_profile(),
+            SceneProfileCycle::Activate("streaming".to_string()),
+            "and from there back to the first"
+        );
+    }
+
+    /// With nothing to cycle through, the keypress has to say so — a key that
+    /// silently does nothing is the defect this whole feature started with.
+    #[test]
+    fn the_cycle_key_has_nowhere_to_go_without_profiles() {
+        let mut model = scene_profile_model();
+        model.update_snapshot(|snapshot| {
+            snapshot.scene_profiles.clear();
+            snapshot.active_scene_profile = None;
+        });
+        assert_eq!(model.next_scene_profile(), SceneProfileCycle::Undefined);
+
+        // And with no snapshot at all — the TUI before the daemon answers.
+        assert_eq!(
+            TuiModel::default().next_scene_profile(),
+            SceneProfileCycle::Undefined
+        );
+    }
+
+    /// An `active_scene_profile` the config no longer defines leaves the cycle
+    /// with no position to advance from; starting over at the first profile is
+    /// the only step that reaches somewhere real.
+    #[test]
+    fn the_cycle_starts_over_when_the_active_profile_is_not_defined() {
+        let mut model = scene_profile_model();
+        model.update_snapshot(|snapshot| {
+            snapshot.active_scene_profile = Some("gone".to_string());
+        });
+        assert_eq!(
+            model.next_scene_profile(),
+            SceneProfileCycle::Activate("streaming".to_string())
         );
     }
 
@@ -2219,6 +2692,7 @@ mod tests {
     fn a_blank_name_is_refused_and_keeps_the_user_on_the_naming_stage() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
+        model.scene_profile_nav(-1, 1);
         model.scene_profile_confirm_picker();
 
         model.scene_profile_edit_name(|name| name.push(' '));
@@ -2247,6 +2721,7 @@ mod tests {
     fn a_name_another_scene_profile_already_uses_is_refused() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
+        model.scene_profile_nav(-1, 1);
         model.scene_profile_confirm_picker();
 
         for c in "STREAMING".chars() {

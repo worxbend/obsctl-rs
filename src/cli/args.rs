@@ -92,18 +92,41 @@ pub enum Commands {
         #[arg(value_parser = clap::value_parser!(u8).range(0..=100))]
         percent: u8,
     },
-    // Activate an obsctl scene profile — a named set of scene-visibility
-    // choices — or, with no name, go back to the per-scene `hidden` flags.
+    // Work with obsctl scene profiles — named sets of scene-visibility choices.
     //
-    // The name is optional rather than a reserved sentinel value ("none",
-    // "off", ...) because any sentinel could also be a real scene profile name;
-    // an absent argument cannot collide with anything. These are plain comments
-    // rather than doc comments because clap would turn a doc comment into help
-    // text, and help text is a user-facing string that cannot go through
-    // `rust_i18n::t!` from an attribute — no other subcommand carries one.
+    // Four forms, one for each thing a user can want:
+    //
+    //   obsctl scene-profile                 report which one is active
+    //   obsctl scene-profile streaming       activate "streaming"
+    //   obsctl scene-profile --off           stop filtering (alias: --clear)
+    //   obsctl scene-profile --delete night  remove "night" from the config
+    //
+    // The bare form used to be the "stop filtering" instruction. That made the
+    // most natural spelling of the question "which profile is on?" destroy the
+    // answer, so switching off now needs the explicit `--off`. Reporting state
+    // must never change it. This is a breaking change to the CLI contract.
+    //
+    // `--off` and `--delete` are flags rather than reserved positional values
+    // ("none", "off", ...) because any sentinel could also be a real scene
+    // profile name, and a user is entitled to create one.
+    //
+    // The three are mutually exclusive at the clap level (see
+    // `conflicts_with_all` below), so `--off --delete X` is refused before the
+    // router ever sees it and the router does not have to invent a precedence
+    // rule for a combination that has no sensible meaning.
+    //
+    // These are plain comments rather than doc comments because clap would turn
+    // a doc comment into help text, and help text is a user-facing string that
+    // cannot go through `rust_i18n::t!` from an attribute — the locale is not
+    // chosen until after the command line has been parsed. No other subcommand
+    // carries one.
     SceneProfile {
-        #[arg(value_parser = non_blank_trimmed)]
+        #[arg(value_parser = non_blank_trimmed, conflicts_with_all = ["off", "delete"])]
         target: Option<String>,
+        #[arg(long, visible_alias = "clear", conflicts_with = "delete")]
+        off: bool,
+        #[arg(long, value_name = "NAME", value_parser = non_blank_trimmed)]
+        delete: Option<String>,
     },
     // List the configured scene profiles and which one is active.
     SceneProfiles,
@@ -130,8 +153,7 @@ pub enum ServiceAction {
 }
 
 fn non_blank_trimmed(value: &str) -> Result<String, String> {
-    trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
-        .map_err(|error| format!("value {error}"))
+    crate::domain::names::checked_name(value).map_err(|error| format!("value {error}"))
 }
 
 pub(crate) fn parse_log_level(value: &str) -> Result<String, String> {

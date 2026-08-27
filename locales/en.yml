@@ -65,8 +65,23 @@ tui:
 
   splash:
     preparing: "Preparing..."
+    tagline: "Broadcast control, without breaking flow."
+    description: "Scenes, audio, profiles, recording, and live telemetry — one command center."
+    description_ascii: "Scenes, audio, profiles, recording, and live telemetry."
+    initializing_title: "INITIALIZING BROADCAST CONTROL"
+    startup_title_ascii: " OBSCTL STARTUP "
+    studio_link_title: " STUDIO LINK // SECURE SESSION "
+    initializing_studio_link: "%{tick} initializing studio link"
+    boot_loading: "loading control surfaces"
+    boot_warming: "warming animation engine"
+    boot_syncing: "syncing OBS telemetry"
+    boot_painting: "painting command center"
+    boot_ready: "ready"
 
   header:
+    title: " ◈ OBSCTL // BROADCAST COMMAND CENTER "
+    title_ascii: " OBSCTL // BROADCAST COMMAND CENTER "
+    subtitle: "  studio automation console"
     daemon_connected: "daemon: connected"
     daemon_disconnected: "daemon: disconnected"
     obs_connected: "OBS: connected (v%{version})"
@@ -134,8 +149,13 @@ tui:
   panels:
     scenes:
       title: "Scenes"
-      hint: "[s]  ↵ switch"
-      hint_ascii: "[s]  Enter switch"
+      hint: "[s]  ↵ switch  ·  P profile"
+      hint_ascii: "[s]  Enter switch  |  P profile"
+      badge_profile: "%{name} — %{count} hidden"
+      badge_filtered: "%{count} hidden"
+      badge_profile_empty: "%{name} — nothing hidden"
+      all_hidden_by_profile: "scene profile %{name} hides every scene — press P for the next profile, or <space>P then c to switch it off"
+      all_hidden: "every scene is hidden by config — press P to try a scene profile"
 
     profiles:
       title: "Profiles"
@@ -189,14 +209,66 @@ tui:
       active_marker: "★ active"
       active_marker_ascii: "* active"
       hidden_count: "%{count} hidden"
+      hidden_count_partial: "%{count} of %{listed} hidden"
+      new_row_selected: "that row makes a new scene profile — press ↵ to start one"
+      new_row_selected_ascii: "that row makes a new scene profile - press Enter to start one"
       name_prompt: "name: "
       name_blank: "a scene profile needs a name"
       name_taken: "another scene profile is already called that"
       hint_picker: "↑↓ move · ↵ edit · a activate · c clear · d delete · esc close"
       hint_picker_ascii: "jk move | Enter edit | a activate | c clear | d delete | Esc close"
+      hint_confirm_delete: "delete “%{name}”? · y delete · n/esc keep"
+      hint_confirm_delete_ascii: "delete \"%{name}\"? | y delete | n/Esc keep"
+      delete_asked: "delete scene profile “%{name}”? press y to delete it, n to keep it"
+      delete_asked_ascii: "delete scene profile \"%{name}\"? press y to delete it, n to keep it"
+      delete_cancelled: "scene profile kept: %{name}"
       hint_scenes: "↑↓ move · t hide/show · n rename · ↵ save · esc back"
       hint_scenes_ascii: "jk move | t hide/show | n rename | Enter save | Esc back"
       hint_naming: "type a name · ↵ accept · esc cancel"
       hint_naming_ascii: "type a name | Enter accept | Esc cancel"
       state_hidden: "hidden"
       state_visible: "visible"
+      state_missing: "not a scene OBS has — press t to drop it"
+      state_missing_ascii: "not a scene OBS has - press t to drop it"
+      activated: "scene profile on: %{name} - hiding %{count} scenes"
+      saved: "scene profile saved: %{name} (hides %{count} scenes) - it is not the active one, so the scene list is unchanged"
+      saved_active: "scene profile saved: %{name} - it is the active one, so the scene list now hides %{count} scenes"
+      saved_and_activated: "scene profile created and switched on: %{name} - hiding %{count} scenes"
+      activation_failed: "scene profile saved: %{name}, but switching to it failed (%{error})"
+      cleared: "scene profile off - each scene's own hidden setting decides again"
+      warnings_suffix: "(%{count} config warnings - see the log panel)"
+      none_defined: "no scene profiles are defined - press <space>P to make one"
+
+  # Status-bar lines produced by the action dispatcher (`tui::actions`).
+  actions:
+    reconnected: "Reconnected to daemon."
+    retry_failed: "Retry failed: %{error}"
+    icons_on: "icons on"
+    icons_off: "icons off"
+    advanced_ui_on: "advanced UI on"
+    advanced_ui_off: "advanced UI off"
+    theme_set: "theme set: %{theme}"
+    theme_applied_no_config: "theme applied (no config file to persist to)"
+    theme_applied_read_failed: "theme applied, but reading config failed: %{error}"
+    theme_applied_save_failed: "theme applied, but saving config failed: %{error}"
+
+  # Event-loop reports about the IPC session itself (`tui::app`).
+  session:
+    cannot_connect: "Cannot connect to daemon: %{error}"
+    daemon_disconnected: "Daemon disconnected: %{error}"
+
+  # One-line renderings of daemon replies and of the checks that stop a
+  # payload before it reaches the wire (`tui::daemon`). The command palette
+  # colors a status line by its literal "error" prefix, so every failure
+  # line here has to keep that prefix.
+  daemon:
+    help_line: "Commands: %{commands}  —  <space> opens the which-key menu"
+    reply_error: "error: %{error}"
+    reply_error_bare: "error"
+    reply_error_with_code: "error [%{code}]: %{message}"
+    unexpected_response: "unexpected response"
+    volume_out_of_range: "volume percent must be 0-100"
+    invalid_target: "error: invalid target: %{error}"
+    invalid_scene_name: "error: invalid scene name: %{error}"
+    too_many_hidden_scenes: "error: a scene profile may hide at most %{max} scenes"
+    volume_set: "volume → %{percent}%"

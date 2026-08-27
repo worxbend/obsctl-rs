@@ -45,7 +45,7 @@ A single Rust binary: a daemon that owns the OBS connection, a live TUI, and a s
 
 A real-time, themeable command center with animated gradient chrome, rounded/heavy focus borders, Unicode symbols, and responsive layouts. The advanced interface is enabled by default; set `ui.advanced_ui: false` for a simplified ASCII-safe TTY mode, or `ui.show_icons: false` to hide icons while keeping the other advanced elements.
 
-- 🎬 **Scenes panel** (`s`) — navigate with `j`/`k` or arrows, `Enter` to switch; the newly active scene briefly flashes. Scenes marked hidden are left out of the list, and `<Space>P` opens the scene-profile editor: a modal that lists *every* scene (hidden ones dimmed), `t` hides or reveals the one under the cursor, `n` names the set, and `Enter` saves it to the config as a named **scene profile** you can switch between
+- 🎬 **Scenes panel** (`s`) — navigate with `j`/`k` or arrows, `Enter` to switch; the newly active scene briefly flashes. Scenes marked hidden are left out of the list, and `<Space>P` opens the scene-profile editor: a modal that lists *every* scene (hidden ones dimmed), `t` hides or reveals the one under the cursor, `n` names the set, and `Enter` saves it to the config as a named **scene profile** you can switch between — `P` cycles through them without opening anything, and the panel title names the one in effect
 - 🔊 **Audio matrix** (`a`) — OBS's Audio Mixer in the terminal: one bordered vertical channel strip per input, each with a fader, a green/yellow/red dB meter, and its own dB scale. `←`/`→` (or `h`/`l`) picks a strip, `↑`/`↓` (or `k`/`j`) nudges its volume ±5%, `m` mutes
 - 🗂️ **Profiles panel** (`p`) — `Enter` to switch OBS profiles
 - 📚 **Collections panel** (`c`) — `Enter` to switch OBS scene collections
@@ -233,8 +233,13 @@ produces no such warnings; run `dump-config` to fill the list in from OBS.
 Two caveats about writing this section by hand:
 
 - **Any command that writes the config rewrites it from the parsed model.** That includes `dump-config`
-  and every scene-profile command (`obsctl scene-profile`, and saving a profile from the TUI). Comments
-  and key ordering in a hand-written config do not survive such a write.
+  and every scene-profile command that changes something — `obsctl scene-profile <NAME>`,
+  `obsctl scene-profile --off`, `obsctl scene-profile --delete <NAME>`, and saving a profile from the
+  TUI. (`obsctl scene-profile` with no argument only reports, and writes nothing.) Comments and key
+  ordering in a hand-written config do not survive such a write. A scene-profile command that asks
+  for the state the file is already in — activating the profile that is already active, or `--off`
+  when nothing is active — succeeds without writing anything at all, so it leaves the file, its
+  comments and its modification time exactly as they were.
 - **A config containing `scene_profiles:` will not load on an obsctl older than this release.** Unknown
   top-level config keys are rejected outright, so an older binary reports a config error rather than
   ignoring the key.
@@ -347,12 +352,21 @@ Global options:
 | `obsctl toggle-mute <target>` | Toggle audio input mute |
 | `obsctl vol <target> <0-100>` | Set input volume by percent |
 | `obsctl volume <target> <0-100>` | Alias for `vol` |
-| `obsctl scene-profile [NAME]` | Activate the named scene profile; with no name, clear the active one |
+| `obsctl scene-profile` | Report which scene profile is active and list the configured ones (same output as `scene-profiles`) |
+| `obsctl scene-profile <NAME>` | Activate the named scene profile |
+| `obsctl scene-profile --off` (alias `--clear`) | Stop filtering; each scene's own `hidden` setting decides again |
+| `obsctl scene-profile --delete <NAME>` | Remove that scene profile from the config; deleting the active one also switches filtering off |
 | `obsctl scene-profiles` | List the configured scene profiles and which one is active |
 | `obsctl dump-config` | Fetch OBS state and merge into config |
 | `obsctl reload-config` | Reload config and rebroadcast state |
 | `obsctl reconnect` | Ask daemon to reconnect to OBS |
 | `obsctl shutdown-server` | Shut down daemon (requires `allow_remote_shutdown: true`) |
+
+> **Breaking change in this release.** `obsctl scene-profile` with no argument used to *clear* the
+> active scene profile. It now reports which one is active and writes nothing, because the bare verb
+> is what people type to ask a question and answering it by destroying state is a trap. Scripts that
+> relied on the old meaning must say `obsctl scene-profile --off` (or `--clear`, the same thing).
+> Passing a name still activates that profile, so nothing else about the command changed.
 
 ---
 
@@ -379,6 +393,7 @@ which-key popup lists what the next keystroke can be.
 | `Ctrl-h/j/k/l` or `Ctrl-←/→/↑/↓` | Move focus between panels spatially (2x2 grid) |
 | `Tab` / `Shift-Tab` | Cycle focus through the panels in reading order |
 | `s` / `a` / `p` / `c` | Focus the scenes / audio / profiles / collections panel |
+| `P` | Switch to the next scene profile — through each profile the config defines, then "no profile" (the `scenes[].hidden` baseline), then round again |
 | `m` | Mute/unmute the focused audio input |
 | `h` / `l` (or `←` / `→`) | In the audio matrix: move to the previous / next channel strip |
 | `k` / `j` (or `↑` / `↓`) | In the audio matrix: nudge the focused input's volume by ±5% — `3k` nudges +15% |
@@ -401,6 +416,7 @@ Press `<Space>` and the which-key popup lists the next key. Groups are marked `+
 |----------|--------|
 | `<Space>f` `s`/`p`/`c`/`a`/`P` | Open the palette pre-filled with `scene` / `profile` / `collection` / `toggle-mute` / `scene-profile` |
 | `<Space>P` | Open the scene-profile editor (note the capital: `<Space>p` is the panel group) |
+| `<Space>N` | Switch to the next scene profile — the same cycle as the bare `P` |
 | `<Space>p` `s`/`a`/`p`/`c` | Focus the scenes / audio / profiles / collections panel |
 | `<Space>s` `s`/`r` | Toggle streaming / recording |
 | `<Space>c` `r`/`d`/`v` | Reload / dump / validate config |
@@ -428,8 +444,13 @@ reverts to the previous theme.
 ### Scene-profile editor (`<Space>P`)
 
 A modal over the dashboard. While it is open it takes every keystroke, so leader sequences
-and panel motions are inert until it closes. It opens on a list of the scene profiles you
-have, plus a "new scene profile" row at the top.
+and panel motions are inert until it closes. It lists the scene profiles you have, with a
+"new scene profile" row above them.
+
+The cursor does **not** start on that "new" row. It starts on the profile that is currently
+active, or on the first profile in the config when none is, so that `a` (activate), `d`
+(delete) and `Enter` (edit) all act on a real profile the moment the modal opens. The "new"
+row is one `k` away. Only a config with no profiles at all opens on it.
 
 | Stage | Key | Action |
 |-------|-----|--------|
@@ -437,15 +458,37 @@ have, plus a "new scene profile" row at the top.
 | Picker | `Enter` | Edit the selected profile, or start a new one seeded from what is hidden right now |
 | Picker | `a` | Activate the selected profile and close |
 | Picker | `c` | Clear the active profile (back to the `scenes[].hidden` baseline) and close |
-| Picker | `d` | Delete the selected profile |
+| Picker | `d` | Ask whether to delete the selected profile — sends nothing on its own |
 | Picker | `Esc` or `q` | Close |
+| Delete confirmation | `y` or `Enter` | Delete the profile the footer names |
+| Delete confirmation | `n`, `Esc` or `q` | Keep it |
 | Scenes | `j`/`k` (or `↓`/`↑`) | Move between scenes — **all** of them, hidden ones dimmed |
-| Scenes | `t` | Hide/reveal the scene under the cursor in this profile |
+| Scenes | `t` | Hide/reveal the scene under the cursor in this profile, or drop a leftover entry |
 | Scenes | `n` | Name or rename the profile |
 | Scenes | `Enter` | Save the profile to the config (asks for a name first if it has none) |
 | Scenes | `Esc` | Back to the picker, discarding the edit |
 | Naming | any printable key, `Backspace`, `Ctrl-W`, `Ctrl-U` | Edit the name |
 | Naming | `Enter` / `Esc` | Accept the name / cancel and restore the previous one |
+
+`d` asks before it deletes. The daemon removes the profile from the config file and writes no
+backup, so there is nothing to undo the delete with, and `d` sits one key away from `a`. The
+first press replaces the footer with a question naming the profile; while that question is up
+every other key in the modal is off, so an `a` typed at it cannot activate anything, and a
+click anywhere answers "no". Only `y` (or `Enter`) sends the delete. The CLI's
+`obsctl scene-profile --delete <NAME>` is unchanged and does not ask — it is already an
+explicit, typed-out name.
+
+A profile's `hidden` list is config, and config outlives the scenes it names: rename a scene
+in OBS and the profile still lists the old spelling, which now hides nothing. Those leftover
+entries are listed after the real scenes, marked as scenes OBS does not have, and `t` deletes
+one instead of toggling it. The picker reads `1 of 2 hidden` for such a profile — the first
+number is what will actually disappear, the second is what the file says.
+
+None of that judging happens while obsctl has no scene list to judge against — a daemon that
+has not finished connecting to OBS. Absence from a list that does not exist is not evidence
+of anything, so the editor lists no leftover entries at all in that state and the picker
+counts a profile's entries as the file writes them, rather than marking every one of them
+stale and inviting you to press `t` on a profile that is perfectly good.
 
 `q` is deliberately unbound while toggling scenes, so the muscle-memory quit key cannot
 throw away unsaved toggles. Renaming a profile is a single save that moves the existing
@@ -454,6 +497,61 @@ active. A name another profile already uses is refused while you are still typin
 because saving under it would replace that other profile and there is no backup file to
 undo that with. Saving is performed by the daemon, which rewrites the config file — see
 [Hiding scenes and scene profiles](#hiding-scenes-and-scene-profiles).
+
+You do not have to open the modal to switch profiles: `P` on the dashboard (or `<Space>N`)
+steps to the next one and, after the last, to no profile at all. While a profile is active
+the Scenes panel title names it and says how many scenes it is holding back, so a short
+list is never mistaken for a scene list that lost rows — and a profile that hides *every*
+scene leaves that explanation in the empty panel rather than drawing blank.
+
+That badge is the only thing on the dashboard that says a profile is switched on, so it is
+drawn whenever one is, even when it is hiding nothing at the moment: a profile whose every
+entry names a scene OBS has since renamed reads `recording — nothing hidden` rather than
+disappearing and leaving the dashboard looking exactly as it does with no profile at all.
+
+#### Walkthrough: from no profiles to a filtered scene list
+
+Say OBS has eight scenes and five of them exist only to be nested inside the other three.
+
+1. Start the daemon (`obsctl server`, or install the service) and open the TUI with `obsctl`.
+   The Scenes panel lists all eight.
+2. Press `<Space>` then `P`. The editor opens. With no profiles defined yet, the cursor is on
+   the "new scene profile" row; press `Enter` to start one.
+3. You are now looking at every scene OBS has, each marked `hidden` or `visible`. A new profile
+   starts from whatever is hidden right now, so anything already carrying `hidden: true` in the
+   config is pre-marked. Move with `j`/`k` and press `t` on each of the five utility scenes that
+   is not marked yet. Nothing has been written to the config at this point, and `Esc` throws the
+   whole edit away.
+4. Press `Enter`. The editor asks for a name, because the profile does not have one. Type
+   `streaming` and press `Enter` again.
+5. The daemon writes the profile into `scene_profiles:` in your config file and, because this
+   profile is *new*, switches it on for you. The status line says
+   `scene profile created and switched on: streaming - hiding 5 scenes`, and the editor closes.
+6. Look at the Scenes panel: it now lists three scenes, and its title carries a badge reading
+   `streaming — 5 hidden`. That badge is how you tell a working profile from a scene list that
+   is short for some other reason.
+7. Press `P`. With one profile defined, that already steps to "no profile": the badge
+   disappears and all eight scenes are listed again. Press `P` again to come back to
+   `streaming`. Define a second profile and `P` walks `streaming` → the second one → no
+   profile → round again. `c` on the picker inside the editor is the other way off.
+
+Editing an existing profile is step 2 with the cursor already on it: `Enter` loads that
+profile's choices, `t` changes them, `Enter` saves. Saving an *existing* profile deliberately
+does not switch it on — you may be adjusting one you are not currently using — so if you want
+to move to it, press `a` on it in the picker, or `P` until you land on it.
+
+Saving the profile that *is* switched on is the one case where the scene list moves as you
+save: the profile you just rewrote is the one deciding what the dashboard shows, so obsctl
+re-resolves the list from it immediately. The status line says so rather than claiming
+nothing changed — `scene profile saved: streaming - it is the active one, so the scene list
+now hides 5 scenes`, against `... it is not the active one, so the scene list is unchanged`
+for every other save.
+
+The same thing from outside the TUI: `obsctl scene-profiles` lists what you have,
+`obsctl scene-profile streaming` switches it on, `obsctl scene-profile` on its own tells you
+which is active, `obsctl scene-profile --off` stops filtering, and
+`obsctl scene-profile --delete streaming` removes it. Every one of those reaches the same
+daemon, so a change made in the CLI shows up in a running TUI without a reload.
 
 ### Mouse
 
@@ -473,6 +571,8 @@ terminals fall back to that behavior while `Shift` is held).
 | Click on the "daemon unavailable" screen | Retry the connection |
 | Click a theme in the settings view | Preview it; click it again to apply |
 | Click or scroll a row in the scene-profile editor | Move its cursor (the editor is modal, so nothing reaches the dashboard behind it) |
+| Click the selected profile row again | Activate that scene profile — the same as pressing `a` on it |
+| Click while the editor is asking about a delete | Answer "no" — the mouse cannot confirm a delete, only `y` can |
 
 ### TUI Command Palette
 
@@ -495,6 +595,8 @@ Type `:` to open the palette, then use any of:
 :set-scene-profile <name>
 :scene-profile-off
 :scene-profile-clear
+:scene-profile-delete <name>
+:delete-scene-profile <name>
 :status
 :server-status
 :obs-status
@@ -720,7 +822,15 @@ position in the list, and moving `active_scene_profile` onto the new name if tha
 active one. Renaming onto a name a *different* profile already answers to is `CONFIG_INVALID` rather
 than a silent overwrite. Left out (the request above it), the save is a plain upsert: it creates the
 profile, or replaces one of the same name whole. The reply reports `created` and `renamed` so a client
-can tell which of the three happened.
+can tell which of the three happened, and `active`, which is `true` when the profile just written is
+the one in effect — the daemon re-resolves the scene list as it writes, so that is the case where the
+save moved the caller's scene list even though a save never switches a profile on.
+
+`set_scene_profile` and `save_scene_profile` both report two counts. `hidden` is how many scenes OBS
+actually has that the profile takes off the list — what the user will watch disappear — and `listed`
+is how many names the profile holds in the config file. They differ whenever the profile still names a
+scene OBS has renamed or deleted. With no scene list known yet (a daemon that has not finished talking
+to OBS), `hidden` falls back to `listed`, because nothing better can be said.
 
 Naming a scene profile that does not exist in `set_scene_profile` or `delete_scene_profile` is
 `CONFIG_INVALID`, as is any of the four mutating commands on a daemon started without a config file

@@ -7,7 +7,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
 };
 
-use crate::tui::{anim, model::TuiModel};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use crate::tui::{anim, model::TuiModel, spinner::BroadcastState, theme::Theme};
 
 pub const ASCII_BORDER: border::Set = border::Set {
     top_left: "+",
@@ -238,6 +240,32 @@ pub fn panel<'a>(
     focused: bool,
     model: &TuiModel,
 ) -> Block<'a> {
+    panel_badged(icon, label, None, hint, count, focused, model)
+}
+
+/// [`panel`] with one extra phrase in the title, between the count and the
+/// hint: a *badge* saying that what the panel lists is not everything there
+/// is.
+///
+/// The Scenes panel is the reason this exists. With a scene profile switched
+/// on, a short list is the feature working — but a short list is also what a
+/// half-loaded OBS looks like, and nothing outside the scene-profile modal
+/// ever named the profile that was doing the filtering. A user who could not
+/// tell those two apart reasonably concluded the feature was broken.
+///
+/// The badge goes before the hint rather than after it because a narrow
+/// terminal truncates the title from the right, and the hint only repeats
+/// keys the palette and the footer also list, while the badge is shown
+/// nowhere else.
+pub fn panel_badged<'a>(
+    icon: &'a str,
+    label: &'a str,
+    badge: Option<&str>,
+    hint: &'a str,
+    count: usize,
+    focused: bool,
+    model: &TuiModel,
+) -> Block<'a> {
     let theme = model.theme;
     // Keep a full visual gutter after wide emoji glyphs. Some terminals render
     // emoji in two cells, making a single following space appear collapsed.
@@ -250,6 +278,14 @@ pub fn panel<'a>(
             .bg(theme.highlight_bg)
             .add_modifier(Modifier::BOLD),
     ));
+    if let Some(badge) = badge {
+        title_spans.push(Span::styled(
+            format!("  {badge}"),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if !hint.is_empty() {
         title_spans.push(Span::styled(
             format!("  {hint} "),
@@ -340,9 +376,87 @@ pub fn format_duration(ms: Option<u64>) -> String {
     }
 }
 
+/// What a broadcast state's readout says next to its spinner: the elapsed
+/// stream or record time, or `idle` — which the status pane spells as its
+/// "standing by" hint and the live bar leaves empty — when nothing is running.
+///
+/// Shared by the status pane and the live bar's inline badges so both read
+/// the same duration for the same state.
+pub fn broadcast_detail(
+    state: BroadcastState,
+    model: &TuiModel,
+    idle: impl Into<String>,
+) -> String {
+    match state {
+        BroadcastState::Idle => idle.into(),
+        BroadcastState::Live => format_duration(model.stream_duration_ms()),
+        BroadcastState::Rec => format_duration(model.record_duration_ms()),
+    }
+}
+
+/// The pulsing hue of an active broadcast state: LIVE breathes from danger
+/// toward warning, REC the other way round, so the two stay tellable apart.
+/// `amount` is how far along the blend the pulse can travel — the status pane
+/// and the live bar deliberately breathe by slightly different amounts (0.4
+/// vs 0.45). `None` for Idle, whose colouring the two widgets legitimately
+/// disagree on.
+pub fn broadcast_pulse_color(
+    state: BroadcastState,
+    theme: Theme,
+    pulse: f32,
+    amount: f32,
+) -> Option<Color> {
+    match state {
+        BroadcastState::Idle => None,
+        BroadcastState::Live => Some(anim::blend(theme.danger, theme.warning, pulse * amount)),
+        BroadcastState::Rec => Some(anim::blend(theme.warning, theme.danger, pulse * amount)),
+    }
+}
+
+/// Longest prefix of `text` that fits in `cells` terminal cells.
+///
+/// Counting characters is not the same as counting cells: an emoji or a CJK
+/// ideograph occupies two. Truncating by character would let a name overflow
+/// its strip, and ratatui would then clip the row's last cell.
+pub(crate) fn truncate_to_cells(text: &str, cells: usize) -> String {
+    let mut used = 0;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let width = ch.width().unwrap_or(0);
+        if used + width > cells {
+            break;
+        }
+        used += width;
+        out.push(ch);
+    }
+    out
+}
+
+/// Center `text` in exactly `width` cells, truncating when it does not fit.
+pub(crate) fn pad_center(text: &str, width: usize) -> String {
+    let trimmed = truncate_to_cells(text, width);
+    let len = trimmed.width();
+    let left = width.saturating_sub(len) / 2;
+    let right = width.saturating_sub(left + len);
+    let mut padded = " ".repeat(left);
+    padded.push_str(&trimmed);
+    padded.push_str(&" ".repeat(right));
+    padded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pad_center_always_returns_exactly_the_requested_width() {
+        assert_eq!(pad_center("Mic", 9), "   Mic   ");
+        // An odd remainder favours the right, so the text never drifts left
+        // of centre as a strip widens.
+        assert_eq!(pad_center("Mic", 4), "Mic ");
+        assert_eq!(pad_center("Desktop Audio", 9).chars().count(), 9);
+        assert_eq!(pad_center("Mic", 0), "");
+    }
 
     #[test]
     fn format_duration_handles_none() {

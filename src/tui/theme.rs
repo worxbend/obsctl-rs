@@ -604,6 +604,12 @@ pub const ALL: &[Theme] = &[
     MONO,
 ];
 
+/// Theme at `index` in [`ALL`], clamped to the last entry for anything past
+/// the end — a cursor cannot pick a theme that does not exist.
+pub fn at(index: usize) -> Theme {
+    ALL[index.min(ALL.len() - 1)]
+}
+
 /// The `ui.theme` id that selects the user-supplied `ui.custom_theme` palette.
 pub const CUSTOM_ID: &str = "custom";
 

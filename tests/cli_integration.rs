@@ -211,11 +211,15 @@ fn scene_profile_without_server_exits_3() {
     let dir = TempDir::new().unwrap();
     let config = config_with_socket(&dir);
 
-    // Both forms reach the daemon, so both must fail the same way when there
-    // is no daemon: the argument-less one is "clear", not "nothing to do".
+    // Every form reaches the daemon, so every form must fail the same way when
+    // there is no daemon. That includes the argument-less one: it asks the
+    // daemon which profile is active rather than answering from the config
+    // file, so "no daemon" is a failure there too, not "nothing to do".
     for args in [
         vec!["scene-profile", "streaming"],
         vec!["scene-profile"],
+        vec!["scene-profile", "--off"],
+        vec!["scene-profile", "--delete", "night"],
         vec!["scene-profiles"],
     ] {
         let mut command = obsctl();
@@ -333,6 +337,13 @@ fn start_fake_ipc_server_with_config(response: serde_json::Value) -> (TempDir, s
 }
 
 fn start_fake_ipc_server_with_reply(reply: FakeIpcReply) -> (TempDir, std::path::PathBuf) {
+    start_fake_ipc_server_with_reply_and_log(reply, None)
+}
+
+fn start_fake_ipc_server_with_reply_and_log(
+    reply: FakeIpcReply,
+    log: Option<RecordedCommands>,
+) -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new().unwrap();
     let socket_path = dir.path().join("fake.sock");
     let config_path = dir.path().join("config.yml");
@@ -359,6 +370,11 @@ fn start_fake_ipc_server_with_reply(reply: FakeIpcReply) -> (TempDir, std::path:
             let _ = ready_tx.send(());
             tokio::spawn(async move { server.run(cmd_tx, shutdown_rx).await });
             while let Some(dispatch) = cmd_rx.recv().await {
+                // Recorded before the reply goes out, so a test that reads the
+                // log after the CLI has exited always sees a complete list.
+                if let Some(log) = &log {
+                    log.record(&dispatch.payload.name);
+                }
                 let msg = reply_bg
                     .clone()
                     .into_response(dispatch.id.clone(), &dispatch.payload);
@@ -372,6 +388,32 @@ fn start_fake_ipc_server_with_reply(reply: FakeIpcReply) -> (TempDir, std::path:
         .expect("fake IPC server should bind");
 
     (dir, config_path)
+}
+
+/// The names of the daemon commands a fake server has been sent, in order.
+///
+/// Handed back by `start_recording_fake_ipc_server` so a test can assert on
+/// what did *not* cross the socket as well as on what did.
+#[derive(Clone, Default)]
+struct RecordedCommands(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl RecordedCommands {
+    fn record(&self, name: &str) {
+        self.0.lock().unwrap().push(name.to_string());
+    }
+
+    fn recorded(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// Like `start_fake_ipc_server_with_reply(FakeIpcReply::Echo)`, but keeps a log
+/// of every command it answered.
+fn start_recording_fake_ipc_server() -> (TempDir, std::path::PathBuf, RecordedCommands) {
+    let commands = RecordedCommands::default();
+    let (dir, config_path) =
+        start_fake_ipc_server_with_reply_and_log(FakeIpcReply::Echo, Some(commands.clone()));
+    (dir, config_path, commands)
 }
 
 fn parse_json_stdout(stdout: &[u8]) -> serde_json::Value {
@@ -464,55 +506,118 @@ fn json_flag_wraps_scene_mute_and_volume_successes_in_envelope() {
     }
 }
 
-/// `scene-profile` takes an optional name, and the two forms are two different
-/// daemon commands: with a name it activates that scene profile, without one it
-/// clears whichever was active. An echoing fake daemon is what makes the
-/// distinction observable — the assertion is on the command the CLI actually
-/// put on the wire, not on a fixture describing it.
+/// One subcommand, four daemon commands. An echoing fake daemon is what makes
+/// the distinction observable — the assertion is on the command the CLI
+/// actually put on the wire, not on a fixture describing it.
+///
+/// The case that matters is the argument-less one. It used to send
+/// `clear_scene_profile`, which meant the most natural spelling of the question
+/// "which scene profile is on?" destroyed the answer. It now sends
+/// `list_scene_profiles`, the same read-only request as `scene-profiles`, and
+/// switching off needs the explicit `--off`.
 #[test]
-fn scene_profile_sends_set_with_a_name_and_clear_without_one() {
+fn each_written_form_of_scene_profile_sends_its_own_daemon_command() {
     let (_dir, config_path) = start_fake_ipc_server_with_reply(FakeIpcReply::Echo);
 
-    let assert = obsctl()
-        .args([
-            "--json",
-            "--config",
-            config_path.to_str().unwrap(),
-            "scene-profile",
-            "streaming",
-        ])
-        .assert()
-        .success();
-    let parsed = parse_json_stdout(&assert.get_output().stdout);
-    assert_eq!(parsed["result"]["command"], "set_scene_profile");
-    assert_eq!(parsed["result"]["args"]["target"], "streaming");
-
-    let assert = obsctl()
-        .args([
-            "--json",
-            "--config",
-            config_path.to_str().unwrap(),
-            "scene-profile",
-        ])
-        .assert()
-        .success();
-    let parsed = parse_json_stdout(&assert.get_output().stdout);
-    assert_eq!(parsed["result"]["command"], "clear_scene_profile");
-    // The argument-less payload arrives as an empty object: `args` is flattened
+    // The argument-less payloads arrive as an empty object: `args` is flattened
     // into the command object on the wire, so "no arguments" is "no extra keys".
-    assert_eq!(parsed["result"]["args"], serde_json::json!({}));
+    let no_args = serde_json::json!({});
+    let cases = [
+        (
+            vec!["scene-profile", "streaming"],
+            "set_scene_profile",
+            serde_json::json!({ "target": "streaming" }),
+        ),
+        (
+            vec!["scene-profile"],
+            "list_scene_profiles",
+            no_args.clone(),
+        ),
+        (
+            vec!["scene-profile", "--off"],
+            "clear_scene_profile",
+            no_args.clone(),
+        ),
+        // `--clear` is the same flag under a second name, so it must reach the
+        // same command rather than being parsed as a profile called "clear".
+        (
+            vec!["scene-profile", "--clear"],
+            "clear_scene_profile",
+            no_args.clone(),
+        ),
+        (
+            vec!["scene-profile", "--delete", "night"],
+            "delete_scene_profile",
+            serde_json::json!({ "target": "night" }),
+        ),
+        (vec!["scene-profiles"], "list_scene_profiles", no_args),
+    ];
 
-    let assert = obsctl()
-        .args([
-            "--json",
-            "--config",
-            config_path.to_str().unwrap(),
-            "scene-profiles",
-        ])
+    for (command, expected_name, expected_args) in cases {
+        let mut args = vec!["--json", "--config", config_path.to_str().unwrap()];
+        args.extend(command.iter().copied());
+
+        let assert = obsctl().args(args).assert().success();
+        let parsed = parse_json_stdout(&assert.get_output().stdout);
+        assert_eq!(
+            parsed["result"]["command"], expected_name,
+            "{command:?} must send {expected_name}"
+        );
+        assert_eq!(
+            parsed["result"]["args"], expected_args,
+            "{command:?} sent the wrong arguments"
+        );
+    }
+}
+
+/// Asking which scene profile is active must not change which one is active.
+///
+/// The echoing daemon reports every command it is given, so this asserts on the
+/// whole conversation rather than on one field of it: a single request went
+/// over the socket, and it was the read-only one. A stray `clear_scene_profile`
+/// sent alongside the listing — the shape of the old behaviour — would show up
+/// here as a second recorded command.
+#[test]
+fn reading_which_scene_profile_is_active_sends_no_command_that_changes_it() {
+    let (_dir, config_path, commands) = start_recording_fake_ipc_server();
+
+    obsctl()
+        .args(["--config", config_path.to_str().unwrap(), "scene-profile"])
         .assert()
         .success();
-    let parsed = parse_json_stdout(&assert.get_output().stdout);
-    assert_eq!(parsed["result"]["command"], "list_scene_profiles");
+
+    assert_eq!(commands.recorded(), vec!["list_scene_profiles".to_string()]);
+}
+
+/// `--off` and `--delete` are two different instructions, and a name is a
+/// third, so clap refuses any pair of them. The refusal happens while the
+/// command line is being parsed, before a socket is opened, so the router never
+/// has to invent a precedence rule for a combination with no sensible meaning.
+///
+/// The fake daemon is deliberately running and would answer any of these with
+/// success: exit 2 rather than exit 0 is what proves the pair was rejected.
+/// Exit 2 is clap's own usage-error code, shared with every other malformed
+/// command line — no new error code was introduced for scene profiles.
+#[test]
+fn scene_profile_refuses_two_instructions_at_once() {
+    let (_dir, config_path) = start_fake_ipc_server_with_reply(FakeIpcReply::Echo);
+
+    for command in [
+        vec!["scene-profile", "streaming", "--off"],
+        vec!["scene-profile", "streaming", "--delete", "night"],
+        vec!["scene-profile", "--off", "--delete", "night"],
+    ] {
+        let mut args = vec!["--config", config_path.to_str().unwrap()];
+        args.extend(command.iter().copied());
+
+        obsctl()
+            .args(args)
+            .assert()
+            .failure()
+            .code(2)
+            .stdout(predicates::str::is_empty())
+            .stderr(contains("cannot be used with"));
+    }
 }
 
 #[test]
@@ -527,11 +632,24 @@ fn json_flag_wraps_scene_profile_successes_in_envelope() {
             }),
         ),
         (
-            vec!["scene-profile"],
+            vec!["scene-profile", "--off"],
             serde_json::json!({ "message": "scene profile cleared" }),
         ),
         (
+            vec!["scene-profile", "--delete", "night"],
+            serde_json::json!({ "message": "scene profile deleted: night" }),
+        ),
+        // The listing is a structure rather than a sentence, and both spellings
+        // of it must put that structure in `result` untouched.
+        (
             vec!["scene-profiles"],
+            serde_json::json!({
+                "active": "streaming",
+                "profiles": [{ "name": "streaming", "hidden": ["Utility BG"] }],
+            }),
+        ),
+        (
+            vec!["scene-profile"],
             serde_json::json!({
                 "active": "streaming",
                 "profiles": [{ "name": "streaming", "hidden": ["Utility BG"] }],
@@ -558,25 +676,32 @@ fn json_flag_wraps_scene_profile_successes_in_envelope() {
     }
 }
 
-/// Without `--json`, `scene-profiles` answers with a structure rather than a
+/// Without `--json`, the listing answers with a structure rather than a
 /// sentence, so it is printed field by field instead of as raw JSON.
+///
+/// Both spellings are checked because a user who guesses `scene-profile` and a
+/// user who guesses `scene-profiles` are asking the same question and must get
+/// the same answer.
 #[test]
 fn default_mode_prints_scene_profiles_as_fields() {
     let response = serde_json::json!({
         "active": "streaming",
         "profiles": [{ "name": "streaming", "hidden": ["Utility BG"] }],
     });
-    let (_dir, config_path) = start_fake_ipc_server_with_config(response);
 
-    obsctl()
-        .args(["--config", config_path.to_str().unwrap(), "scene-profiles"])
-        .assert()
-        .success()
-        .stdout(
-            contains("active: \"streaming\"")
-                .and(contains("profiles: "))
-                .and(predicates::str::is_match(r"^[^\{]").unwrap()),
-        );
+    for spelling in ["scene-profiles", "scene-profile"] {
+        let (_dir, config_path) = start_fake_ipc_server_with_config(response.clone());
+
+        obsctl()
+            .args(["--config", config_path.to_str().unwrap(), spelling])
+            .assert()
+            .success()
+            .stdout(
+                contains("active: \"streaming\"")
+                    .and(contains("profiles: "))
+                    .and(predicates::str::is_match(r"^[^\{]").unwrap()),
+            );
+    }
 }
 
 /// An unknown scene profile is reported by the daemon as `CONFIG_INVALID`, and

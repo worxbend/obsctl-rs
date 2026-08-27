@@ -12,22 +12,28 @@ use tracing::{debug, info, warn};
 
 use crate::config::{
     dump as dump_config_mod,
+    loader::load_with_warnings,
     model::{Config, SceneProfileConfig},
-    schema::ValidationWarning,
+    schema::{ValidationWarning, validate},
+    writer::write_atomic,
 };
 use crate::domain::{
     aliases::{AliasEntry, resolve, resolve_audio},
     errors::ObsctlError,
     names::normalized_name,
     result::Result,
+    scene_profiles::{ActiveSceneProfile, SceneVisibility},
     volume::percent_to_mul,
 };
 use crate::ipc::{
-    protocol::{ErrorPayload, RENAME_FROM, ServerCommand, ServerMessage, public_error_code},
+    protocol::{
+        CommandPayload, ErrorPayload, RENAME_FROM, ServerCommand, ServerMessage, public_error_code,
+    },
     session::{BroadcastHub, CommandDispatch},
 };
 use crate::obs::{
     client::ObsClient,
+    protocol::RequestData,
     requests,
     state::{ObsSnapshot, ServerStatus},
     validation::extract_resource_names,
@@ -120,11 +126,7 @@ impl CommandExecutor {
         }
     }
 
-    async fn handle(
-        &self,
-        id: String,
-        payload: crate::ipc::protocol::CommandPayload,
-    ) -> ServerMessage {
+    async fn handle(&self, id: String, payload: CommandPayload) -> ServerMessage {
         debug!("Command id={id} name={}", payload.name);
         let result = async {
             let command = parse_server_command(&payload.name)?;
@@ -346,11 +348,7 @@ impl CommandExecutor {
     /// OBS answers a toggle with the resulting `outputActive`, so the reply can
     /// say "started"/"stopped" rather than the ambiguous "toggled" — which is
     /// kept only for the case where OBS sends a reply we cannot read.
-    async fn toggle_output(
-        &self,
-        request: crate::obs::protocol::RequestData,
-        output: &str,
-    ) -> Result<Value> {
+    async fn toggle_output(&self, request: RequestData, output: &str) -> Result<Value> {
         let client = self.require_obs().await?;
         let result = client.request(request).await?;
 
@@ -390,7 +388,7 @@ impl CommandExecutor {
         let merged = dump_config_mod::merge(&base.config, &obs_resources)?;
 
         let backup = dump_config_mod::write_backup(path)?;
-        crate::config::writer::write_atomic(&merged, path)?;
+        write_atomic(&merged, path)?;
         info!(
             "Config dumped to {} (backup: {})",
             path.display(),
@@ -431,7 +429,7 @@ impl CommandExecutor {
     /// the file is on disk, so the caller gets `reload_error` in its result
     /// rather than an error that would imply nothing was written.
     async fn reload_after_dump(&self, path: &std::path::Path) -> DumpReloadOutcome {
-        match crate::config::loader::load_with_warnings(path) {
+        match load_with_warnings(path) {
             Ok((new_config, warnings)) => {
                 self.log_config_warnings(&warnings, "after dump reload");
                 *self.config.lock().await = new_config;
@@ -503,11 +501,24 @@ impl CommandExecutor {
             )));
         }
 
-        let mut edited = base.config;
+        let before = base.config;
+        let mut edited = before.clone();
         edit(&mut edited)?;
 
-        let warnings = crate::config::schema::validate(&edited)?;
-        crate::config::writer::write_atomic(&edited, path)?;
+        let warnings = validate(&edited)?;
+        // An edit that landed on the config the file already holds has
+        // nothing to write. Activating the profile that is already active and
+        // clearing when nothing is active are both legitimate requests — the
+        // caller asked for a state and that state is already reached — but
+        // rewriting the file for them re-serializes it, moves its
+        // modification time, and wakes anything watching it for a change that
+        // did not happen. Everything below still runs: the daemon's in-memory
+        // copy is compared against nothing here, only the file is, so the
+        // swap and the broadcast are what bring memory back in line with disk
+        // after a hand edit.
+        if config_file_would_change(&before, &edited) {
+            write_atomic(&edited, path)?;
+        }
 
         {
             let mut guard = self.config.lock().await;
@@ -530,29 +541,31 @@ impl CommandExecutor {
     async fn cmd_set_scene_profile(&self, args: &Value) -> Result<Value> {
         let target = required_string(args, "target")?;
 
-        let (config, warnings) = self
+        let mut name = String::new();
+        let mut listed = Vec::new();
+        let (_, warnings) = self
             .edit_config_file(|config| {
                 // The stored spelling, not the caller's: the config file
                 // should keep naming the profile the way it names it in the
                 // `scene_profiles` list above.
-                let name = find_scene_profile(config, &target)
-                    .ok_or_else(|| scene_profile_not_found(&target))?
-                    .name
-                    .clone();
-                config.active_scene_profile = Some(name);
+                let profile = find_scene_profile(config, &target)
+                    .ok_or_else(|| scene_profile_not_found(&target))?;
+                name = profile.name.clone();
+                listed = profile.hidden.clone();
+                config.active_scene_profile = Some(name.clone());
                 Ok(())
             })
             .await?;
 
-        let profile =
-            find_scene_profile(&config, &target).ok_or_else(|| scene_profile_not_found(&target))?;
-        let name = profile.name.clone();
-        let hidden = profile.hidden.len();
+        // The scenes that will really disappear, not the entries the file
+        // lists — see [`scenes_hidden_by`].
+        let hidden = scenes_hidden_by(&self.state.read().await, &listed);
         info!("Scene profile set to: {name}");
 
         Ok(json!({
             "message": format!("scene profile set: {name}"),
             "hidden": hidden,
+            "listed": listed.len(),
             "warnings": Self::warning_messages(&warnings),
         }))
     }
@@ -593,7 +606,7 @@ impl CommandExecutor {
 
         let mut created = false;
         let mut renamed = false;
-        let (_, warnings) = self
+        let (config, warnings) = self
             .edit_config_file(|config| {
                 let profile = SceneProfileConfig {
                     name: name.clone(),
@@ -647,12 +660,31 @@ impl CommandExecutor {
             })
             .await?;
 
+        // Whether the profile just written is the one in effect. A save never
+        // switches a profile on, but it can very much change what a profile
+        // that is *already* on hides — the projection above re-resolved the
+        // scene list from it before this line ran — so a client that told the
+        // user "the active profile is unchanged" while the dashboard visibly
+        // lost rows would be describing the wrong event. Answered from the
+        // config the edit produced rather than from the caller's idea of what
+        // was active, which the same edit may have just moved (a rename of the
+        // active profile carries `active_scene_profile` with it).
+        let active = config
+            .active_scene_profile
+            .as_deref()
+            .is_some_and(|active| same_scene_profile_name(active, &name));
+        // The scenes that will really disappear, not the entries the file
+        // lists — see [`scenes_hidden_by`].
+        let effective = scenes_hidden_by(&self.state.read().await, &hidden);
+
         info!("Scene profile saved: {name}");
         Ok(json!({
             "message": format!("scene profile saved: {name}"),
-            "hidden": hidden.len(),
+            "hidden": effective,
+            "listed": hidden.len(),
             "created": created,
             "renamed": renamed,
+            "active": active,
             "warnings": Self::warning_messages(&warnings),
         }))
     }
@@ -713,7 +745,7 @@ impl CommandExecutor {
 
     async fn cmd_validate_config(&self) -> Result<Value> {
         let config = self.config.lock().await;
-        let warnings = crate::config::schema::validate(&config)?;
+        let warnings = validate(&config)?;
         let warning_msgs: Vec<String> = warnings.iter().map(|w| w.0.clone()).collect();
         Ok(json!({ "valid": true, "warnings": warning_msgs }))
     }
@@ -751,7 +783,7 @@ impl CommandExecutor {
         // read it while a dump is part-way through replacing it.
         let _config_file = self.config_file.lock().await;
 
-        let (new_config, warnings) = crate::config::loader::load_with_warnings(path)?;
+        let (new_config, warnings) = load_with_warnings(path)?;
         self.log_config_warnings(&warnings, "on reload");
 
         let projection = ConfigProjection::from_config(&new_config);
@@ -854,7 +886,7 @@ struct ConfigWriteBase {
 /// away the command most likely to produce a working one. The caller reports
 /// the fallback.
 fn config_write_base(path: &std::path::Path, in_memory: &Config) -> ConfigWriteBase {
-    match crate::config::loader::load_with_warnings(path) {
+    match load_with_warnings(path) {
         Ok((config, _)) => ConfigWriteBase {
             config,
             error: None,
@@ -872,6 +904,50 @@ fn config_write_base(path: &std::path::Path, in_memory: &Config) -> ConfigWriteB
             }
         }
     }
+}
+
+/// Whether writing `after` would leave a config file different from the one
+/// `before` was read out of.
+///
+/// The comparison is made on the YAML the writer would produce rather than on
+/// the two models, for two reasons. `Config` holds the connection secrets and
+/// deliberately derives neither `Debug` nor `PartialEq`, so there is no field
+/// comparison to make; and the rendered text is the thing a write would
+/// actually replace, which is exactly the question being asked.
+///
+/// A model that will not serialize answers `true`: the write then runs and
+/// fails with the real error, instead of this helper swallowing the edit and
+/// reporting success.
+fn config_file_would_change(before: &Config, after: &Config) -> bool {
+    match (serde_yaml::to_string(before), serde_yaml::to_string(after)) {
+        (Ok(before), Ok(after)) => before != after,
+        _ => true,
+    }
+}
+
+/// How many of `hidden` name a scene the daemon has actually seen.
+///
+/// A profile's `hidden` list is config, and config outlives the scenes it
+/// names: rename a scene in OBS and the old spelling stays in the file, hiding
+/// nothing. Counting the entries would promise the user more rows than are
+/// going to disappear, and would disagree with the TUI's own badge, which
+/// counts the rows that really went. Duplicate spellings of one scene collapse
+/// here too, because [`SceneVisibility`] holds a normalized set.
+///
+/// `None` means the daemon has no scene list to check against — it has not
+/// finished talking to OBS yet — and there is then no better answer than the
+/// number of entries the profile lists.
+fn scenes_hidden_by(snapshot: &ObsSnapshot, hidden: &[String]) -> usize {
+    if snapshot.scenes.is_empty() {
+        return hidden.len();
+    }
+    let visibility =
+        SceneVisibility::resolve(std::iter::empty(), ActiveSceneProfile::Named(hidden));
+    snapshot
+        .scenes
+        .iter()
+        .filter(|scene| visibility.is_hidden(&scene.name))
+        .count()
 }
 
 /// Whether two spellings name the same scene profile.
@@ -1075,7 +1151,7 @@ fn validate_empty_payload(args: &Value, command: &str) -> Result<()> {
 /// name the thing in a message.
 struct NamedSelection {
     known_names: fn(&ObsSnapshot) -> &[String],
-    build_request: fn(&str) -> Result<crate::obs::protocol::RequestData>,
+    build_request: fn(&str) -> Result<RequestData>,
     not_found: fn(String) -> ObsctlError,
     label: &'static str,
     lowercase_label: &'static str,
@@ -1102,26 +1178,29 @@ impl NamedSelection {
 /// Alias/shortcut lookup tables for the two kinds of target a command can
 /// name. `resolve` works off `AliasEntry`, so both snapshot lists are projected
 /// into it the same way.
-fn scene_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry> {
-    snap.scenes
-        .iter()
-        .map(|s| AliasEntry {
-            name: s.name.clone(),
-            alias: s.alias.clone(),
-            shortcut: s.shortcut.clone(),
+fn alias_entries<'a>(
+    items: impl IntoIterator<Item = (&'a String, &'a Option<String>, &'a Option<String>)>,
+) -> Vec<AliasEntry> {
+    items
+        .into_iter()
+        .map(|(name, alias, shortcut)| AliasEntry {
+            name: name.clone(),
+            alias: alias.clone(),
+            shortcut: shortcut.clone(),
         })
         .collect()
 }
 
+fn scene_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry> {
+    alias_entries(snap.scenes.iter().map(|s| (&s.name, &s.alias, &s.shortcut)))
+}
+
 fn audio_alias_entries(snap: &ObsSnapshot) -> Vec<AliasEntry> {
-    snap.audio_inputs
-        .iter()
-        .map(|a| AliasEntry {
-            name: a.name.clone(),
-            alias: a.alias.clone(),
-            shortcut: a.shortcut.clone(),
-        })
-        .collect()
+    alias_entries(
+        snap.audio_inputs
+            .iter()
+            .map(|a| (&a.name, &a.alias, &a.shortcut)),
+    )
 }
 
 #[cfg(test)]

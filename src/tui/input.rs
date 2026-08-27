@@ -90,6 +90,10 @@ pub enum TuiAction {
     // scene-visibility choices — nothing to do with an OBS profile, which is
     // what the Profiles panel and `FocusProfiles` above are about.
     OpenSceneProfiles,
+    /// `P` on the dashboard (and `<leader>N`): switch to the next scene
+    /// profile the config defines, passing through "no profile at all"
+    /// between the last one and the first.
+    SceneProfileCycleNext,
     CloseSceneProfiles,
     SceneProfileNavUp(usize),
     SceneProfileNavDown(usize),
@@ -101,7 +105,13 @@ pub enum TuiAction {
     SceneProfileActivate,
     /// Switch to no scene profile at all and close the editor.
     SceneProfileClearActive,
+    /// `d` on the picker: ask whether the selected profile should go. Sends
+    /// nothing on its own — see [`TuiAction::SceneProfileDeleteConfirm`].
     SceneProfileDelete,
+    /// `y` (or `Enter`) on that question: send the delete.
+    SceneProfileDeleteConfirm,
+    /// `n`, `Esc`, or `q` on that question: leave the profile alone.
+    SceneProfileDeleteCancel,
     SceneProfileToggleHidden,
     SceneProfileBeginNaming,
     SceneProfileNameChar(char),
@@ -181,6 +191,27 @@ fn scene_profile_key(editor: &SceneProfileEditor, key: KeyEvent) -> Option<TuiAc
     // it is matched first so the plain `c` binding below cannot shadow it.
     if ctrl && key.code == KeyCode::Char('c') {
         return Some(TuiAction::Quit);
+    }
+
+    // A delete waiting to be confirmed owns the keyboard until it is answered.
+    // Nothing else on the picker may run while the footer is asking a yes/no
+    // question — an `a` typed at it would activate a profile the user believes
+    // they are being asked about deleting.
+    if editor.pending_delete.is_some() {
+        return match key.code {
+            KeyCode::Char('y') | KeyCode::Enter if !ctrl => {
+                Some(TuiAction::SceneProfileDeleteConfirm)
+            }
+            KeyCode::Char('n') | KeyCode::Char('q') if !ctrl => {
+                Some(TuiAction::SceneProfileDeleteCancel)
+            }
+            KeyCode::Esc => Some(TuiAction::SceneProfileDeleteCancel),
+            // Every other key is ignored rather than treated as a "no": a
+            // question this consequential is answered on purpose, and a
+            // mistyped key that silently dismissed it would leave the user
+            // unsure whether the profile had gone.
+            _ => None,
+        };
     }
 
     match editor.stage {
@@ -322,6 +353,14 @@ fn main_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('a') => Some(TuiAction::FocusAudio),
         KeyCode::Char('p') => Some(TuiAction::FocusProfiles),
         KeyCode::Char('c') => Some(TuiAction::FocusCollections),
+
+        // Scene profiles. Upper case, because the lower-case `p` above focuses
+        // the Profiles panel and an OBS profile is a different thing entirely.
+        // Every other route to switching scene profiles — the modal, the
+        // palette — costs several keystrokes and a typed name, which is what
+        // made a feature whose whole point is flipping between two scene
+        // layouts feel like it had no switch.
+        KeyCode::Char('P') => Some(TuiAction::SceneProfileCycleNext),
 
         // Audio-panel actions. The audio matrix draws its inputs as vertical
         // channel strips laid out left to right, so its axes are the other
@@ -778,6 +817,33 @@ mod tests {
         );
     }
 
+    /// `P` and `p` are one Shift apart and mean unrelated things — cycling
+    /// scene profiles versus focusing the Profiles panel, which lists OBS
+    /// profiles. A binding added on the wrong case would be caught here
+    /// rather than by a user whose scene list changed when they meant to
+    /// change panels.
+    #[test]
+    fn shift_p_cycles_scene_profiles_while_plain_p_focuses_the_profiles_panel() {
+        let model = TuiModel::default();
+        assert_eq!(
+            handle_key(&model, ch('P')),
+            Some(TuiAction::SceneProfileCycleNext)
+        );
+        assert_eq!(handle_key(&model, ch('p')), Some(TuiAction::FocusProfiles));
+        // And the modal still opens on the leader sequence, unchanged.
+        let mut pending = TuiModel::default();
+        pending.pending = Pending::Leader;
+        assert_eq!(
+            handle_key(&pending, ch('P')),
+            Some(TuiAction::OpenSceneProfiles)
+        );
+        assert_eq!(
+            handle_key(&pending, ch('N')),
+            Some(TuiAction::SceneProfileCycleNext),
+            "and <leader>N is the same cycle the bare P runs"
+        );
+    }
+
     // --- the scene-profile editor ---
 
     /// A model with the editor open on `stage`, reached the way a user reaches
@@ -887,6 +953,41 @@ mod tests {
             Some(TuiAction::CloseSceneProfiles)
         );
         // Ctrl-C still ends the program, as it does from every other screen.
+        assert_eq!(
+            handle_key(&model, ctrl_key(KeyCode::Char('c'))),
+            Some(TuiAction::Quit)
+        );
+    }
+
+    /// While a delete is waiting to be confirmed the picker's own keys are
+    /// off. `a` is the neighbour of `d`, and a user who has just been asked
+    /// "delete streaming?" must not be able to answer it by switching a
+    /// profile on.
+    #[test]
+    fn a_pending_delete_takes_every_key_until_it_is_answered() {
+        let mut model = editor_on(SceneProfileStage::Picker);
+        // Set straight onto the editor: which profile is armed is the model's
+        // business, and this layer only asks whether a question is up.
+        model.scene_profile.as_mut().unwrap().pending_delete = Some("streaming".to_string());
+
+        assert_eq!(
+            handle_key(&model, ch('y')),
+            Some(TuiAction::SceneProfileDeleteConfirm)
+        );
+        assert_eq!(
+            handle_key(&model, key(KeyCode::Enter)),
+            Some(TuiAction::SceneProfileDeleteConfirm)
+        );
+        for cancel in [ch('n'), ch('q'), key(KeyCode::Esc)] {
+            assert_eq!(
+                handle_key(&model, cancel),
+                Some(TuiAction::SceneProfileDeleteCancel)
+            );
+        }
+        // Not an answer, and not a way past the question either.
+        assert_eq!(handle_key(&model, ch('a')), None);
+        assert_eq!(handle_key(&model, ch('j')), None);
+        // Ctrl-C is still the way out of the program.
         assert_eq!(
             handle_key(&model, ctrl_key(KeyCode::Char('c'))),
             Some(TuiAction::Quit)

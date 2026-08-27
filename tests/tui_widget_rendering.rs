@@ -720,6 +720,187 @@ fn scenes_renders_long_name_without_panic() {
     .unwrap();
 }
 
+/// Draw only the Scenes panel, wide enough that nothing in the title has to
+/// be truncated.
+fn draw_scenes(model: &TuiModel, width: u16) -> Terminal<TestBackend> {
+    let mut t = term(width, 10);
+    t.draw(|f| {
+        let _ = widgets::scenes::render(f, Rect::new(0, 0, width, 10), model);
+    })
+    .unwrap();
+    t
+}
+
+/// A scene profile that is working and an OBS that has lost half its scenes
+/// both show up as a short list. The panel title is the only place on the
+/// dashboard that can tell the two apart, so it names the profile and says how
+/// many scenes that profile is holding back.
+#[test]
+fn scenes_panel_names_the_active_profile_and_what_it_hides() {
+    let model = model_with_scene_profiles();
+    assert_eq!(model.scenes().len(), 2, "one of the three is hidden");
+
+    let out = buf_string(&draw_scenes(&model, 100));
+    assert!(
+        out.contains("streaming"),
+        "the title names the profile doing the filtering; got:\n{out}"
+    );
+    assert!(
+        out.contains("1 hidden"),
+        "and says how many scenes it is holding back; got:\n{out}"
+    );
+    assert!(
+        out.contains("P profile"),
+        "the hint names the key that switches profiles; got:\n{out}"
+    );
+}
+
+/// The badge is only worth its width when something is missing from the list.
+/// With no profile on and nothing hidden, the panel is what it always was.
+#[test]
+fn scenes_panel_carries_no_badge_when_nothing_is_filtered() {
+    let model = model_connected();
+    assert_eq!(model.scenes().len(), model.all_scenes().len());
+
+    let out = buf_string(&draw_scenes(&model, 100));
+    assert!(
+        !out.contains("hidden"),
+        "an unfiltered list gets no badge; got:\n{out}"
+    );
+    assert!(
+        out.contains("Scenes"),
+        "and still draws its title; got:\n{out}"
+    );
+}
+
+/// A scene hidden by its own `hidden:` flag rather than by a profile still
+/// shortens the list, and an unexplained gap between what OBS has and what the
+/// panel lists is the thing to avoid — so it gets a count even with no profile
+/// to name.
+#[test]
+fn scenes_panel_counts_scenes_hidden_without_a_profile() {
+    let mut model = model_with_scene_profiles();
+    model.update_snapshot(|snapshot| snapshot.active_scene_profile = None);
+
+    let out = buf_string(&draw_scenes(&model, 100));
+    assert!(
+        out.contains("1 hidden"),
+        "the count survives without a profile to name; got:\n{out}"
+    );
+    assert!(
+        !out.contains("streaming"),
+        "but no profile is named, because none is on; got:\n{out}"
+    );
+}
+
+/// A profile that is switched on but hiding nothing right now is the state a
+/// user most needs explained — every entry it lists names a scene OBS has
+/// since renamed, say — and it used to render exactly like no profile at all,
+/// because the badge was decided by the count alone.
+#[test]
+fn scenes_panel_names_an_active_profile_that_is_hiding_nothing() {
+    let mut model = model_with_scene_profiles();
+    // "recording" is defined with an empty hidden list, so switching to it
+    // leaves every scene on the list.
+    model.update_snapshot(|snapshot| {
+        snapshot.active_scene_profile = Some("recording".into());
+        for scene in &mut snapshot.scenes {
+            scene.hidden = false;
+        }
+    });
+    assert_eq!(
+        model.scenes().len(),
+        model.all_scenes().len(),
+        "nothing is being held back"
+    );
+
+    let out = buf_string(&draw_scenes(&model, 100));
+    assert!(
+        out.contains("recording"),
+        "the badge still names the profile in effect; got:\n{out}"
+    );
+    assert!(
+        out.contains("nothing hidden"),
+        "and says it is hiding nothing, rather than vanishing; got:\n{out}"
+    );
+}
+
+/// The state that reads as a broken dashboard: every scene filtered out, and
+/// an empty pane that says nothing about why. It names the profile responsible
+/// and the key that moves off it.
+#[test]
+fn scenes_panel_explains_a_profile_that_hides_everything() {
+    let mut model = model_with_scene_profiles();
+    model.update_snapshot(|snapshot| {
+        for scene in &mut snapshot.scenes {
+            scene.hidden = true;
+        }
+    });
+    assert!(model.scenes().is_empty(), "nothing is left to list");
+
+    let out = buf_string(&draw_scenes(&model, 120));
+    assert!(
+        out.contains("hides every scene"),
+        "the empty pane says a profile is responsible; got:\n{out}"
+    );
+    assert!(out.contains("streaming"), "and which one; got:\n{out}");
+    assert!(
+        out.contains("press P"),
+        "and the key that moves off it; got:\n{out}"
+    );
+
+    // The same state on a pane too narrow to hold the sentence must wrap
+    // rather than panic.
+    let _ = draw_scenes(&model, 24);
+}
+
+/// Neither the badge nor the empty-pane note may reach for a character an
+/// ASCII-only terminal cannot draw.
+#[test]
+fn simplified_scenes_panel_stays_ascii() {
+    let mut model = model_with_scene_profiles();
+    model.advanced_ui = false;
+    model.show_icons = false;
+
+    let badged = buf_string(&draw_scenes(&model, 100));
+    assert!(
+        badged.is_ascii(),
+        "simplified scenes panel emitted non-ASCII characters:\n{badged}"
+    );
+    assert!(
+        badged.contains("streaming") && badged.contains("1 hidden"),
+        "the badge survives the fallback; got:\n{badged}"
+    );
+
+    model.update_snapshot(|snapshot| {
+        for scene in &mut snapshot.scenes {
+            scene.hidden = true;
+        }
+    });
+    let empty = buf_string(&draw_scenes(&model, 120));
+    assert!(
+        empty.is_ascii(),
+        "simplified empty pane emitted non-ASCII characters:\n{empty}"
+    );
+    assert!(
+        empty.contains("hides every scene"),
+        "and still explains itself; got:\n{empty}"
+    );
+}
+
+/// Before the daemon answers there is no snapshot at all: no scenes, nothing
+/// hidden, and therefore nothing to badge or explain.
+#[test]
+fn scenes_panel_without_a_snapshot_has_no_badge() {
+    let model = model_daemon_disconnected();
+    let out = buf_string(&draw_scenes(&model, 100));
+    assert!(out.contains("Scenes"), "the panel still draws; got:\n{out}");
+    assert!(
+        !out.contains("hidden"),
+        "an empty OBS is not a filtered one; got:\n{out}"
+    );
+}
+
 #[test]
 fn scenes_renders_alias_and_shortcut() {
     let model = model_connected();
@@ -2073,7 +2254,8 @@ fn scene_profile_naming_stage_shows_the_typed_name_over_the_scene_list() {
     let mut model = model_with_scene_profiles();
     model.open_scene_profiles();
     // Row 0 starts a profile that does not exist yet, which asks for a name
-    // first.
+    // first. The picker opens on the active profile, so aim at row 0 first.
+    model.scene_profile_set_cursor(0);
     model.scene_profile_confirm_picker();
     for c in "night shift".chars() {
         model.scene_profile_edit_name(|name| name.push(c));
@@ -2096,6 +2278,73 @@ fn scene_profile_naming_stage_shows_the_typed_name_over_the_scene_list() {
     assert!(
         out.contains("accept"),
         "the footer hint changes with the stage; got:\n{out}"
+    );
+}
+
+/// `d` sits next to `a` and the delete has no undo — the daemon rewrites the
+/// config file and keeps no backup — so the modal asks first, and the question
+/// names the profile rather than trusting the user to read the cursor.
+#[test]
+fn scene_profile_picker_asks_before_deleting_and_names_the_profile() {
+    let mut model = model_with_scene_profiles();
+    model.open_scene_profiles();
+    let armed = model.scene_profile_request_delete();
+    assert_eq!(armed.as_deref(), Some("streaming"));
+
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.contains("delete"),
+        "the footer asks the question; got:\n{out}"
+    );
+    assert!(
+        out.contains("streaming"),
+        "and names what is about to go; got:\n{out}"
+    );
+    assert!(
+        out.contains("y delete"),
+        "the key that confirms is spelled out; got:\n{out}"
+    );
+    assert!(
+        out.contains("n/esc keep") || out.contains("n/Esc keep"),
+        "and so is the way out; got:\n{out}"
+    );
+    assert!(
+        !out.contains("a activate"),
+        "the picker's own keys are off while the question is up; got:\n{out}"
+    );
+
+    // Answering "no" puts the ordinary footer back.
+    model.scene_profile_cancel_delete();
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.contains("a activate"),
+        "the picker footer returns; got:\n{out}"
+    );
+    assert!(
+        !out.contains("y delete"),
+        "and the question is gone; got:\n{out}"
+    );
+}
+
+/// The confirmation footer is a sentence with a name in it, which is exactly
+/// the kind of string an ASCII-only terminal has to be given a plain spelling
+/// of.
+#[test]
+fn the_delete_confirmation_stays_ascii_in_simplified_mode() {
+    let mut model = model_with_scene_profiles();
+    model.advanced_ui = false;
+    model.show_icons = false;
+    model.open_scene_profiles();
+    model.scene_profile_request_delete();
+
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.is_ascii(),
+        "simplified delete confirmation emitted non-ASCII characters:\n{out}"
+    );
+    assert!(
+        out.contains("streaming") && out.contains("y delete"),
+        "the question survives the fallback; got:\n{out}"
     );
 }
 
@@ -2241,7 +2490,9 @@ fn clicking_during_the_naming_stage_does_nothing() {
     let mut model = model_with_scene_profiles();
     model.open_scene_profiles();
     // Row 0 is "new scene profile", which opens straight onto the naming
-    // stage because a profile that does not exist yet has no name.
+    // stage because a profile that does not exist yet has no name. The picker
+    // opens on the active profile, so aim at row 0 first.
+    model.scene_profile_set_cursor(0);
     model.scene_profile_confirm_picker();
 
     let hits = Hitboxes {
@@ -2260,4 +2511,151 @@ fn clicking_during_the_naming_stage_does_nothing() {
         },
     );
     assert_eq!(action, None);
+}
+
+/// A model whose third scene profile still names a scene OBS no longer has —
+/// what a rename in OBS leaves behind in the config. `Old Intro` is in the
+/// profile's `hidden` list and in no snapshot scene, so nothing disappears on
+/// its account.
+fn model_with_a_stale_scene_profile() -> TuiModel {
+    use obsctl_rs::obs::state::SceneProfileState;
+
+    let mut model = model_with_scene_profiles();
+    model.update_snapshot(|snapshot| {
+        snapshot.scene_profiles.push(SceneProfileState {
+            name: "archive".into(),
+            hidden: vec!["Utility BG".into(), "Old Intro".into()],
+        });
+    });
+    model
+}
+
+/// Move the picker cursor onto the row for `profile`.
+fn select_scene_profile_row(model: &mut TuiModel, profile: &str) {
+    let row = model
+        .scene_profiles()
+        .iter()
+        .position(|p| p.name == profile)
+        .expect("profile in the snapshot");
+    // Row 0 of the picker is "new scene profile", so profile n sits at n + 1.
+    model.scene_profile_set_cursor(row + 1);
+}
+
+/// The count beside a profile has to be checkable against the dashboard. A
+/// profile listing two names of which only one is a scene hides one scene, and
+/// saying "2 hidden" would promise a row that is never going to disappear.
+#[test]
+fn a_profile_naming_a_scene_that_is_gone_says_how_many_of_its_entries_land() {
+    let mut model = model_with_a_stale_scene_profile();
+    model.open_scene_profiles();
+
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.contains("1 of 2 hidden"),
+        "the partial count names both numbers; got:\n{out}"
+    );
+    assert!(
+        out.contains("archive"),
+        "beside the profile it belongs to; got:\n{out}"
+    );
+    // The profile whose every entry lands keeps the plain count, so the longer
+    // wording is a signal rather than the norm.
+    assert!(
+        out.contains("1 hidden"),
+        "a profile with nothing stale still reads plainly; got:\n{out}"
+    );
+}
+
+/// The leftover entry itself needs a row, or it can neither be seen nor
+/// deleted: the toggle stage draws its rows from the scenes OBS has, and a
+/// name that matches none of them had nowhere to appear — while still being
+/// written back to the config on every save.
+#[test]
+fn a_scene_profile_entry_that_names_no_scene_is_listed_as_one_to_drop() {
+    let mut model = model_with_a_stale_scene_profile();
+    model.open_scene_profiles();
+    select_scene_profile_row(&mut model, "archive");
+    model.scene_profile_confirm_picker();
+
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.contains("Old Intro"),
+        "the leftover entry gets a row of its own; got:\n{out}"
+    );
+    assert!(
+        out.contains("not a scene OBS has"),
+        "and says why it is not a scene to hide or show; got:\n{out}"
+    );
+    assert!(
+        out.contains("press t to drop it"),
+        "and which key removes it; got:\n{out}"
+    );
+    assert!(
+        out.contains("Utility BG"),
+        "the entries that do name a scene are still ordinary rows; got:\n{out}"
+    );
+
+    // The row it points at is the one that goes away, and taking the last
+    // leftover entry out takes its row with it.
+    let last = model.scene_profile_rows().len() - 1;
+    model.scene_profile_set_cursor(last);
+    model.scene_profile_toggle_hidden();
+    let after = buf_string(&draw_scene_profile(&model));
+    assert!(
+        !after.contains("Old Intro"),
+        "dropping the entry removes its row; got:\n{after}"
+    );
+}
+
+/// Neither the partial count nor the leftover-entry row may reach for a glyph
+/// an ASCII-only terminal cannot draw.
+#[test]
+fn the_stale_entry_row_and_partial_count_stay_ascii_in_simplified_mode() {
+    let mut model = model_with_a_stale_scene_profile();
+    model.advanced_ui = false;
+    model.show_icons = false;
+    model.open_scene_profiles();
+
+    let picker = buf_string(&draw_scene_profile(&model));
+    assert!(
+        picker.is_ascii(),
+        "simplified picker emitted non-ASCII characters:\n{picker}"
+    );
+    assert!(
+        picker.contains("1 of 2 hidden"),
+        "the partial count survives the fallback; got:\n{picker}"
+    );
+
+    select_scene_profile_row(&mut model, "archive");
+    model.scene_profile_confirm_picker();
+    let scenes = buf_string(&draw_scene_profile(&model));
+    assert!(
+        scenes.is_ascii(),
+        "simplified toggle stage emitted non-ASCII characters:\n{scenes}"
+    );
+    assert!(
+        scenes.contains("Old Intro") && scenes.contains("not a scene OBS has"),
+        "and the leftover entry still explains itself; got:\n{scenes}"
+    );
+}
+
+/// The two numbers a user needs to tell "the profile is working" from "the
+/// scene list is broken" are both in the title: the count badge is how many
+/// scenes are listed, the profile badge is how many are being held back, and
+/// together they add up to what OBS has.
+#[test]
+fn the_scenes_panel_title_reads_as_shown_out_of_total() {
+    let model = model_with_scene_profiles();
+    assert_eq!(model.scenes().len(), 2);
+    assert_eq!(model.all_scenes().len(), 3);
+
+    let out = buf_string(&draw_scenes(&model, 100));
+    assert!(
+        out.contains(" 02 "),
+        "the count badge is how many rows are listed; got:\n{out}"
+    );
+    assert!(
+        out.contains("1 hidden"),
+        "and the profile badge is the rest of the total; got:\n{out}"
+    );
 }

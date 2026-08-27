@@ -157,10 +157,7 @@ fn index_at(
             model.panel_cursor(panel),
             pos,
         ),
-        other => {
-            let heights = vec![1u16; model.panel_len(other)];
-            index_at_row(area, &heights, hits.offsets[other], pos.y)
-        }
+        other => index_at_row(area, model.panel_len(other), hits.offsets[other], pos.y),
     }
 }
 
@@ -170,30 +167,23 @@ fn index_at(
 /// `first` is the item Ratatui actually drew at the top, from the frame that
 /// produced these hitboxes — not a re-derivation of where it ought to have
 /// scrolled to.
-fn index_at_row(area: Rect, heights: &[u16], first: usize, y: u16) -> Option<usize> {
-    index_at_content_row(inner(area), heights, first, y)
+fn index_at_row(area: Rect, len: usize, first: usize, y: u16) -> Option<usize> {
+    index_at_content_row(inner(area), len, first, y)
 }
 
 /// [`index_at_row`] for a list whose content rect is already known, which is
 /// the case inside the scene-profile modal: its list is one section of the
 /// popup's interior, not a bordered panel of its own.
-fn index_at_content_row(inner: Rect, heights: &[u16], first: usize, y: u16) -> Option<usize> {
+///
+/// Every list here draws one row per item, so the item under `y` is plain
+/// arithmetic: the row's offset into the pane plus `first`, bounds-checked
+/// against `len` and the pane's height.
+fn index_at_content_row(inner: Rect, len: usize, first: usize, y: u16) -> Option<usize> {
     if inner.height == 0 || y < inner.y || y >= inner.y.saturating_add(inner.height) {
         return None;
     }
-    let bottom = inner.y.saturating_add(inner.height);
-    let mut row = inner.y;
-    for (index, height) in heights.iter().enumerate().skip(first) {
-        let next = row.saturating_add(*height);
-        if y < next {
-            return Some(index);
-        }
-        row = next;
-        if row >= bottom {
-            break;
-        }
-    }
-    None
+    let index = first.checked_add(usize::from(y - inner.y))?;
+    (index < len).then_some(index)
 }
 
 /// Map a mouse event onto an action, or `None` when it lands somewhere with
@@ -218,10 +208,13 @@ pub fn handle_mouse(model: &TuiModel, hits: &Hitboxes, event: MouseEvent) -> Opt
 /// Mouse inside the scene-profile editor: the wheel and a left-click move its
 /// cursor, and a right-click is the Esc of whichever stage is up.
 ///
-/// Deliberately no "click the selected row again to act on it" as the settings
-/// list has. There the repeated click applies a theme, which is undone by
-/// picking another; here the stage's Enter either leaves the picker or writes
-/// the config file, and neither belongs on a double-click.
+/// Clicking the already-selected picker row switches that profile on, so a
+/// double-click reads as "select, then activate" — the same gesture the
+/// settings list uses to apply the theme it is previewing. Activating is the
+/// one thing here that repeating undoes nothing: switching a profile on is
+/// undone by switching another on, or by `c`. The rows on the toggle stage
+/// stay select-only, because the second click there would land on Enter,
+/// which writes the config file.
 fn scene_profile_mouse(
     model: &TuiModel,
     hits: &Hitboxes,
@@ -229,6 +222,17 @@ fn scene_profile_mouse(
     pos: Position,
 ) -> Option<TuiAction> {
     let stage = model.scene_profile.as_ref()?.stage;
+
+    // A delete waiting to be confirmed is a question, and the mouse cannot
+    // answer it: `y` is the only yes there is. Any click while it is up means
+    // "no", the same as it does for every key that is not `y`, so the profile
+    // survives a click aimed at whatever the modal was showing a moment ago.
+    if model.scene_profile_pending_delete().is_some() {
+        return match event.kind {
+            MouseEventKind::Down(_) => Some(TuiAction::SceneProfileDeleteCancel),
+            _ => None,
+        };
+    }
 
     // Right-click is the mouse's Esc throughout the UI, and Esc means a
     // different thing on each stage of this modal.
@@ -250,14 +254,23 @@ fn scene_profile_mouse(
         // naming overlay belong to the stage behind it, and moving that cursor
         // out from under a half-typed name is not what a click there means.
         MouseEventKind::Down(MouseButton::Left) if stage != SceneProfileStage::Naming => {
-            let heights = vec![1u16; model.scene_profile_rows().len()];
+            let rows = model.scene_profile_rows();
             let index = index_at_content_row(
                 hits.scene_profile_list,
-                &heights,
+                rows.len(),
                 hits.offsets.scene_profile,
                 event.row,
             )?;
-            Some(TuiAction::SceneProfileSelect(index))
+            // Row 0 of the picker makes a profile that does not exist yet, so
+            // there is nothing for a second click there to switch on.
+            let repeat = stage == SceneProfileStage::Picker
+                && rows.get(index).is_some_and(|row| row.selected)
+                && index > 0;
+            if repeat {
+                Some(TuiAction::SceneProfileActivate)
+            } else {
+                Some(TuiAction::SceneProfileSelect(index))
+            }
         }
         _ => None,
     }
@@ -280,10 +293,9 @@ fn settings_mouse(
         MouseEventKind::ScrollUp => Some(TuiAction::NavUp(WHEEL_ROWS)),
         MouseEventKind::ScrollDown => Some(TuiAction::NavDown(WHEEL_ROWS)),
         MouseEventKind::Down(MouseButton::Left) => {
-            let heights = vec![1u16; crate::tui::theme::ALL.len()];
             let index = index_at_row(
                 hits.settings_list,
-                &heights,
+                crate::tui::theme::ALL.len(),
                 hits.offsets.settings,
                 event.row,
             )?;
@@ -641,6 +653,55 @@ mod tests {
         assert_eq!(
             handle_mouse(&model, &hits, click(5, 4)),
             Some(TuiAction::ApplySettingsTheme)
+        );
+    }
+
+    /// The picker behaves like every other list in the UI: the first click
+    /// selects a row and a second click on the same row acts on it. It used to
+    /// only ever re-select, which left the mouse with no way at all to switch a
+    /// scene profile on.
+    #[test]
+    fn scene_profile_rows_select_on_click_and_activate_on_a_second_click() {
+        use crate::obs::state::SceneProfileState;
+
+        let mut model = TuiModel::default();
+        model.set_snapshot(ObsSnapshot {
+            scene_profiles: vec![
+                SceneProfileState {
+                    name: "streaming".to_string(),
+                    hidden: Vec::new(),
+                },
+                SceneProfileState {
+                    name: "recording".to_string(),
+                    hidden: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        });
+        model.open_scene_profiles();
+        let hits = Hitboxes {
+            view: HitView::SceneProfile,
+            scene_profile_list: Rect::new(0, 0, 30, 20),
+            ..Default::default()
+        };
+
+        // The editor opens on row 1, so row 2 is a different row: it selects.
+        assert_eq!(
+            handle_mouse(&model, &hits, click(5, 2)),
+            Some(TuiAction::SceneProfileSelect(2))
+        );
+        model.scene_profile_set_cursor(2);
+        assert_eq!(
+            handle_mouse(&model, &hits, click(5, 2)),
+            Some(TuiAction::SceneProfileActivate)
+        );
+
+        // Row 0 names a profile that does not exist yet, so clicking it twice
+        // still only selects it.
+        model.scene_profile_set_cursor(0);
+        assert_eq!(
+            handle_mouse(&model, &hits, click(5, 0)),
+            Some(TuiAction::SceneProfileSelect(0))
         );
     }
 }

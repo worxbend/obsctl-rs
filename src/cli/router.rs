@@ -215,19 +215,17 @@ fn run_init(config_path: Option<&std::path::Path>, force: bool) -> i32 {
 
 fn run_validate_config(config_path: Option<&std::path::Path>) -> i32 {
     let Some(path) = config_path else {
-        {
-            // The wording is this command's own localized line; only the exit
-            // code comes from the error value. `ObsctlError::exit_code()` is
-            // the documented local classification (README "Exit Codes"), so
-            // "no usable config means 2" is decided in exactly one place
-            // instead of being re-typed as a literal here.
-            eprintln!(
-                "{}",
-                t!("common.error", message = t!("cli.validate.no_config_path"))
-            );
-            return ObsctlError::ConfigNotFound(t!("cli.validate.no_config_path").to_string())
-                .exit_code();
-        }
+        // The wording is this command's own localized line; only the exit
+        // code comes from the error value. `ObsctlError::exit_code()` is
+        // the documented local classification (README "Exit Codes"), so
+        // "no usable config means 2" is decided in exactly one place
+        // instead of being re-typed as a literal here.
+        eprintln!(
+            "{}",
+            t!("common.error", message = t!("cli.validate.no_config_path"))
+        );
+        return ObsctlError::ConfigNotFound(t!("cli.validate.no_config_path").to_string())
+            .exit_code();
     };
 
     let (_config, warnings) = match crate::config::loader::load_with_warnings(path) {
@@ -596,15 +594,20 @@ enum ProxyRequest {
 fn proxy_payload(cmd: &Commands) -> ProxyRequest {
     use crate::ipc::protocol::ServerCommand;
 
-    /// Validate a target name, then build a payload that carries it.
-    fn with_target(command: ServerCommand, target: &str) -> ProxyRequest {
+    /// Validate a target name, then build whatever payload `make` derives
+    /// from it.
+    fn send_with_target(target: &str, make: impl FnOnce(&str) -> CommandPayload) -> ProxyRequest {
         match client_commands::sanitize_target_arg(target) {
-            Ok(target) => ProxyRequest::Send(
-                CommandPayload::with_target(command, &target),
-                client_commands::print_result_message,
-            ),
+            Ok(target) => ProxyRequest::Send(make(&target), client_commands::print_result_message),
             Err(error) => ProxyRequest::Invalid(error),
         }
+    }
+
+    /// Validate a target name, then build a payload that carries it.
+    fn with_target(command: ServerCommand, target: &str) -> ProxyRequest {
+        send_with_target(target, |target| {
+            CommandPayload::with_target(command, target)
+        })
     }
 
     /// Build a payload with no arguments.
@@ -615,12 +618,21 @@ fn proxy_payload(cmd: &Commands) -> ProxyRequest {
         )
     }
 
+    /// Ask the daemon which scene profiles are configured and which is active.
+    ///
+    /// Two subcommands reach it — `scene-profiles`, and `scene-profile` with
+    /// nothing else on the line — so it is written once here.
+    fn list_scene_profiles() -> ProxyRequest {
+        ProxyRequest::Send(
+            CommandPayload::simple(ServerCommand::ListSceneProfiles),
+            client_commands::print_result_fields,
+        )
+    }
+
     match cmd {
-        // `status` is the one command whose result is a structure rather than a
-        // sentence, so it gets its own renderer.
         Commands::Status => ProxyRequest::Send(
             CommandPayload::simple(ServerCommand::GetSnapshot),
-            client_commands::print_status_json,
+            client_commands::print_result_fields,
         ),
         Commands::ObsStatus => simple(ServerCommand::GetObsStatus),
         Commands::ServerStatus => simple(ServerCommand::GetServerStatus),
@@ -636,23 +648,30 @@ fn proxy_payload(cmd: &Commands) -> ProxyRequest {
         Commands::Mute { target } => with_target(ServerCommand::Mute, target),
         Commands::Unmute { target } => with_target(ServerCommand::Unmute, target),
         Commands::ToggleMute { target } => with_target(ServerCommand::ToggleMute, target),
-        // A scene profile name is optional: given one, it is activated; given
-        // none, whatever was active is cleared. These are two distinct daemon
-        // commands rather than one command with an empty target, because a
-        // blank target is rejected by name validation before it could ever mean
-        // "clear".
-        Commands::SceneProfile { target } => match target {
-            Some(target) => with_target(ServerCommand::SetSceneProfile, target),
-            None => simple(ServerCommand::ClearSceneProfile),
-        },
-        // `list_scene_profiles` answers with a structure (`active` plus a list)
-        // rather than a sentence, so it borrows `status`'s renderer instead of
-        // the one that looks for a `message` field and would fall back to
-        // printing raw JSON.
-        Commands::SceneProfiles => ProxyRequest::Send(
-            CommandPayload::simple(ServerCommand::ListSceneProfiles),
-            client_commands::print_status_json,
-        ),
+        // One subcommand, four daemon commands. clap has already guaranteed
+        // that at most one of the name, `--off` and `--delete` is present, so
+        // these branches are alternatives rather than a precedence order, and
+        // the remaining case — nothing given at all — is the read-only one.
+        //
+        // Activate, clear and delete are three distinct daemon commands rather
+        // than one command with a special target, because a blank target is
+        // rejected by name validation before it could ever mean "clear".
+        Commands::SceneProfile {
+            target,
+            off,
+            delete,
+        } => {
+            if let Some(target) = target {
+                with_target(ServerCommand::SetSceneProfile, target)
+            } else if let Some(name) = delete {
+                with_target(ServerCommand::DeleteSceneProfile, name)
+            } else if *off {
+                simple(ServerCommand::ClearSceneProfile)
+            } else {
+                list_scene_profiles()
+            }
+        }
+        Commands::SceneProfiles => list_scene_profiles(),
         Commands::Vol { target, percent } => {
             // clap already limits this argument to 0..=100, but
             // `CommandPayload::set_volume` is reachable from tests and from any
@@ -663,13 +682,9 @@ fn proxy_payload(cmd: &Commands) -> ProxyRequest {
                     "percent must be 0-100".to_string(),
                 ));
             }
-            match client_commands::sanitize_target_arg(target) {
-                Ok(target) => ProxyRequest::Send(
-                    CommandPayload::set_volume(&target, *percent),
-                    client_commands::print_result_message,
-                ),
-                Err(error) => ProxyRequest::Invalid(error),
-            }
+            send_with_target(target, |target| {
+                CommandPayload::set_volume(target, *percent)
+            })
         }
         // Listed rather than caught by a wildcard: these are the modes the
         // router handles itself before it gets here, so a newly added
@@ -854,24 +869,50 @@ mod tests {
         }
     }
 
-    /// A missing scene-profile name is the "clear" instruction, not a blank
-    /// target — which is what makes `scene-profile` with no argument usable at
-    /// all, since a blank target would be rejected by name validation.
+    /// Each of the four forms of `scene-profile` becomes a different daemon
+    /// command. The one that matters most is the last: with nothing given, the
+    /// subcommand *reports*. It used to clear, so the natural way to ask which
+    /// profile was active was also the way to switch it off.
     #[test]
-    fn scene_profile_without_a_name_clears_and_with_a_name_activates() {
+    fn each_form_of_scene_profile_becomes_its_own_daemon_command() {
         let cases = [
-            (None, "clear_scene_profile"),
-            (Some("streaming"), "set_scene_profile"),
+            (Some("streaming"), false, None, "set_scene_profile"),
+            (None, true, None, "clear_scene_profile"),
+            (None, false, Some("night"), "delete_scene_profile"),
+            (None, false, None, "list_scene_profiles"),
         ];
 
-        for (target, expected) in cases {
+        for (target, off, delete, expected) in cases {
             let command = Commands::SceneProfile {
                 target: target.map(str::to_string),
+                off,
+                delete: delete.map(str::to_string),
             };
             match proxy_payload(&command) {
                 ProxyRequest::Send(payload, _) => assert_eq!(payload.name, expected),
                 _ => panic!("{command:?} must become a request"),
             }
+        }
+    }
+
+    /// The bare form and `scene-profiles` are the same request, so a user who
+    /// guesses either spelling gets the same answer.
+    #[test]
+    fn bare_scene_profile_sends_the_same_listing_as_scene_profiles() {
+        let bare = Commands::SceneProfile {
+            target: None,
+            off: false,
+            delete: None,
+        };
+        match (
+            proxy_payload(&bare),
+            proxy_payload(&Commands::SceneProfiles),
+        ) {
+            (ProxyRequest::Send(one, _), ProxyRequest::Send(other, _)) => {
+                assert_eq!(one.name, other.name);
+                assert_eq!(one.args, other.args);
+            }
+            _ => panic!("both spellings must become a request"),
         }
     }
 

@@ -60,7 +60,9 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
         "profile" | "set-profile" => model.profiles().to_vec(),
         // The obsctl scene profiles, which the daemon publishes in the same
         // snapshot as the OBS profiles above and which are a different thing.
-        "scene-profile" | "set-scene-profile" => model.scene_profile_names(),
+        "scene-profile" | "set-scene-profile" | "scene-profile-delete" | "delete-scene-profile" => {
+            model.scene_profile_names()
+        }
         "collection" | "set-collection" | "scene-collection" => model.scene_collections().to_vec(),
         "mute" | "unmute" | "toggle-mute" | "vol" | "volume" => model
             .audio_inputs()
@@ -136,6 +138,7 @@ mod tests {
             vec![
                 "/scene".to_string(),
                 "/scene-profile".to_string(),
+                "/scene-profile-delete".to_string(),
                 "/scene-profile-off".to_string(),
             ]
         );
@@ -149,6 +152,7 @@ mod tests {
             vec![
                 ":scene".to_string(),
                 ":scene-profile".to_string(),
+                ":scene-profile-delete".to_string(),
                 ":scene-profile-off".to_string(),
             ]
         );
@@ -159,6 +163,7 @@ mod tests {
             vec![
                 "scene".to_string(),
                 "scene-profile".to_string(),
+                "scene-profile-delete".to_string(),
                 "scene-profile-off".to_string(),
             ]
         );

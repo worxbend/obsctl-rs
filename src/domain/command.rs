@@ -29,6 +29,12 @@ pub enum Command {
     /// Stop using any scene profile, so the per-scene `hidden` flags decide
     /// again.
     ClearSceneProfile,
+    /// Remove a scene profile from the config for good. Deleting the active
+    /// one also switches filtering off, which is the daemon's doing rather
+    /// than a second instruction sent from here.
+    DeleteSceneProfile {
+        target: String,
+    },
     Mute {
         target: String,
     },

@@ -69,8 +69,23 @@ tui:
 
   splash:
     preparing: "Підготовка..."
+    tagline: "Керування трансляцією, не збиваючи ритм."
+    description: "Сцени, звук, профілі, запис і жива телеметрія — один центр керування."
+    description_ascii: "Сцени, звук, профілі, запис і жива телеметрія."
+    initializing_title: "ІНІЦІАЛІЗАЦІЯ КЕРУВАННЯ ТРАНСЛЯЦІЄЮ"
+    startup_title_ascii: " ЗАПУСК OBSCTL "
+    studio_link_title: " СТУДІЙНИЙ ЗВ'ЯЗОК // ЗАХИЩЕНА СЕСІЯ "
+    initializing_studio_link: "%{tick} ініціалізація студійного зв'язку"
+    boot_loading: "завантаження панелей керування"
+    boot_warming: "прогрів рушія анімації"
+    boot_syncing: "синхронізація телеметрії OBS"
+    boot_painting: "малювання центру керування"
+    boot_ready: "готово"
 
   header:
+    title: " ◈ OBSCTL // ЦЕНТР КЕРУВАННЯ ТРАНСЛЯЦІЄЮ "
+    title_ascii: " OBSCTL // ЦЕНТР КЕРУВАННЯ ТРАНСЛЯЦІЄЮ "
+    subtitle: "  консоль автоматизації студії"
     daemon_connected: "демон: з'єднано"
     daemon_disconnected: "демон: не з'єднано"
     obs_connected: "OBS: з'єднано (v%{version})"
@@ -132,8 +147,13 @@ tui:
   panels:
     scenes:
       title: "Сцени"
-      hint: "[s]  ↵ перемкнути"
-      hint_ascii: "[s]  Enter перемкнути"
+      hint: "[s]  ↵ перемкнути  ·  P профіль"
+      hint_ascii: "[s]  Enter перемкнути  |  P профіль"
+      badge_profile: "%{name} — приховано: %{count}"
+      badge_filtered: "приховано: %{count}"
+      badge_profile_empty: "%{name} — нічого не приховано"
+      all_hidden_by_profile: "профіль сцен %{name} приховує всі сцени — натисніть P, щоб перейти до наступного профілю, або <space>P, а потім c, щоб вимкнути його"
+      all_hidden: "усі сцени приховані конфігурацією — натисніть P, щоб спробувати профіль сцен"
 
     profiles:
       title: "Профілі"
@@ -187,14 +207,64 @@ tui:
       active_marker: "★ активний"
       active_marker_ascii: "* активний"
       hidden_count: "приховано: %{count}"
+      hidden_count_partial: "приховано: %{count} з %{listed}"
+      new_row_selected: "цей рядок створює новий профіль сцен — натисніть ↵, щоб почати"
+      new_row_selected_ascii: "цей рядок створює новий профіль сцен - натисніть Enter, щоб почати"
       name_prompt: "назва: "
       name_blank: "профіль сцен потребує назви"
       name_taken: "інший профіль сцен уже має таку назву"
       hint_picker: "↑↓ рух · ↵ редагувати · a активувати · c скинути · d видалити · esc закрити"
       hint_picker_ascii: "jk рух | Enter редагувати | a активувати | c скинути | d видалити | Esc закрити"
+      hint_confirm_delete: "видалити «%{name}»? · y видалити · n/esc залишити"
+      hint_confirm_delete_ascii: "видалити \"%{name}\"? | y видалити | n/Esc залишити"
+      delete_asked: "видалити профіль сцен «%{name}»? натисніть y, щоб видалити, або n, щоб залишити"
+      delete_asked_ascii: "видалити профіль сцен \"%{name}\"? натисніть y, щоб видалити, або n, щоб залишити"
+      delete_cancelled: "профіль сцен залишено: %{name}"
       hint_scenes: "↑↓ рух · t сховати/показати · n перейменувати · ↵ зберегти · esc назад"
       hint_scenes_ascii: "jk рух | t сховати/показати | n перейменувати | Enter зберегти | Esc назад"
       hint_naming: "введіть назву · ↵ підтвердити · esc скасувати"
       hint_naming_ascii: "введіть назву | Enter підтвердити | Esc скасувати"
       state_hidden: "приховано"
       state_visible: "видимо"
+      state_missing: "такої сцени в OBS немає — натисніть t, щоб прибрати"
+      state_missing_ascii: "такої сцени в OBS немає - натисніть t, щоб прибрати"
+      activated: "профіль сцен увімкнено: %{name} - приховано сцен: %{count}"
+      saved: "профіль сцен збережено: %{name} (приховує сцен: %{count}) - він не активний, тому список сцен не змінився"
+      saved_active: "профіль сцен збережено: %{name} - він активний, тому список сцен тепер приховує сцен: %{count}"
+      saved_and_activated: "профіль сцен створено й увімкнено: %{name} - приховано сцен: %{count}"
+      activation_failed: "профіль сцен збережено: %{name}, але перемкнутися на нього не вдалося (%{error})"
+      cleared: "профіль сцен вимкнено - знову діє власне налаштування hidden кожної сцени"
+      warnings_suffix: "(попереджень у конфігурації: %{count} - див. панель журналу)"
+      none_defined: "профілів сцен не визначено - натисніть <space>P, щоб створити"
+
+  # Рядки статусу від диспетчера дій (`tui::actions`).
+  actions:
+    reconnected: "Повторно під'єднано до демона."
+    retry_failed: "Повторна спроба не вдалася: %{error}"
+    icons_on: "значки увімкнено"
+    icons_off: "значки вимкнено"
+    advanced_ui_on: "розширений інтерфейс увімкнено"
+    advanced_ui_off: "розширений інтерфейс вимкнено"
+    theme_set: "тему встановлено: %{theme}"
+    theme_applied_no_config: "тему застосовано (немає файла конфігурації для збереження)"
+    theme_applied_read_failed: "тему застосовано, але не вдалося прочитати конфігурацію: %{error}"
+    theme_applied_save_failed: "тему застосовано, але не вдалося зберегти конфігурацію: %{error}"
+
+  # Повідомлення циклу подій про сам IPC-сеанс (`tui::app`).
+  session:
+    cannot_connect: "Не вдалося під'єднатися до демона: %{error}"
+    daemon_disconnected: "Демон від'єднався: %{error}"
+
+  # Однорядкові відповіді демона та перевірки, що зупиняють запит до
+  # відправлення (`tui::daemon`).
+  daemon:
+    help_line: "Команди: %{commands}  —  <space> відкриває меню which-key"
+    reply_error: "помилка: %{error}"
+    reply_error_bare: "помилка"
+    reply_error_with_code: "помилка [%{code}]: %{message}"
+    unexpected_response: "неочікувана відповідь"
+    volume_out_of_range: "відсоток гучності має бути в межах 0-100"
+    invalid_target: "помилка: неприпустима ціль: %{error}"
+    invalid_scene_name: "помилка: неприпустима назва сцени: %{error}"
+    too_many_hidden_scenes: "помилка: профіль сцен може приховувати щонайбільше %{max} сцен"
+    volume_set: "гучність → %{percent}%"

@@ -16,11 +16,12 @@ use crate::{
     tui::{
         app::spawn_session_forwarder,
         daemon::{
-            PaletteOutcome, ReplyStyle, dispatch_palette_command, send_save_scene_profile,
+            PaletteOutcome, ReplyStyle, activate_scene_profile, clear_scene_profile,
+            dispatch_palette_command, save_and_maybe_activate_scene_profile,
             send_simple_with_target,
         },
         input::TuiAction,
-        model::{CommandPaletteState, FocusPanel, TextField, TuiModel},
+        model::{CommandPaletteState, FocusPanel, SceneProfileCycle, TextField, TuiModel},
         mouse::Hitboxes,
         render::half_page,
         session::TuiEventSession,
@@ -115,6 +116,11 @@ enum DaemonWork {
         hidden: Vec<String>,
         editing: Option<String>,
     },
+    /// Switch this scene profile on, so only the scenes it does not hide are
+    /// left in the list.
+    SceneProfileActivate(String),
+    /// Switch scene-profile filtering off again.
+    SceneProfileClear,
 }
 
 impl DaemonWork {
@@ -131,9 +137,9 @@ impl DaemonWork {
                 Ok(session) => {
                     model.connected_to_daemon = true;
                     spawn_session_forwarder(session, ctx.ipc_tx.clone());
-                    ActionOutcome::status("Reconnected to daemon.")
+                    ActionOutcome::status(t!("tui.actions.reconnected"))
                 }
-                Err(e) => ActionOutcome::status(format!("Retry failed: {e}")),
+                Err(e) => ActionOutcome::status(t!("tui.actions.retry_failed", error = e)),
             },
             DaemonWork::PaletteSubmit(input) => {
                 match dispatch_palette_command(socket_path, &input).await {
@@ -155,13 +161,30 @@ impl DaemonWork {
             // was the active one, because a delete of the active profile is
             // supposed to do exactly that. Telling the daemon which entry is
             // being replaced lets it move that entry in place instead.
+            //
+            // A profile that did not exist before the keypress is switched on
+            // by the same keypress: building one and then finding the scene
+            // list unchanged is what made this feature look broken. Which
+            // saves qualify is decided from the reply, in `tui::daemon`.
             DaemonWork::SceneProfileSave {
                 name,
                 hidden,
                 editing,
             } => ActionOutcome::Status(
-                send_save_scene_profile(socket_path, &name, &hidden, editing.as_deref()).await,
+                save_and_maybe_activate_scene_profile(
+                    socket_path,
+                    &name,
+                    &hidden,
+                    editing.as_deref(),
+                )
+                .await,
             ),
+            DaemonWork::SceneProfileActivate(name) => {
+                ActionOutcome::Status(activate_scene_profile(socket_path, &name).await)
+            }
+            DaemonWork::SceneProfileClear => {
+                ActionOutcome::Status(clear_scene_profile(socket_path).await)
+            }
         }
     }
 }
@@ -372,13 +395,21 @@ fn dispatch(action: TuiAction, model: &mut TuiModel, ctx: &ActionCtx<'_>) -> Dis
         // --- appearance and the settings view ---
         TuiAction::ToggleIcons => {
             model.show_icons = !model.show_icons;
-            let state = if model.show_icons { "on" } else { "off" };
-            Dispatched::Done(ActionOutcome::status(format!("icons {state}")))
+            let key = if model.show_icons {
+                "tui.actions.icons_on"
+            } else {
+                "tui.actions.icons_off"
+            };
+            Dispatched::Done(ActionOutcome::status(t!(key)))
         }
         TuiAction::ToggleAdvancedUi => {
             model.advanced_ui = !model.advanced_ui;
-            let state = if model.advanced_ui { "on" } else { "off" };
-            Dispatched::Done(ActionOutcome::status(format!("advanced UI {state}")))
+            let key = if model.advanced_ui {
+                "tui.actions.advanced_ui_on"
+            } else {
+                "tui.actions.advanced_ui_off"
+            };
+            Dispatched::Done(ActionOutcome::status(t!(key)))
         }
         TuiAction::OpenSettings => {
             model.open_theme_picker();
@@ -419,6 +450,18 @@ fn dispatch(action: TuiAction, model: &mut TuiModel, ctx: &ActionCtx<'_>) -> Dis
             model.open_scene_profiles();
             done()
         }
+        // The one scene-profile action that needs no modal: it reads the
+        // cycle's next step off the snapshot and sends it. The status line it
+        // produces is the same one the picker's `a` and the palette's
+        // `:scene-profile` produce, so switching profiles reads the same
+        // whichever way the user reached it.
+        TuiAction::SceneProfileCycleNext => match model.next_scene_profile() {
+            SceneProfileCycle::Activate(name) => daemon(DaemonWork::SceneProfileActivate(name)),
+            SceneProfileCycle::Baseline => daemon(DaemonWork::SceneProfileClear),
+            SceneProfileCycle::Undefined => Dispatched::Done(ActionOutcome::status(
+                t!("tui.panels.scene_profiles.none_defined").into_owned(),
+            )),
+        },
         TuiAction::CloseSceneProfiles => {
             model.close_scene_profiles();
             done()
@@ -442,17 +485,31 @@ fn dispatch(action: TuiAction, model: &mut TuiModel, ctx: &ActionCtx<'_>) -> Dis
         TuiAction::SceneProfileActivate => match selected_scene_profile_name(model) {
             Some(name) => {
                 model.close_scene_profiles();
-                daemon(DaemonWork::Targeted(ServerCommand::SetSceneProfile, name))
+                daemon(DaemonWork::SceneProfileActivate(name))
             }
-            // Row 0 is the "new scene profile" row: there is nothing to
-            // activate yet.
-            None => done(),
+            None => new_scene_profile_row_status(model),
         },
         TuiAction::SceneProfileClearActive => {
             model.close_scene_profiles();
-            simple(ServerCommand::ClearSceneProfile, ReplyStyle::Acknowledge)
+            daemon(DaemonWork::SceneProfileClear)
         }
-        TuiAction::SceneProfileDelete => match selected_scene_profile_name(model) {
+        // `d` asks; it does not delete. The daemon rewrites the config file
+        // and keeps no backup, so the profile is gone for good once the
+        // command is sent — and `d` sits one key away from `a`.
+        TuiAction::SceneProfileDelete => match model.scene_profile_request_delete() {
+            Some(name) => Dispatched::Done(ActionOutcome::status(
+                t!(
+                    model.symbol(
+                        "tui.panels.scene_profiles.delete_asked",
+                        "tui.panels.scene_profiles.delete_asked_ascii",
+                    ),
+                    name = name
+                )
+                .into_owned(),
+            )),
+            None => new_scene_profile_row_status(model),
+        },
+        TuiAction::SceneProfileDeleteConfirm => match model.scene_profile_confirm_delete() {
             Some(name) => {
                 model.close_scene_profiles();
                 daemon(DaemonWork::Targeted(
@@ -460,8 +517,22 @@ fn dispatch(action: TuiAction, model: &mut TuiModel, ctx: &ActionCtx<'_>) -> Dis
                     name,
                 ))
             }
+            // Nothing was armed, so there is nothing to confirm: a `y` that
+            // arrived after the question had already been answered.
             None => done(),
         },
+        TuiAction::SceneProfileDeleteCancel => {
+            let name = model
+                .scene_profile_pending_delete()
+                .map(ToString::to_string);
+            model.scene_profile_cancel_delete();
+            match name {
+                Some(name) => Dispatched::Done(ActionOutcome::status(
+                    t!("tui.panels.scene_profiles.delete_cancelled", name = name).into_owned(),
+                )),
+                None => done(),
+            }
+        }
         TuiAction::SceneProfileToggleHidden => {
             model.scene_profile_toggle_hidden();
             done()
@@ -514,6 +585,23 @@ fn selected_scene_profile_name(model: &TuiModel) -> Option<String> {
     model
         .selected_scene_profile()
         .map(|profile| profile.name.clone())
+}
+
+/// What the keys that need a profile say when the cursor is on the row that
+/// has none: the "new scene profile" row.
+///
+/// These used to return silently, which is indistinguishable from a broken
+/// key — the footer at that moment is advertising `a activate` and
+/// `d delete`, so the one thing the user must not conclude is that the
+/// feature does not work.
+fn new_scene_profile_row_status(model: &TuiModel) -> Dispatched {
+    Dispatched::Done(ActionOutcome::status(
+        t!(model.symbol(
+            "tui.panels.scene_profiles.new_row_selected",
+            "tui.panels.scene_profiles.new_row_selected_ascii",
+        ))
+        .into_owned(),
+    ))
 }
 
 /// Enter on the scene list: hand the profile to the daemon, or — when it has
@@ -575,16 +663,16 @@ fn volume_delta(steps: usize) -> i16 {
 /// palette result line but never block applying the theme in-memory.
 async fn persist_theme_choice(config_path: Option<&Path>, theme_id: &str) -> String {
     let Some(path) = config_path else {
-        return "theme applied (no config file to persist to)".to_string();
+        return t!("tui.actions.theme_applied_no_config").into_owned();
     };
     let mut config = match loader::load_or_default(path) {
         Ok(config) => config,
-        Err(e) => return format!("theme applied, but reading config failed: {e}"),
+        Err(e) => return t!("tui.actions.theme_applied_read_failed", error = e).into_owned(),
     };
     config.ui.theme = theme_id.to_string();
     match writer::write_atomic(&config, path) {
-        Ok(()) => format!("theme set: {theme_id}"),
-        Err(e) => format!("theme applied, but saving config failed: {e}"),
+        Ok(()) => t!("tui.actions.theme_set", theme = theme_id).into_owned(),
+        Err(e) => t!("tui.actions.theme_applied_save_failed", error = e).into_owned(),
     }
 }
 
@@ -608,7 +696,8 @@ fn adjust_focused_volume(
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionCtx, ActionOutcome, Dispatched, dispatch, persist_theme_choice};
+    use super::{ActionCtx, ActionOutcome, DaemonWork, Dispatched, dispatch, persist_theme_choice};
+    use crate::ipc::protocol::ServerCommand;
     use crate::obs::state::{AudioState, ObsSnapshot, SceneProfileState, SceneState};
     use crate::tui::input::TuiAction;
     use crate::tui::keymap::Pending;
@@ -788,6 +877,8 @@ mod tests {
             TuiAction::SceneProfilePickerConfirm,
             TuiAction::SceneProfileActivate,
             TuiAction::SceneProfileDelete,
+            TuiAction::SceneProfileDeleteConfirm,
+            TuiAction::SceneProfileDeleteCancel,
             TuiAction::SceneProfileToggleHidden,
             TuiAction::SceneProfileBeginNaming,
             TuiAction::SceneProfileNameChar('x'),
@@ -861,14 +952,18 @@ mod tests {
         let owned = LocalCtx::new();
         let ctx = owned.ctx();
 
-        // Row 1 is the defined profile, so activating and deleting both have a
-        // name to send.
+        // Row 1 is the defined profile, and the picker opens on it, so
+        // activating has a name to send. Deleting is the odd one out: it is
+        // two keypresses, and only the second reaches the daemon — see
+        // `deleting_a_scene_profile_waits_for_a_confirmation`.
         for action in [
             TuiAction::SceneProfileActivate,
-            TuiAction::SceneProfileDelete,
+            TuiAction::SceneProfileDeleteConfirm,
         ] {
             let mut model = scene_profile_model();
-            model.scene_profile_nav(1, 1);
+            if action == TuiAction::SceneProfileDeleteConfirm {
+                model.scene_profile_request_delete();
+            }
             assert!(
                 matches!(
                     dispatch(action.clone(), &mut model, &ctx),
@@ -879,27 +974,225 @@ mod tests {
             assert!(model.scene_profile.is_none(), "{action:?} closes the modal");
         }
 
-        // Row 0 is the "new scene profile" row, which names nothing yet.
-        for action in [
-            TuiAction::SceneProfileActivate,
-            TuiAction::SceneProfileDelete,
-        ] {
-            let mut model = scene_profile_model();
-            assert!(matches!(
-                dispatch(action, &mut model, &ctx),
-                Dispatched::Done(ActionOutcome::Continue)
-            ));
-            assert!(model.scene_profile.is_some(), "and leaves the modal up");
-        }
-
         let mut model = scene_profile_model();
-        model.scene_profile_nav(1, 1);
         model.scene_profile_confirm_picker();
         assert!(matches!(
             dispatch(TuiAction::SceneProfileSave, &mut model, &ctx),
             Dispatched::Daemon(_)
         ));
         assert!(model.scene_profile.is_none());
+    }
+
+    /// `d` destroys a profile the user hand-built and the daemon keeps no
+    /// backup of the config file, so the key that sits next to `a` asks first.
+    /// The question names the profile, and only `y` sends anything.
+    #[test]
+    fn deleting_a_scene_profile_waits_for_a_confirmation() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+
+        let mut model = scene_profile_model();
+        let Dispatched::Done(ActionOutcome::Status(line)) =
+            dispatch(TuiAction::SceneProfileDelete, &mut model, &ctx)
+        else {
+            panic!("`d` must not reach the daemon on its own");
+        };
+        assert!(
+            line.contains("streaming"),
+            "the question names the profile: {line:?}"
+        );
+        assert_eq!(model.scene_profile_pending_delete(), Some("streaming"));
+        assert!(
+            model.scene_profile.is_some(),
+            "the modal stays open to show the question"
+        );
+
+        // The second keypress is the one that sends it.
+        let Dispatched::Daemon(DaemonWork::Targeted(command, name)) =
+            dispatch(TuiAction::SceneProfileDeleteConfirm, &mut model, &ctx)
+        else {
+            panic!("`y` sends the delete");
+        };
+        assert_eq!(command, ServerCommand::DeleteSceneProfile);
+        assert_eq!(name, "streaming");
+        assert!(model.scene_profile.is_none(), "and closes the modal");
+    }
+
+    /// Answering "no" leaves the profile where it is, and says so: a
+    /// confirmation that vanished without a word would leave the user unsure
+    /// whether they had just deleted something.
+    #[test]
+    fn cancelling_a_scene_profile_delete_sends_nothing() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+
+        let mut model = scene_profile_model();
+        dispatch(TuiAction::SceneProfileDelete, &mut model, &ctx);
+        let Dispatched::Done(ActionOutcome::Status(line)) =
+            dispatch(TuiAction::SceneProfileDeleteCancel, &mut model, &ctx)
+        else {
+            panic!("`n` answers with a line of its own");
+        };
+        assert!(line.contains("streaming"), "got {line:?}");
+        assert_eq!(model.scene_profile_pending_delete(), None);
+        assert!(
+            model.scene_profile.is_some(),
+            "the picker is still there to carry on in"
+        );
+
+        // And a `y` arriving afterwards has nothing left to confirm.
+        assert!(matches!(
+            dispatch(TuiAction::SceneProfileDeleteConfirm, &mut model, &ctx),
+            Dispatched::Done(ActionOutcome::Continue)
+        ));
+    }
+
+    /// Moving the cursor answers the question with "no". The prompt names one
+    /// profile, and a `y` typed after a `j` must not land on its neighbour.
+    #[test]
+    fn moving_the_picker_cursor_disarms_a_pending_delete() {
+        let mut model = scene_profile_model();
+        model.scene_profile_request_delete();
+        assert_eq!(model.scene_profile_pending_delete(), Some("streaming"));
+
+        model.scene_profile_nav(-1, 1);
+        assert_eq!(model.scene_profile_pending_delete(), None);
+        assert_eq!(model.scene_profile_confirm_delete(), None);
+    }
+
+    /// A save says which entry it is replacing, and a profile being made for
+    /// the first time replaces nothing.
+    ///
+    /// That difference is what `tui::daemon` turns into "switch to it" or
+    /// "leave the active profile alone" once the daemon has confirmed which
+    /// case it really was, so the editor has to carry it accurately: an edit
+    /// that lost its `editing` name would be saved as a second profile, and a
+    /// new profile that invented one would be refused.
+    #[test]
+    fn a_save_names_the_entry_it_replaces_and_a_new_profile_names_none() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+
+        // Enter on the defined profile edits it in place.
+        let mut model = scene_profile_model();
+        model.scene_profile_confirm_picker();
+        let Dispatched::Daemon(DaemonWork::SceneProfileSave { name, editing, .. }) =
+            dispatch(TuiAction::SceneProfileSave, &mut model, &ctx)
+        else {
+            panic!("saving an edited profile goes to the daemon");
+        };
+        assert_eq!(name, "streaming");
+        assert_eq!(editing.as_deref(), Some("streaming"));
+
+        // Row 0 — one `k` above the profile the picker opens on — builds a new
+        // one, which is named on the way through the naming stage.
+        let mut model = scene_profile_model();
+        model.scene_profile_nav(-1, 1);
+        model.scene_profile_confirm_picker();
+        for c in "podcast".chars() {
+            model.scene_profile_edit_name(|field| field.push(c));
+        }
+        model.scene_profile_commit_name().unwrap();
+
+        let Dispatched::Daemon(DaemonWork::SceneProfileSave { name, editing, .. }) =
+            dispatch(TuiAction::SceneProfileSave, &mut model, &ctx)
+        else {
+            panic!("saving a new profile goes to the daemon");
+        };
+        assert_eq!(name, "podcast");
+        assert_eq!(editing, None, "there is no entry to replace yet");
+    }
+
+    /// Switching a profile on and switching filtering off are their own units
+    /// of work, not the generic "send a target and print the reply": both read
+    /// the reply's numbers so the status line can say how much of the scene
+    /// list just changed.
+    #[test]
+    fn activating_and_clearing_are_scene_profile_work_of_their_own() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+
+        let mut model = scene_profile_model();
+        assert!(matches!(
+            dispatch(TuiAction::SceneProfileActivate, &mut model, &ctx),
+            Dispatched::Daemon(DaemonWork::SceneProfileActivate(name)) if name == "streaming"
+        ));
+
+        let mut model = scene_profile_model();
+        assert!(matches!(
+            dispatch(TuiAction::SceneProfileClearActive, &mut model, &ctx),
+            Dispatched::Daemon(DaemonWork::SceneProfileClear)
+        ));
+    }
+
+    /// `P` needs no modal and no typed name: it reads the cycle's next step
+    /// off the snapshot and turns it into the same two units of work the
+    /// picker sends — and, with nothing defined to cycle through, into a line
+    /// saying so rather than a keypress that appears to do nothing.
+    #[test]
+    fn the_cycle_key_sends_the_next_step_of_the_cycle() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+
+        // Nothing switched on yet, so the cycle starts at the first profile.
+        let mut model = scene_profile_model();
+        assert!(matches!(
+            dispatch(TuiAction::SceneProfileCycleNext, &mut model, &ctx),
+            Dispatched::Daemon(DaemonWork::SceneProfileActivate(name)) if name == "streaming"
+        ));
+
+        // With the only profile switched on, the next stop is the unfiltered
+        // list.
+        model.update_snapshot(|snapshot| {
+            snapshot.active_scene_profile = Some("streaming".to_string());
+        });
+        assert!(matches!(
+            dispatch(TuiAction::SceneProfileCycleNext, &mut model, &ctx),
+            Dispatched::Daemon(DaemonWork::SceneProfileClear)
+        ));
+
+        let mut empty = TuiModel::default();
+        let Dispatched::Done(ActionOutcome::Status(status)) =
+            dispatch(TuiAction::SceneProfileCycleNext, &mut empty, &ctx)
+        else {
+            panic!("a cycle with nothing to cycle through has to explain itself");
+        };
+        assert!(
+            status.contains("no scene profiles"),
+            "the status line says why the key did nothing; got: {status}"
+        );
+    }
+
+    /// The picker's footer advertises `a activate` and `d delete` on every row
+    /// including the one that names no profile, so on that row both keys have
+    /// to say why nothing happened. Returning silently is what a broken key
+    /// looks like.
+    #[test]
+    fn activate_and_delete_explain_themselves_on_the_new_profile_row() {
+        let owned = LocalCtx::new();
+        let ctx = owned.ctx();
+
+        for action in [
+            TuiAction::SceneProfileActivate,
+            TuiAction::SceneProfileDelete,
+        ] {
+            let mut model = scene_profile_model();
+            // The picker opens on the defined profile; row 0 is one `k` up.
+            model.scene_profile_nav(-1, 1);
+
+            let message = match dispatch(action.clone(), &mut model, &ctx) {
+                Dispatched::Done(ActionOutcome::Status(message)) => message,
+                _ => panic!("{action:?} should put a line on the status bar"),
+            };
+            assert!(
+                message.contains("new scene profile"),
+                "{action:?} should name the row the cursor is on, got {message:?}"
+            );
+            assert!(
+                model.scene_profile.is_some(),
+                "{action:?} leaves the modal up"
+            );
+        }
     }
 
     /// Enter on a profile that has no name yet asks for one instead of sending
@@ -910,7 +1203,8 @@ mod tests {
         let ctx = owned.ctx();
         let mut model = scene_profile_model();
         // Row 0 opens the naming stage; Esc leaves it with the name still
-        // empty.
+        // empty. The picker opens on the profile below it, so `k` first.
+        model.scene_profile_nav(-1, 1);
         model.scene_profile_confirm_picker();
         model.scene_profile_cancel_name();
 
@@ -932,7 +1226,6 @@ mod tests {
         let owned = LocalCtx::new();
         let ctx = owned.ctx();
         let mut model = scene_profile_model();
-        model.scene_profile_nav(1, 1);
         model.scene_profile_confirm_picker();
 
         let hidden = |model: &TuiModel| {

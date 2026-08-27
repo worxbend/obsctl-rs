@@ -19,7 +19,9 @@ use ratatui::{
 use rust_i18n::t;
 
 use crate::tui::{
-    model::{SceneProfileRow, SceneProfileRowKind, SceneProfileStage, TuiModel},
+    model::{
+        SceneProfileEditor, SceneProfileRow, SceneProfileRowKind, SceneProfileStage, TuiModel,
+    },
     widgets::chrome,
 };
 
@@ -82,7 +84,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> (Rect, usize) {
     // The footer hint spells out every key of the stage, so on a narrow
     // terminal it needs more than one row — cut off, it would stop naming the
     // key the user is looking for, which is the only thing it is there for.
-    let hint = hint_line(model, editor.stage);
+    let hint = hint_line(model, editor);
     let hint_rows = wrapped_rows(hint.width(), inner.width);
     let sections = Layout::default()
         .direction(Direction::Vertical)
@@ -94,7 +96,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> (Rect, usize) {
         .split(inner);
 
     if naming_rows > 0 {
-        f.render_widget(name_line(model, editor.stage), sections[0]);
+        f.render_widget(name_line(model, editor), sections[0]);
     }
     let offset = render_rows(f, sections[1], model);
     f.render_widget(Paragraph::new(hint).wrap(Wrap { trim: true }), sections[2]);
@@ -156,13 +158,9 @@ fn title(model: &TuiModel, stage: SceneProfileStage, editing: Option<&str>) -> S
 /// The name field. Only the naming stage carries the block cursor, so the
 /// toggle stage shows the same text without inviting a keystroke that would
 /// go somewhere else.
-fn name_line(model: &TuiModel, stage: SceneProfileStage) -> Line<'static> {
+fn name_line(model: &TuiModel, editor: &SceneProfileEditor) -> Line<'static> {
     let theme = model.theme;
-    let name = model
-        .scene_profile
-        .as_ref()
-        .map(|editor| editor.name.value.clone())
-        .unwrap_or_default();
+    let name = editor.name.value.clone();
     let mut spans = vec![
         Span::styled(
             format!(" {}", t!("tui.panels.scene_profiles.name_prompt")),
@@ -173,7 +171,7 @@ fn name_line(model: &TuiModel, stage: SceneProfileStage) -> Line<'static> {
             Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
         ),
     ];
-    if stage == SceneProfileStage::Naming {
+    if editor.stage == SceneProfileStage::Naming {
         spans.push(Span::styled(
             model.symbol("█", "_"),
             Style::default().fg(theme.accent),
@@ -183,8 +181,25 @@ fn name_line(model: &TuiModel, stage: SceneProfileStage) -> Line<'static> {
 }
 
 /// The per-stage footer telling the user which keys do what here.
-fn hint_line(model: &TuiModel, stage: SceneProfileStage) -> Line<'static> {
-    let key = match stage {
+///
+/// A delete waiting to be confirmed replaces it. That footer is the only place
+/// the modal can put the question, and it has to name the profile: the picker
+/// cursor sits on a highlighted row, but "the highlighted row" is not what a
+/// user wants to be trusting when the answer destroys a profile with no undo.
+fn hint_line(model: &TuiModel, editor: &SceneProfileEditor) -> Line<'static> {
+    if let Some(name) = editor.pending_delete.as_deref() {
+        let key = model.symbol(
+            "tui.panels.scene_profiles.hint_confirm_delete",
+            "tui.panels.scene_profiles.hint_confirm_delete_ascii",
+        );
+        return Line::from(Span::styled(
+            chrome::typographic(model, &t!(key, name = name)),
+            Style::default()
+                .fg(model.theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let key = match editor.stage {
         SceneProfileStage::Picker => model.symbol(
             "tui.panels.scene_profiles.hint_picker",
             "tui.panels.scene_profiles.hint_picker_ascii",
@@ -259,19 +274,27 @@ fn row_item(model: &TuiModel, row: &SceneProfileRow) -> ListItem<'static> {
         SceneProfileRowKind::Profile {
             active,
             hidden_count,
+            listed_count,
         } => {
+            // The count has to be the one the user can check against the
+            // dashboard, so a profile still naming a scene OBS has renamed
+            // away says how many of its entries land rather than promising
+            // more than will disappear.
+            let count = if listed_count > hidden_count {
+                t!(
+                    "tui.panels.scene_profiles.hidden_count_partial",
+                    count = hidden_count.to_string(),
+                    listed = listed_count.to_string()
+                )
+            } else {
+                t!(
+                    "tui.panels.scene_profiles.hidden_count",
+                    count = hidden_count.to_string()
+                )
+            };
             let mut spans = vec![
                 Span::styled(format!("  {}", row.label), Style::default().fg(theme.fg)),
-                Span::styled(
-                    format!(
-                        "  {}",
-                        t!(
-                            "tui.panels.scene_profiles.hidden_count",
-                            count = hidden_count.to_string()
-                        )
-                    ),
-                    Style::default().fg(theme.muted),
-                ),
+                Span::styled(format!("  {count}"), Style::default().fg(theme.muted)),
             ];
             if active {
                 spans.push(Span::styled(
@@ -327,6 +350,35 @@ fn row_item(model: &TuiModel, row: &SceneProfileRow) -> ListItem<'static> {
                 Style::default()
             };
             ListItem::new(Line::from(spans)).style(style)
+        }
+        // An entry naming no scene OBS has is drawn as a warning rather than
+        // as another scene: it is not a choice between hiding and showing, it
+        // is config left over from a rename, and `t` is how it goes away.
+        SceneProfileRowKind::MissingScene => {
+            let spans = vec![
+                Span::styled(
+                    format!(" {} ", model.symbol("⚠", "!")),
+                    Style::default().fg(theme.warning),
+                ),
+                Span::styled(
+                    row.label.clone(),
+                    Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
+                ),
+                Span::styled(
+                    format!(
+                        "  {}",
+                        chrome::typographic(
+                            model,
+                            &t!(model.symbol(
+                                "tui.panels.scene_profiles.state_missing",
+                                "tui.panels.scene_profiles.state_missing_ascii"
+                            ))
+                        )
+                    ),
+                    Style::default().fg(theme.warning),
+                ),
+            ];
+            ListItem::new(Line::from(spans))
         }
     }
 }

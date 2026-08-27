@@ -116,22 +116,22 @@ impl ProxyCtx {
                 Some((outcome.code.as_str(), outcome.message.as_str())),
                 outcome.exit_code,
             );
-        } else if outcome.bare_text {
-            eprintln!("{}", redact_message(&outcome.message));
-        } else if outcome.show_code {
-            eprintln!(
-                "{}",
-                t!(
-                    "cli.client.error_with_code",
-                    code = outcome.code,
-                    message = redact_message(&outcome.message)
-                )
-            );
         } else {
-            eprintln!(
-                "{}",
-                t!("common.error", message = redact_message(&outcome.message))
-            );
+            match outcome.text_style {
+                TextStyle::Bare => eprintln!("{}", redact_message(&outcome.message)),
+                TextStyle::WithCode => eprintln!(
+                    "{}",
+                    t!(
+                        "cli.client.error_with_code",
+                        code = outcome.code,
+                        message = redact_message(&outcome.message)
+                    )
+                ),
+                TextStyle::WithErrorPrefix => eprintln!(
+                    "{}",
+                    t!("common.error", message = redact_message(&outcome.message))
+                ),
+            }
         }
         outcome.exit_code
     }
@@ -144,8 +144,7 @@ impl ProxyCtx {
             exit_code: exit_code_for_public_error_code(code),
             code: code.to_string(),
             message: message.to_string(),
-            bare_text: false,
-            show_code: true,
+            text_style: TextStyle::WithCode,
         })
     }
 
@@ -156,8 +155,7 @@ impl ProxyCtx {
             exit_code: PublicErrorCode::IpcProtocolError.exit_code(),
             // The protocol message is already a finished sentence, so it is
             // printed as-is rather than wrapped in "error: ...".
-            bare_text: true,
-            show_code: false,
+            text_style: TextStyle::Bare,
         })
     }
 
@@ -167,18 +165,16 @@ impl ProxyCtx {
         // start the daemon. That hint is the whole message, so it is printed
         // plain instead of being wrapped in "error: ...". The old code decided
         // this twice — once inside the `--json` arm and again with a `matches!`
-        // in the text arm; here it is one flag, set once.
-        let bare_text = matches!(error, ObsctlError::ServerUnavailable { .. });
-        let message = match error {
-            ObsctlError::ServerUnavailable { message, .. } => message.clone(),
-            other => other.to_string(),
+        // in the text arm; here it is one decision, made once.
+        let (text_style, message) = match error {
+            ObsctlError::ServerUnavailable { message, .. } => (TextStyle::Bare, message.clone()),
+            other => (TextStyle::WithErrorPrefix, other.to_string()),
         };
         self.report(Outcome {
             code: code.as_str().to_string(),
             message,
             exit_code: code.exit_code(),
-            bare_text,
-            show_code: false,
+            text_style,
         })
     }
 }
@@ -197,12 +193,20 @@ struct Outcome {
     /// redaction cannot be forgotten at one of the call sites.
     message: String,
     exit_code: i32,
-    /// Print the message on its own, with no `error: ` prefix — for messages
-    /// that are already a complete explanation.
-    bare_text: bool,
-    /// Print the message prefixed with its error code, the form used for
-    /// failures the daemon reported.
-    show_code: bool,
+    /// How the plain-text (non-`--json`) form is worded.
+    text_style: TextStyle,
+}
+
+/// The wording of an `Outcome`'s plain-text form on stderr.
+enum TextStyle {
+    /// The message on its own, with no `error: ` prefix — for messages that
+    /// are already a complete explanation.
+    Bare,
+    /// The message wrapped in the generic `error: ...` line.
+    WithErrorPrefix,
+    /// The message prefixed with its error code, the form used for failures
+    /// the daemon reported.
+    WithCode,
 }
 
 /// The default rendering for a successful proxy command: the daemon's
@@ -274,7 +278,9 @@ fn print_envelope(
     }
 }
 
-pub(crate) fn print_status_json(v: &serde_json::Value) {
+/// Render a structured result as one `key: value` line per field — for
+/// commands whose result is a structure rather than a sentence.
+pub(crate) fn print_result_fields(v: &serde_json::Value) {
     if let Some(obj) = v.as_object() {
         for (k, val) in obj {
             println!("{k}: {val}");

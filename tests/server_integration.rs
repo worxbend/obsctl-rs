@@ -201,9 +201,16 @@ async fn spawn_server_with_obs_client(
     (socket_path, shutdown_tx)
 }
 
+/// A daemon with a real [`ObsSupervisor`], so the snapshot under test is
+/// filled in by an actual connect-and-refresh against the fake OBS rather than
+/// seeded by the test.
+///
+/// `config_path` is the file the config-rewriting commands work on; `None` is
+/// the daemon a test gets when it only cares about what OBS reports.
 async fn start_test_server_with_obs_supervisor(
     dir: &TempDir,
     cfg: Config,
+    config_path: Option<&Path>,
 ) -> (PathBuf, StateStore, Arc<BroadcastHub>, watch::Sender<bool>) {
     let socket_path = dir.path().join("server_obs_supervisor.sock");
 
@@ -220,7 +227,7 @@ async fn start_test_server_with_obs_supervisor(
         state: state.clone(),
         obs: Arc::clone(&obs_handle),
         config: Arc::clone(&config),
-        config_path: None,
+        config_path: config_path.map(Path::to_path_buf),
         socket_path: socket_path.clone(),
         registry: registry.clone(),
         reconnecting: Arc::clone(&reconnecting),
@@ -536,7 +543,7 @@ async fn a_scene_change_during_a_refresh_is_not_left_reverted() {
 
     let dir = TempDir::new().unwrap();
     let (_socket_path, state, _hub, shutdown) =
-        start_test_server_with_obs_supervisor(&dir, cfg).await;
+        start_test_server_with_obs_supervisor(&dir, cfg, None).await;
     wait_for_obs_connected(&state).await;
 
     // Every refresh now stalls here, part-way through, after the scene list
@@ -626,7 +633,7 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
 
     let dir = TempDir::new().unwrap();
     let (socket_path, state, hub, shutdown) =
-        start_test_server_with_obs_supervisor(&dir, cfg).await;
+        start_test_server_with_obs_supervisor(&dir, cfg, None).await;
     wait_for_obs_connected(&state).await;
 
     let mut events_client = IpcClient::connect(&socket_path).await.unwrap();
@@ -1406,6 +1413,189 @@ async fn clearing_the_scene_profile_restores_the_per_scene_baseline() {
     );
 }
 
+/// The count a client puts on its status line has to be the number of rows the
+/// user will watch disappear, not the number of lines the config file holds.
+///
+/// A profile's `hidden` list outlives the scenes it names: rename a scene in
+/// OBS and its old spelling stays in the file, hiding nothing. Reporting the
+/// entries made the TUI's status line say "hiding 2 scenes" while its own
+/// badge — which counts the rows that actually went — said 1.
+#[tokio::test]
+async fn a_scene_profile_reports_the_scenes_it_really_hides_not_what_it_lists() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, _config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    // "Renamed Away" is not one of the two scenes the daemon has been told
+    // about, so it can never hide anything.
+    let result = send_ok(
+        &mut client,
+        "save_scene_profile",
+        serde_json::json!({
+            "target": "podcast",
+            "hidden": ["Utility BG", "Renamed Away"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        result["hidden"], 1,
+        "only one of the two entries names a scene OBS has"
+    );
+    assert_eq!(
+        result["listed"], 2,
+        "and the file's own count is reported beside it, not instead of it"
+    );
+
+    let result = send_ok(
+        &mut client,
+        "set_scene_profile",
+        serde_json::json!({ "target": "podcast" }),
+    )
+    .await;
+    assert_eq!(result["hidden"], 1);
+    assert_eq!(result["listed"], 2);
+
+    // Which is exactly what the snapshot then shows: one scene hidden.
+    let snapshot = send_ok(&mut client, "get_snapshot", Value::Null).await;
+    assert!(scene_hidden(&snapshot, "Utility BG"));
+    assert!(!scene_hidden(&snapshot, "Main"));
+}
+
+/// A save reports whether it just changed the profile that is *in effect*.
+///
+/// Saving never switches a profile on, but editing the one already on
+/// re-resolves the scene list as it writes — the rows move while the reply is
+/// on its way back. A client that answered every save with "the active profile
+/// is unchanged" was describing the pointer while the user watched the list.
+#[tokio::test]
+async fn a_save_says_whether_it_touched_the_profile_in_effect() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, _config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    // Nothing is active yet, so this save moves nothing on screen.
+    let result = send_ok(
+        &mut client,
+        "save_scene_profile",
+        serde_json::json!({ "target": "streaming", "hidden": ["Main"] }),
+    )
+    .await;
+    assert_eq!(result["active"], false);
+
+    send_ok(
+        &mut client,
+        "set_scene_profile",
+        serde_json::json!({ "target": "streaming" }),
+    )
+    .await;
+
+    // The same save now lands on the profile in effect, and the scene list
+    // really does change under it.
+    let result = send_ok(
+        &mut client,
+        "save_scene_profile",
+        serde_json::json!({ "target": "streaming", "hidden": ["Utility BG"] }),
+    )
+    .await;
+    assert_eq!(result["active"], true);
+    assert_eq!(result["created"], false);
+
+    let snapshot = send_ok(&mut client, "get_snapshot", Value::Null).await;
+    assert!(
+        !scene_hidden(&snapshot, "Main"),
+        "the scene the profile used to hide is back"
+    );
+    assert!(
+        scene_hidden(&snapshot, "Utility BG"),
+        "and the one it hides now is gone from the list"
+    );
+
+    // A rename carries `active_scene_profile` with it, so the renamed profile
+    // is still the one in effect and the reply has to say so.
+    let result = send_ok(
+        &mut client,
+        "save_scene_profile",
+        serde_json::json!({
+            "target": "night",
+            "hidden": ["Utility BG"],
+            "rename_from": "streaming",
+        }),
+    )
+    .await;
+    assert_eq!(result["renamed"], true);
+    assert_eq!(result["active"], true);
+}
+
+/// A command that asks for a state the config file is already in must not
+/// rewrite the file.
+///
+/// The write is not free: it re-serializes the whole config, replaces the file,
+/// and moves its modification time, which wakes anything watching it for a
+/// change that never happened. The check here is a comment line — `write_atomic`
+/// rebuilds the file from the parsed model, so comments do not survive a
+/// rewrite, and one that is still there is proof no rewrite happened.
+#[tokio::test]
+async fn a_scene_profile_command_that_changes_nothing_leaves_the_file_alone() {
+    let dir = TempDir::new().unwrap();
+    let (mut client, config_path, _shutdown) = start_scene_profile_server(&dir).await;
+
+    send_ok(
+        &mut client,
+        "set_scene_profile",
+        serde_json::json!({ "target": "streaming" }),
+    )
+    .await;
+
+    // Marked after the daemon's own write, so only a *second* write can remove
+    // it.
+    const MARKER: &str = "# hand-written comment\n";
+    let written = std::fs::read_to_string(&config_path).unwrap();
+    std::fs::write(&config_path, format!("{MARKER}{written}")).unwrap();
+
+    // Activating the profile that is already active, and clearing when there
+    // is nothing to clear, are both legitimate requests — the caller asked for
+    // a state and that state is already reached.
+    let result = send_ok(
+        &mut client,
+        "set_scene_profile",
+        serde_json::json!({ "target": "streaming" }),
+    )
+    .await;
+    assert_eq!(result["message"], "scene profile set: streaming");
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .unwrap()
+            .starts_with(MARKER),
+        "re-activating the active profile rewrote the config file"
+    );
+
+    // The command still works: the daemon and its clients agree with the file.
+    let snapshot = send_ok(&mut client, "get_snapshot", Value::Null).await;
+    assert_eq!(snapshot["active_scene_profile"], "streaming");
+    assert!(scene_hidden(&snapshot, "Main"));
+
+    send_ok(&mut client, "clear_scene_profile", Value::Null).await;
+    let cleared = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        !cleared.starts_with(MARKER),
+        "clearing an active profile is a real change and must be written"
+    );
+
+    std::fs::write(&config_path, format!("{MARKER}{cleared}")).unwrap();
+    send_ok(&mut client, "clear_scene_profile", Value::Null).await;
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .unwrap()
+            .starts_with(MARKER),
+        "clearing when nothing is active rewrote the config file"
+    );
+
+    let snapshot = send_ok(&mut client, "get_snapshot", Value::Null).await;
+    assert_eq!(snapshot["active_scene_profile"], Value::Null);
+    assert!(
+        scene_hidden(&snapshot, "Utility BG"),
+        "and the per-scene baseline is deciding again"
+    );
+}
+
 #[tokio::test]
 async fn deleting_the_active_scene_profile_also_clears_it() {
     let dir = TempDir::new().unwrap();
@@ -1766,6 +1956,400 @@ async fn reload_config_picks_up_a_hand_edited_scene_profile() {
     );
     assert!(scene_hidden(&snapshot, "Main"));
     assert!(!scene_hidden(&snapshot, "Utility BG"));
+}
+
+// ── scene profiles, end to end ──────────────────────────────────────────────
+//
+// The tests above check one command at a time against a seeded snapshot. These
+// check the sentence the feature exists to make true: *build a scene profile,
+// switch it on, and the scene list is the scenes you chose*. So the scene list
+// here is the one a real OBS reported over a real websocket handshake (the
+// fake OBS server), the config is a real file the daemon rewrites, and every
+// assertion is on the content of a snapshot that arrived on the `state` topic
+// — not on the fact that a broadcast happened.
+
+/// Six scenes: three a viewer is meant to see and three that only exist to be
+/// nested inside the others. Two of the three utility scenes are hidden by the
+/// baseline `scenes[].hidden` flags, so a profile switching off is visibly
+/// different from no filtering at all.
+const END_TO_END_SCENES: &[&str] = &[
+    "Main",
+    "Talking Head",
+    "BRB",
+    "Utility BG",
+    "Overlay Src",
+    "Lower Third",
+];
+
+/// The config file the end-to-end tests start from: no scene profiles at all,
+/// which is where a user who has never used the feature starts.
+fn end_to_end_config_yaml(obs_port: u16) -> String {
+    format!(
+        r#"version: 1
+connection:
+  host: "127.0.0.1"
+  port: {obs_port}
+  password_env: ""
+  request_timeout_ms: 2000
+scenes:
+  - name: "Main"
+  - name: "Talking Head"
+  - name: "BRB"
+  - name: "Utility BG"
+    hidden: true
+  - name: "Overlay Src"
+    hidden: true
+  - name: "Lower Third"
+scene_profiles: []
+"#
+    )
+}
+
+/// A running daemon, its fake OBS, its config file, and two clients: one that
+/// sends commands and one that subscribed to `state` before anything happened.
+struct SceneProfileWorld {
+    commands: IpcClient,
+    /// Subscribed to `state` at startup, so no broadcast a test causes can be
+    /// missed. Its first event is the snapshot pushed on subscribe.
+    state: IpcClient,
+    socket_path: PathBuf,
+    config_path: PathBuf,
+    shutdown: watch::Sender<bool>,
+    fake_obs: support::fake_obs_server::FakeObsHandle,
+}
+
+impl SceneProfileWorld {
+    /// Stop the daemon and the fake OBS. Both handles are explicit, so a test
+    /// never has to wait out a timer to know they are gone.
+    fn close(self) {
+        let _ = self.shutdown.send(true);
+        self.fake_obs.shutdown();
+    }
+}
+
+/// Start a daemon whose scene list comes from OBS: fake OBS first (so its
+/// scene list is in place before anything connects), then the config file,
+/// then the daemon and its supervisor.
+async fn start_end_to_end_world(dir: &TempDir) -> SceneProfileWorld {
+    let fake_obs = spawn_fake_obs(false, None).await;
+    fake_obs
+        .set_response(
+            "GetSceneList",
+            PreparedResponse::success(serde_json::json!({
+                "currentProgramSceneName": "Main",
+                "scenes": END_TO_END_SCENES
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| serde_json::json!({
+                        "sceneName": name,
+                        "sceneIndex": index,
+                    }))
+                    .collect::<Vec<_>>(),
+            })),
+        )
+        .await;
+
+    let config_path = dir.path().join("config.yml");
+    std::fs::write(&config_path, end_to_end_config_yaml(fake_obs.addr.port())).unwrap();
+    // The daemon starts from the file it will later rewrite, exactly as it
+    // does in production: `edit_config_file` rebuilds every write from what is
+    // on disk, so an in-memory config that disagreed with the file would be
+    // silently discarded at the first save.
+    let cfg = loader::load_with_warnings(&config_path).unwrap().0;
+
+    let (socket_path, _store, _hub, shutdown) =
+        start_test_server_with_obs_supervisor(dir, cfg, Some(&config_path)).await;
+
+    let commands = IpcClient::connect(&socket_path).await.unwrap();
+    let mut state = IpcClient::connect(&socket_path).await.unwrap();
+    state.subscribe(&[TOPIC_STATE]).await.unwrap();
+
+    SceneProfileWorld {
+        commands,
+        state,
+        socket_path,
+        config_path,
+        shutdown,
+        fake_obs,
+    }
+}
+
+/// The scene names a snapshot says are visible, in the order it lists them —
+/// which is what the TUI's Scenes panel renders and what the user is really
+/// asking about.
+fn visible_scenes(snapshot: &Value) -> Vec<String> {
+    snapshot["scenes"]
+        .as_array()
+        .expect("scenes array")
+        .iter()
+        .filter(|scene| !scene["hidden"].as_bool().expect("hidden is a bool"))
+        .map(|scene| scene["name"].as_str().expect("scene name").to_string())
+        .collect()
+}
+
+/// Wait until the supervisor's first refresh has landed, i.e. until a snapshot
+/// carrying every scene OBS reports has been broadcast. Event-driven: the
+/// client is already subscribed, so this reads what arrives rather than
+/// polling for it.
+async fn await_obs_scene_list(client: &mut IpcClient) -> Value {
+    next_state_event_matching(client, "every scene the fake OBS reports", |data| {
+        let Some(scenes) = data["scenes"].as_array() else {
+            return false;
+        };
+        END_TO_END_SCENES
+            .iter()
+            .all(|wanted| scenes.iter().any(|scene| scene["name"] == *wanted))
+    })
+    .await
+}
+
+/// Wait for the snapshot in which `profile` is the active scene profile
+/// (`None` for "no profile at all") and return what it says is visible.
+async fn await_visible_under(
+    client: &mut IpcClient,
+    profile: Option<&str>,
+) -> (Value, Vec<String>) {
+    let expected = profile.map_or(Value::Null, |name| Value::String(name.to_string()));
+    let description = match profile {
+        Some(name) => format!("the scene profile `{name}` switched on"),
+        None => "no scene profile switched on".to_string(),
+    };
+    let snapshot = next_state_event_matching(client, &description, |data| {
+        data["active_scene_profile"] == expected
+    })
+    .await;
+    let visible = visible_scenes(&snapshot);
+    (snapshot, visible)
+}
+
+/// The two commands the TUI sends when the user builds a profile in the editor
+/// and presses Enter: save it, then — because it is new — switch it on. See
+/// `src/tui/daemon.rs::save_and_maybe_activate_scene_profile`.
+async fn create_and_activate(client: &mut IpcClient, name: &str, hidden: &[&str]) {
+    let saved = send_ok(
+        client,
+        "save_scene_profile",
+        serde_json::json!({ "target": name, "hidden": hidden }),
+    )
+    .await;
+    assert_eq!(
+        saved["created"], true,
+        "a name the config does not have yet must come back as a creation, \
+         because that is the only thing that tells the TUI to switch it on"
+    );
+    send_ok(
+        client,
+        "set_scene_profile",
+        serde_json::json!({ "target": name }),
+    )
+    .await;
+}
+
+/// The user's own sentence: make a profile, switch it on, and see only the
+/// scenes it did not hide.
+#[tokio::test]
+async fn a_scene_profile_switched_on_leaves_exactly_its_unhidden_scenes_visible() {
+    let dir = TempDir::new().unwrap();
+    let mut world = start_end_to_end_world(&dir).await;
+
+    let before = await_obs_scene_list(&mut world.state).await;
+    assert_eq!(
+        visible_scenes(&before),
+        vec![
+            "Main".to_string(),
+            "Talking Head".to_string(),
+            "BRB".to_string(),
+            "Lower Third".to_string(),
+        ],
+        "before any profile exists, the per-scene `hidden` flags are what decides"
+    );
+
+    create_and_activate(
+        &mut world.commands,
+        "streaming",
+        &["BRB", "Utility BG", "Overlay Src", "Lower Third"],
+    )
+    .await;
+
+    let (snapshot, visible) = await_visible_under(&mut world.state, Some("streaming")).await;
+    assert_eq!(
+        visible,
+        vec!["Main".to_string(), "Talking Head".to_string()],
+        "the list the user is looking at is now exactly the scenes the profile left alone"
+    );
+    assert_eq!(
+        snapshot["scene_profiles"]
+            .as_array()
+            .expect("the snapshot advertises the profiles")
+            .len(),
+        1
+    );
+
+    // And it is durable: a restart reads this back rather than the baseline.
+    let on_disk = read_config_from_disk(&world.config_path);
+    assert_eq!(on_disk.active_scene_profile, Some("streaming".to_string()));
+    assert_eq!(
+        on_disk.scene_profiles[0].hidden,
+        vec![
+            "BRB".to_string(),
+            "Utility BG".to_string(),
+            "Overlay Src".to_string(),
+            "Lower Third".to_string(),
+        ]
+    );
+
+    world.close();
+}
+
+/// Switching profiles is not "hide some more": the second profile's list
+/// replaces the first one's, so a scene the old profile hid comes back and a
+/// scene it showed goes away.
+#[tokio::test]
+async fn switching_scene_profiles_swaps_which_scenes_are_hidden() {
+    let dir = TempDir::new().unwrap();
+    let mut world = start_end_to_end_world(&dir).await;
+    await_obs_scene_list(&mut world.state).await;
+
+    create_and_activate(
+        &mut world.commands,
+        "streaming",
+        &["BRB", "Utility BG", "Overlay Src", "Lower Third"],
+    )
+    .await;
+    let (_, streaming) = await_visible_under(&mut world.state, Some("streaming")).await;
+    assert_eq!(
+        streaming,
+        vec!["Main".to_string(), "Talking Head".to_string()]
+    );
+
+    // Saving a second profile does not switch it on — that is what `a` in the
+    // picker and `P` on the dashboard are for — so the switch is its own step.
+    send_ok(
+        &mut world.commands,
+        "save_scene_profile",
+        serde_json::json!({
+            "target": "break",
+            "hidden": ["Main", "Talking Head", "Utility BG", "Overlay Src"],
+        }),
+    )
+    .await;
+    send_ok(
+        &mut world.commands,
+        "set_scene_profile",
+        serde_json::json!({ "target": "break" }),
+    )
+    .await;
+
+    let (_, on_break) = await_visible_under(&mut world.state, Some("break")).await;
+    assert_eq!(
+        on_break,
+        vec!["BRB".to_string(), "Lower Third".to_string()],
+        "the second profile's list replaces the first one's rather than adding to it"
+    );
+    for revealed in &on_break {
+        assert!(
+            !streaming.contains(revealed),
+            "`{revealed}` was hidden a moment ago and is the proof the sets swapped"
+        );
+    }
+
+    world.close();
+}
+
+/// Switching off is not the same as switching to a profile that hides nothing:
+/// the per-scene `hidden` flags start deciding again, so the two scenes the
+/// config marks hidden go back to being hidden.
+#[tokio::test]
+async fn clearing_the_scene_profile_puts_the_per_scene_baseline_back() {
+    let dir = TempDir::new().unwrap();
+    let mut world = start_end_to_end_world(&dir).await;
+    await_obs_scene_list(&mut world.state).await;
+
+    // This profile hides a scene the baseline shows and shows two the baseline
+    // hides, so neither state can be mistaken for the other.
+    create_and_activate(&mut world.commands, "everything-but-main", &["Main"]).await;
+    let (_, under_profile) =
+        await_visible_under(&mut world.state, Some("everything-but-main")).await;
+    assert_eq!(
+        under_profile,
+        vec![
+            "Talking Head".to_string(),
+            "BRB".to_string(),
+            "Utility BG".to_string(),
+            "Overlay Src".to_string(),
+            "Lower Third".to_string(),
+        ],
+        "an active profile replaces the per-scene flags, so it can reveal a scene too"
+    );
+
+    send_ok(&mut world.commands, "clear_scene_profile", Value::Null).await;
+
+    let (snapshot, baseline) = await_visible_under(&mut world.state, None).await;
+    assert_eq!(
+        baseline,
+        vec![
+            "Main".to_string(),
+            "Talking Head".to_string(),
+            "BRB".to_string(),
+            "Lower Third".to_string(),
+        ],
+        "with nothing switched on, `scenes[].hidden` is the answer again"
+    );
+    assert_eq!(
+        snapshot["scene_profiles"]
+            .as_array()
+            .expect("the profiles are still listed")
+            .len(),
+        1,
+        "switching off must not throw the profile away"
+    );
+    assert!(
+        read_config_from_disk(&world.config_path)
+            .active_scene_profile
+            .is_none()
+    );
+
+    world.close();
+}
+
+/// A TUI started *after* the profile was switched on gets the filtered list in
+/// the snapshot pushed on subscribe. Without this the feature would look like
+/// it worked until the next restart.
+#[tokio::test]
+async fn a_client_that_connects_later_is_pushed_the_filtered_scene_list() {
+    let dir = TempDir::new().unwrap();
+    let mut world = start_end_to_end_world(&dir).await;
+    await_obs_scene_list(&mut world.state).await;
+
+    create_and_activate(
+        &mut world.commands,
+        "streaming",
+        &["BRB", "Utility BG", "Overlay Src", "Lower Third"],
+    )
+    .await;
+    await_visible_under(&mut world.state, Some("streaming")).await;
+
+    let mut latecomer = IpcClient::connect(&world.socket_path).await.unwrap();
+    latecomer.subscribe(&[TOPIC_STATE]).await.unwrap();
+
+    // The *first* event, deliberately: this is the initial push, not a change
+    // broadcast, and it is the only state a freshly started TUI has to draw
+    // from until something in OBS moves.
+    let initial = match next_event_with_timeout(&mut latecomer).await {
+        ServerMessage::Event { topic, data } => {
+            assert_eq!(topic, Topic::State);
+            data
+        }
+        other => panic!("expected the snapshot pushed on subscribe, got {other:?}"),
+    };
+    assert_eq!(initial["active_scene_profile"], "streaming");
+    assert_eq!(
+        visible_scenes(&initial),
+        vec!["Main".to_string(), "Talking Head".to_string()],
+        "the snapshot pushed on subscribe is already filtered"
+    );
+
+    world.close();
 }
 
 async fn start_obs_connected_server(

@@ -102,6 +102,19 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         arity: 0,
         build: |_| Ok(Command::ClearSceneProfile),
     },
+    // Removing a scene profile is its own word rather than a flag on
+    // `scene-profile`, because the palette has no flags: every command here is
+    // a name followed by a fixed number of arguments.
+    PaletteCommandSpec {
+        canonical: "scene-profile-delete",
+        aliases: &["delete-scene-profile"],
+        arity: 1,
+        build: |args| {
+            Ok(Command::DeleteSceneProfile {
+                target: target_of(args)?,
+            })
+        },
+    },
     PaletteCommandSpec {
         canonical: "mute",
         aliases: &[],
@@ -309,7 +322,7 @@ fn build_set_volume(args: &[Token]) -> Result<Command> {
             "volume percentage must not be quoted".to_string(),
         ));
     }
-    let percent = required_u8_percentage(&args[1].text)?;
+    let percent = parse_volume_percent(&args[1].text)?;
     Ok(Command::SetVolume {
         target: sanitize_target(&args[0].text)?,
         percent,
@@ -325,45 +338,31 @@ fn normalize_command_name(value: &str) -> Result<String> {
         .map_err(|error| ObsctlError::CommandParseError(format!("command {error}")))
 }
 
-/// Parse `value` as an integer between `min` and `max`, describing any
-/// failure in terms of `field` — the name the user would recognise, e.g.
+/// Parse `value` as a volume percentage, an integer between 0 and 100,
+/// describing any failure in the words the user would recognise, e.g.
 /// `volume must be an integer 0-100, got "loud"`.
 ///
 /// Surrounding whitespace is a failure rather than something to trim: a
 /// palette argument reaches here already tokenized, so a space inside it means
 /// the user quoted something they did not mean to.
-fn parse_u8_in_range(
-    value: &str,
-    field: &str,
-    min: u8,
-    max: u8,
-) -> std::result::Result<u8, String> {
-    if min > max {
-        return Err(format!(
-            "{field} must be parseable as integer {min}-{max}, got invalid range"
-        ));
-    }
-
+fn parse_volume_percent(value: &str) -> Result<u8> {
     if value.trim() != value {
-        return Err(format!(
-            "{field} must be an integer {min}-{max}, got {:?}",
-            value
-        ));
+        return Err(ObsctlError::CommandParseError(format!(
+            "volume must be an integer 0-100, got {value:?}"
+        )));
     }
 
-    let parsed = value
-        .parse::<u64>()
-        .map_err(|_| format!("{field} must be an integer {min}-{max}, got {:?}", value))?;
+    let parsed = value.parse::<u64>().map_err(|_| {
+        ObsctlError::CommandParseError(format!("volume must be an integer 0-100, got {value:?}"))
+    })?;
 
-    if parsed < u64::from(min) || parsed > u64::from(max) {
-        return Err(format!("{field} must be {min}-{max}, got {parsed}"));
+    if parsed > 100 {
+        return Err(ObsctlError::CommandParseError(format!(
+            "volume must be 0-100, got {parsed}"
+        )));
     }
 
     Ok(parsed as u8)
-}
-
-fn required_u8_percentage(value: &str) -> Result<u8> {
-    parse_u8_in_range(value, "volume", 0, 100).map_err(ObsctlError::CommandParseError)
 }
 
 /// Split a command line into arguments, honouring double quotes and
@@ -491,15 +490,15 @@ mod tests {
     use crate::support::validation::MAX_TARGET_TOKEN_LENGTH;
 
     #[test]
-    fn parse_u8_in_range_validates_integer_bounds() {
-        assert_eq!(parse_u8_in_range("42", "percent", 0, 100).unwrap(), 42);
-        assert_eq!(parse_u8_in_range("0", "percent", 0, 100).unwrap(), 0);
-        assert_eq!(parse_u8_in_range("100", "percent", 0, 100).unwrap(), 100);
-        assert!(parse_u8_in_range("101", "percent", 0, 100).is_err());
-        assert!(parse_u8_in_range("-1", "percent", 0, 100).is_err());
-        assert!(parse_u8_in_range("50.5", "percent", 0, 100).is_err());
-        assert!(parse_u8_in_range(" 42", "percent", 0, 100).is_err());
-        assert!(parse_u8_in_range("42 ", "percent", 0, 100).is_err());
+    fn parse_volume_percent_validates_integer_bounds() {
+        assert_eq!(parse_volume_percent("42").unwrap(), 42);
+        assert_eq!(parse_volume_percent("0").unwrap(), 0);
+        assert_eq!(parse_volume_percent("100").unwrap(), 100);
+        assert!(parse_volume_percent("101").is_err());
+        assert!(parse_volume_percent("-1").is_err());
+        assert!(parse_volume_percent("50.5").is_err());
+        assert!(parse_volume_percent(" 42").is_err());
+        assert!(parse_volume_percent("42 ").is_err());
     }
 
     /// A scene profile is a set of scene-visibility choices, and `profile` is
@@ -536,6 +535,27 @@ mod tests {
         // command guesses at a missing or extra argument.
         assert!(parse(":scene-profile").is_err());
         assert!(parse(":scene-profile-off now").is_err());
+    }
+
+    /// Deleting is the third scene-profile verb, and it is deliberately not
+    /// reachable by leaving the name off `scene-profile-off`: it needs the name
+    /// of the profile to remove, and nothing else can stand in for it.
+    #[test]
+    fn a_scene_profile_can_be_deleted_by_name_from_the_palette() {
+        assert_eq!(
+            parse(":scene-profile-delete night").unwrap(),
+            Command::DeleteSceneProfile {
+                target: "night".to_string()
+            }
+        );
+        assert_eq!(
+            parse(":delete-scene-profile night").unwrap(),
+            Command::DeleteSceneProfile {
+                target: "night".to_string()
+            }
+        );
+        assert!(parse(":scene-profile-delete").is_err());
+        assert!(parse(":scene-profile-delete one two").is_err());
     }
 
     #[test]

@@ -70,6 +70,9 @@ const LEADER_ROOT: &[WhichKeyEntry] = &[
     // the case — `<leader>p` is the panel group, and a scene profile is not an
     // OBS profile.
     entry("P", "scene profiles"),
+    // The cycle key spelled out. `P` on the dashboard does the same thing in
+    // one keystroke, but an unlisted key is one nobody finds.
+    entry("N", "next scene profile"),
     entry(":", "command palette"),
     entry("q", "quit"),
 ];
@@ -147,6 +150,7 @@ pub fn resolve(pending: Pending, ch: char) -> Option<TuiAction> {
             }),
             'q' => Some(TuiAction::Quit),
             'P' => Some(TuiAction::OpenSceneProfiles),
+            'N' => Some(TuiAction::SceneProfileCycleNext),
             _ => None,
         },
         Pending::LeaderGroup('f') => match ch {
@@ -281,6 +285,22 @@ mod tests {
         assert_eq!(
             resolve(Pending::Leader, 'p'),
             Some(TuiAction::SetPending(Pending::LeaderGroup('p')))
+        );
+    }
+
+    /// The cycle key has to be reachable from the which-key menu as well as
+    /// from the dashboard: `<leader>N` is how a user who has never read the
+    /// docs finds out that scene profiles can be switched at all.
+    #[test]
+    fn leader_shift_n_cycles_to_the_next_scene_profile() {
+        assert_eq!(
+            resolve(Pending::Leader, 'N'),
+            Some(TuiAction::SceneProfileCycleNext)
+        );
+        let (_, root) = menu(Pending::Leader).unwrap();
+        assert!(
+            root.iter().any(|e| e.key == "N" && !e.group),
+            "the cycle key is listed in the which-key root"
         );
     }
 

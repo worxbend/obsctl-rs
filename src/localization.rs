@@ -273,4 +273,79 @@ mod tests {
         let backend = FileBackend::load(Some(dir.path()));
         assert!(backend.messages.is_empty());
     }
+
+    /// Load one of the repository's own locale files the way [`FileBackend`]
+    /// loads an override: dot-joined keys, one entry per string.
+    fn flatten_locale_file(path: &Path) -> HashMap<String, String> {
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
+        let value: serde_yaml::Value = serde_yaml::from_str(&text)
+            .unwrap_or_else(|error| panic!("{} must be valid YAML: {error}", path.display()));
+        let mut flat = HashMap::new();
+        flatten_into(&value, String::new(), &mut flat);
+        flat
+    }
+
+    /// The `%{...}` names a message interpolates, in a comparable order.
+    fn placeholders(message: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut rest = message;
+        while let Some(start) = rest.find("%{") {
+            rest = &rest[start + 2..];
+            let Some(end) = rest.find('}') else { break };
+            names.push(rest[..end].to_string());
+            rest = &rest[end + 1..];
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// `contrib/locales/uk.yml` is the shipped runtime override, and a key it
+    /// is missing does not fail anywhere a developer would see it: the lookup
+    /// silently falls back to the embedded English string, so a Ukrainian user
+    /// gets a screen in two languages. Diffing the key sets is the only way to
+    /// catch that, and doing it by eye every time a key is added does not
+    /// survive contact with a busy afternoon.
+    #[test]
+    fn the_shipped_ukrainian_file_translates_every_english_key() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let en = flatten_locale_file(&root.join("locales/en.yml"));
+        let uk = flatten_locale_file(&root.join("contrib/locales/uk.yml"));
+
+        let mut missing: Vec<&str> = en
+            .keys()
+            .filter(|key| !uk.contains_key(*key))
+            .map(String::as_str)
+            .collect();
+        missing.sort_unstable();
+        assert!(
+            missing.is_empty(),
+            "contrib/locales/uk.yml is missing keys that locales/en.yml defines, \
+             so a Ukrainian user sees English for them: {missing:?}"
+        );
+
+        let mut stale: Vec<&str> = uk
+            .keys()
+            .filter(|key| !en.contains_key(*key))
+            .map(String::as_str)
+            .collect();
+        stale.sort_unstable();
+        assert!(
+            stale.is_empty(),
+            "contrib/locales/uk.yml translates keys locales/en.yml no longer has, \
+             so nothing will ever look them up: {stale:?}"
+        );
+
+        // A translation that drops or misspells a `%{name}` prints the raw
+        // placeholder to the user, which is worse than the English sentence it
+        // was meant to replace.
+        for (key, english) in &en {
+            assert_eq!(
+                placeholders(english),
+                placeholders(&uk[key]),
+                "`{key}` interpolates different names in the two locale files"
+            );
+        }
+    }
 }
