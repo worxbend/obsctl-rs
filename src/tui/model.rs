@@ -12,6 +12,7 @@ use crate::{
         keymap::Pending,
         series::RollingSeries,
         theme::{self, Theme},
+        widgets::logs::ResourceIndex,
     },
 };
 
@@ -429,8 +430,9 @@ pub struct TuiModel {
     /// Advances once per render tick; drives pulsing/spinner animations.
     pub anim: AnimClock,
     /// (scene name, tick it became active) — drives the brief flash
-    /// highlight in the scenes panel right after a switch. Set by the
-    /// event applier when it observes `current_scene` change.
+    /// highlight in the scenes panel right after a switch. Set by
+    /// [`apply_snapshot`](TuiModel::apply_snapshot) when the incoming snapshot
+    /// names a different `current_scene`.
     pub scene_flash: Option<(String, u64)>,
     /// Current top-level screen (main dashboard or the settings/theme picker).
     pub view: View,
@@ -459,6 +461,9 @@ pub struct TuiModel {
     pub scene_profile: Option<SceneProfileEditor>,
     /// Cached visible (non-hidden) scenes; rebuilt in `clamp_cursors` after each snapshot update.
     cached_visible_scenes: Vec<SceneState>,
+    /// Cached resource names the log pane highlights; rebuilt in
+    /// `clamp_cursors` alongside `cached_visible_scenes`.
+    cached_resource_index: ResourceIndex,
 }
 
 /// One cursor per panel, addressed by [`FocusPanel`] so the four indices
@@ -513,6 +518,7 @@ impl Default for TuiModel {
             log_scroll: 0,
             scene_profile: None,
             cached_visible_scenes: Vec::new(),
+            cached_resource_index: ResourceIndex::default(),
         }
     }
 }
@@ -812,6 +818,32 @@ impl TuiModel {
         self.clamp_cursors();
     }
 
+    /// Take a fresh snapshot from the daemon: flash the scenes panel if
+    /// `current_scene` changed, replace the snapshot (re-deriving the caches)
+    /// and record a metric sample for the sparklines.
+    ///
+    /// [`set_snapshot`](TuiModel::set_snapshot) stays flash-free: callers that
+    /// merely seed a model with state (tests, fixtures) should not light up the
+    /// scenes panel as though OBS had just switched scenes.
+    pub fn apply_snapshot(&mut self, snapshot: ObsSnapshot) {
+        // The comparison borrows `self.snapshot`, so decide the flash first and
+        // assign only once that borrow has ended.
+        let flash = match (
+            self.snapshot
+                .as_ref()
+                .and_then(|current| current.current_scene.as_deref()),
+            snapshot.current_scene.as_deref(),
+        ) {
+            (Some(previous), Some(next)) if previous != next => Some(next.to_string()),
+            _ => None,
+        };
+        if let Some(name) = flash {
+            self.scene_flash = Some((name, self.anim.frame));
+        }
+        self.set_snapshot(snapshot);
+        self.record_metric_sample();
+    }
+
     /// Forget the snapshot — the daemon has gone away, or has no OBS to
     /// describe — and clear what was derived from it.
     pub fn clear_snapshot(&mut self) {
@@ -826,6 +858,12 @@ impl TuiModel {
             edit(snapshot);
             self.clamp_cursors();
         }
+    }
+
+    /// The names the log pane highlights, derived from the current snapshot.
+    /// Returns the cached index; no allocation per frame.
+    pub(crate) fn resource_index(&self) -> &ResourceIndex {
+        &self.cached_resource_index
     }
 
     /// Visible (non-hidden) scenes, in snapshot order. Returns the cached slice; no allocation per call.
@@ -1036,6 +1074,7 @@ impl TuiModel {
             .as_ref()
             .map(|s| s.scenes.iter().filter(|sc| !sc.hidden).cloned().collect())
             .unwrap_or_default();
+        self.cached_resource_index = ResourceIndex::from_snapshot(self.snapshot.as_ref());
         for panel in FocusPanel::ALL {
             let max = self.panel_len(panel).saturating_sub(1);
             self.cursors[panel] = self.cursors[panel].min(max);
@@ -1456,20 +1495,18 @@ impl TuiModel {
         self.scene_profile_cursor_to(index);
     }
 
-    /// Move the cursor of the current stage by `delta` rows `count` times —
-    /// `delta` is -1 for `k` and 1 for `j`, and `count` is the typed count
-    /// prefix.
-    pub fn scene_profile_nav(&mut self, delta: isize, count: usize) {
-        if self.scene_profile.is_none() {
-            return;
-        }
-        let cursor = self.scene_profile_cursor();
-        let step = delta.saturating_mul(isize::try_from(count).unwrap_or(isize::MAX));
-        let moved = isize::try_from(cursor)
-            .unwrap_or(isize::MAX)
-            .saturating_add(step)
-            .max(0);
-        self.scene_profile_cursor_to(usize::try_from(moved).unwrap_or(0));
+    /// Move the cursor of the current stage up by `rows`, the typed count
+    /// prefix for `k`.
+    pub fn scene_profile_nav_up(&mut self, rows: usize) {
+        let cursor = self.scene_profile_cursor().saturating_sub(rows);
+        self.scene_profile_cursor_to(cursor);
+    }
+
+    /// Move the cursor of the current stage down by `rows`, the typed count
+    /// prefix for `j`.
+    pub fn scene_profile_nav_down(&mut self, rows: usize) {
+        let cursor = self.scene_profile_cursor().saturating_add(rows);
+        self.scene_profile_cursor_to(cursor);
     }
 
     /// Enter on the picker: row 0 starts a new scene profile, row n edits the
@@ -2320,7 +2357,7 @@ mod tests {
         assert_eq!(model.scenes().len(), 1, "the dashboard hides 'Main'");
 
         model.open_scene_profiles();
-        model.scene_profile_nav(1, 1);
+        model.scene_profile_nav_down(1);
         model.scene_profile_confirm_picker();
 
         let rows = model.scene_profile_rows();
@@ -2347,7 +2384,7 @@ mod tests {
     fn toggling_a_scene_hides_it_and_toggling_again_reveals_it() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
-        model.scene_profile_nav(1, 1);
+        model.scene_profile_nav_down(1);
         model.scene_profile_confirm_picker();
 
         // Cursor on "Main", which this profile hides.
@@ -2376,7 +2413,7 @@ mod tests {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
         // The picker opens on the active profile, so row 0 is one `k` up.
-        model.scene_profile_nav(-1, 1);
+        model.scene_profile_nav_up(1);
         model.scene_profile_confirm_picker();
 
         let editor = model.scene_profile.as_ref().unwrap();
@@ -2391,7 +2428,7 @@ mod tests {
     fn editing_an_existing_scene_profile_copies_it_whole() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
-        model.scene_profile_nav(1, 1);
+        model.scene_profile_nav_down(1);
         model.scene_profile_confirm_picker();
 
         let editor = model.scene_profile.as_ref().unwrap();
@@ -2440,7 +2477,7 @@ mod tests {
         assert!(!rows[0].selected, "and the new-profile row is not the one");
 
         // Row 0 is still one `k` away.
-        model.scene_profile_nav(-1, 1);
+        model.scene_profile_nav_up(1);
         assert_eq!(model.scene_profile.as_ref().unwrap().picker_cursor, 0);
         assert_eq!(model.selected_scene_profile(), None);
     }
@@ -2671,9 +2708,9 @@ mod tests {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
 
-        model.scene_profile_nav(1, 99);
+        model.scene_profile_nav_down(99);
         assert_eq!(model.scene_profile.as_ref().unwrap().picker_cursor, 1);
-        model.scene_profile_nav(-1, 99);
+        model.scene_profile_nav_up(99);
         assert_eq!(model.scene_profile.as_ref().unwrap().picker_cursor, 0);
 
         model.scene_profile_set_cursor(99);
@@ -2692,7 +2729,7 @@ mod tests {
     fn a_blank_name_is_refused_and_keeps_the_user_on_the_naming_stage() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
-        model.scene_profile_nav(-1, 1);
+        model.scene_profile_nav_up(1);
         model.scene_profile_confirm_picker();
 
         model.scene_profile_edit_name(|name| name.push(' '));
@@ -2721,7 +2758,7 @@ mod tests {
     fn a_name_another_scene_profile_already_uses_is_refused() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
-        model.scene_profile_nav(-1, 1);
+        model.scene_profile_nav_up(1);
         model.scene_profile_confirm_picker();
 
         for c in "STREAMING".chars() {
@@ -2744,7 +2781,7 @@ mod tests {
     fn a_profile_may_be_saved_under_the_name_it_already_has() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
-        model.scene_profile_nav(1, 1);
+        model.scene_profile_nav_down(1);
         model.scene_profile_confirm_picker();
 
         model.scene_profile_begin_naming();
@@ -2763,9 +2800,9 @@ mod tests {
     fn a_shorter_snapshot_reclamps_the_open_editors_cursor() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
-        model.scene_profile_nav(1, 1);
+        model.scene_profile_nav_down(1);
         model.scene_profile_confirm_picker();
-        model.scene_profile_nav(1, 1);
+        model.scene_profile_nav_down(1);
         assert_eq!(model.scene_profile.as_ref().unwrap().scene_cursor, 1);
 
         model.update_snapshot(|snapshot| {
@@ -2795,7 +2832,7 @@ mod tests {
     fn a_snapshot_that_drops_a_profile_reclamps_the_picker_cursor() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
-        model.scene_profile_nav(1, 1);
+        model.scene_profile_nav_down(1);
         assert!(model.selected_scene_profile().is_some());
 
         model.update_snapshot(|snapshot| {
@@ -2813,7 +2850,7 @@ mod tests {
     fn abandoning_a_rename_puts_the_previous_name_back() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
-        model.scene_profile_nav(1, 1);
+        model.scene_profile_nav_down(1);
         model.scene_profile_confirm_picker();
 
         model.scene_profile_begin_naming();
@@ -2830,7 +2867,7 @@ mod tests {
     fn esc_on_the_scene_list_returns_to_the_picker_without_closing() {
         let mut model = scene_profile_model();
         model.open_scene_profiles();
-        model.scene_profile_nav(1, 1);
+        model.scene_profile_nav_down(1);
         model.scene_profile_confirm_picker();
 
         model.scene_profile_back();
@@ -2848,7 +2885,7 @@ mod tests {
     #[test]
     fn editor_transitions_do_nothing_while_the_editor_is_closed() {
         let mut model = scene_profile_model();
-        model.scene_profile_nav(1, 1);
+        model.scene_profile_nav_down(1);
         model.scene_profile_confirm_picker();
         model.scene_profile_toggle_hidden();
         model.scene_profile_begin_naming();
@@ -2870,5 +2907,42 @@ mod tests {
         assert_eq!(field.value, "");
         field.delete_word();
         assert_eq!(field.value, "");
+    }
+
+    /// Only a snapshot that actually names a *different* current scene should
+    /// light up the scenes panel, and only when it arrives through the daemon
+    /// path — seeding a model with `set_snapshot` must stay flash-free.
+    #[test]
+    fn applying_a_snapshot_flashes_only_when_the_current_scene_changes() {
+        fn snapshot_of(scene: &str) -> ObsSnapshot {
+            ObsSnapshot {
+                current_scene: Some(scene.to_string()),
+                ..Default::default()
+            }
+        }
+
+        let mut model = TuiModel::default();
+
+        model.apply_snapshot(snapshot_of("Intro"));
+        assert!(
+            model.scene_flash.is_none(),
+            "the first snapshot has no previous scene to differ from"
+        );
+
+        model.apply_snapshot(snapshot_of("Intro"));
+        assert!(model.scene_flash.is_none(), "the scene did not change");
+
+        model.apply_snapshot(snapshot_of("Main"));
+        assert_eq!(
+            model.scene_flash.as_ref().map(|(name, _)| name.as_str()),
+            Some("Main")
+        );
+
+        model.scene_flash = None;
+        model.set_snapshot(snapshot_of("Outro"));
+        assert!(
+            model.scene_flash.is_none(),
+            "set_snapshot must not flash the scenes panel"
+        );
     }
 }

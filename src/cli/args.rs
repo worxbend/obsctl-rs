@@ -1,7 +1,6 @@
+use crate::runtime::logger::LogFilterLevel;
 use crate::support::fs;
-use crate::support::validation::{
-    MAX_TARGET_TOKEN_LENGTH, trim_and_validate_path_token, trim_and_validate_token_with_max_len,
-};
+use crate::support::validation::trim_and_validate_path_token;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -18,7 +17,7 @@ pub struct Cli {
         value_parser = parse_log_level,
         help = "Log level: trace|debug|info|warn|error"
     )]
-    pub log_level: Option<String>,
+    pub log_level: Option<LogFilterLevel>,
 
     #[arg(
         short = 'v',
@@ -156,14 +155,8 @@ fn non_blank_trimmed(value: &str) -> Result<String, String> {
     crate::domain::names::checked_name(value).map_err(|error| format!("value {error}"))
 }
 
-pub(crate) fn parse_log_level(value: &str) -> Result<String, String> {
-    let level = trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
-        .map_err(|error| format!("log level {error}"))?
-        .to_ascii_lowercase();
-    match level.as_str() {
-        "trace" | "debug" | "info" | "warn" | "error" => Ok(level),
-        _ => Err("log level must be one of trace, debug, info, warn, error".to_string()),
-    }
+pub(crate) fn parse_log_level(value: &str) -> Result<LogFilterLevel, String> {
+    value.parse()
 }
 
 fn non_blank_path(value: &str) -> Result<PathBuf, String> {
@@ -182,6 +175,7 @@ fn non_blank_path(value: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::support::validation::MAX_TARGET_TOKEN_LENGTH;
 
     #[test]
     fn non_blank_path_rejects_empty_or_whitespace() {
@@ -209,7 +203,7 @@ mod tests {
 
     #[test]
     fn valid_log_level_normalizes_and_rejects_bad_values() {
-        assert_eq!(parse_log_level(" TrAcE ").unwrap(), "trace");
+        assert_eq!(parse_log_level(" TrAcE ").unwrap(), LogFilterLevel::Trace);
         assert!(parse_log_level("verbose").is_err());
     }
 

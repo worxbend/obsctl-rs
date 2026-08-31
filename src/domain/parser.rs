@@ -14,6 +14,57 @@ pub const PALETTE_PREFIXES: [char; 2] = ['/', ':'];
 /// says otherwise. `:` mirrors vim's command prompt.
 pub const DEFAULT_PALETTE_PREFIX: char = ':';
 
+/// Whether a configured `ui.command_palette_prefix` value is one of the
+/// supported prefixes, taken as a whole string.
+///
+/// Deliberately stricter than [`palette_prefix_or_default`]: config validation
+/// warns about `":x"` because the user wrote something that is not a prefix,
+/// while the TUI still has to start and quietly uses the `':'` it can see. The
+/// two questions are different on purpose — do not collapse them into one
+/// function, that would change either the set of warnings or the set of
+/// accepted values.
+pub fn is_supported_palette_prefix(value: &str) -> bool {
+    PALETTE_PREFIXES.iter().any(|c| value == c.to_string())
+}
+
+/// The prefix character the TUI command line opens with, given a configured
+/// `ui.command_palette_prefix` value.
+///
+/// Only the first character is considered; anything unsupported (including an
+/// empty value) falls back to [`DEFAULT_PALETTE_PREFIX`]. See
+/// [`is_supported_palette_prefix`] for why this is more forgiving than
+/// validation.
+pub fn palette_prefix_or_default(value: &str) -> char {
+    value
+        .chars()
+        .next()
+        .filter(|c| PALETTE_PREFIXES.contains(c))
+        .unwrap_or(DEFAULT_PALETTE_PREFIX)
+}
+
+/// What the first argument of a palette command names, so that completion can
+/// offer the right list without keeping its own copy of the command spellings.
+///
+/// Only the *first* argument is described: `vol` takes two, but the second is a
+/// percentage, which there is nothing to complete against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentKind {
+    /// The command takes no completable argument.
+    None,
+    /// An OBS scene.
+    Scene,
+    /// An OBS profile.
+    Profile,
+    /// An obsctl scene profile — a saved set of scene-visibility choices, which
+    /// is a different thing from the OBS profile above even though the daemon
+    /// publishes both in the same snapshot.
+    SceneProfile,
+    /// An OBS scene collection.
+    SceneCollection,
+    /// An audio input.
+    AudioInput,
+}
+
 /// One word of the palette's vocabulary: what it is called, what else it
 /// answers to, how many arguments it takes, and what it builds.
 ///
@@ -37,6 +88,9 @@ struct PaletteCommandSpec {
     /// How many arguments follow the command name. Checked once, in [`parse`],
     /// before `build` runs, so `build` can index its arguments directly.
     arity: usize,
+    /// What the first argument names, if anything, so completion can offer the
+    /// matching list. See [`ArgumentKind`].
+    argument: ArgumentKind,
     /// Turns the already-counted arguments into a [`Command`].
     build: fn(&[Token]) -> Result<Command>,
 }
@@ -48,18 +102,21 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         canonical: "help",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::Help),
     },
     PaletteCommandSpec {
         canonical: "themes",
         aliases: &["theme", "settings"],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::Themes),
     },
     PaletteCommandSpec {
         canonical: "scene",
         aliases: &["set-scene"],
         arity: 1,
+        argument: ArgumentKind::Scene,
         build: |args| {
             Ok(Command::SetScene {
                 target: target_of(args)?,
@@ -70,6 +127,7 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         canonical: "profile",
         aliases: &["set-profile"],
         arity: 1,
+        argument: ArgumentKind::Profile,
         build: |args| {
             Ok(Command::SetProfile {
                 target: target_of(args)?,
@@ -80,6 +138,7 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         canonical: "collection",
         aliases: &["set-collection", "scene-collection"],
         arity: 1,
+        argument: ArgumentKind::SceneCollection,
         build: |args| {
             Ok(Command::SetSceneCollection {
                 target: target_of(args)?,
@@ -90,6 +149,7 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         canonical: "scene-profile",
         aliases: &["set-scene-profile"],
         arity: 1,
+        argument: ArgumentKind::SceneProfile,
         build: |args| {
             Ok(Command::SetSceneProfile {
                 target: target_of(args)?,
@@ -100,6 +160,7 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         canonical: "scene-profile-off",
         aliases: &["scene-profile-clear"],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::ClearSceneProfile),
     },
     // Removing a scene profile is its own word rather than a flag on
@@ -109,6 +170,7 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         canonical: "scene-profile-delete",
         aliases: &["delete-scene-profile"],
         arity: 1,
+        argument: ArgumentKind::SceneProfile,
         build: |args| {
             Ok(Command::DeleteSceneProfile {
                 target: target_of(args)?,
@@ -119,6 +181,7 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         canonical: "mute",
         aliases: &[],
         arity: 1,
+        argument: ArgumentKind::AudioInput,
         build: |args| {
             Ok(Command::Mute {
                 target: target_of(args)?,
@@ -129,6 +192,7 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         canonical: "unmute",
         aliases: &[],
         arity: 1,
+        argument: ArgumentKind::AudioInput,
         build: |args| {
             Ok(Command::Unmute {
                 target: target_of(args)?,
@@ -139,6 +203,7 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         canonical: "toggle-mute",
         aliases: &[],
         arity: 1,
+        argument: ArgumentKind::AudioInput,
         build: |args| {
             Ok(Command::ToggleMute {
                 target: target_of(args)?,
@@ -149,78 +214,91 @@ const PALETTE_COMMANDS: &[PaletteCommandSpec] = &[
         canonical: "vol",
         aliases: &["volume"],
         arity: 2,
+        argument: ArgumentKind::AudioInput,
         build: build_set_volume,
     },
     PaletteCommandSpec {
         canonical: "stream",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::ToggleStream),
     },
     PaletteCommandSpec {
         canonical: "rec",
         aliases: &["record"],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::ToggleRecord),
     },
     PaletteCommandSpec {
         canonical: "status",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::Status),
     },
     PaletteCommandSpec {
         canonical: "obs-status",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::ObsStatus),
     },
     PaletteCommandSpec {
         canonical: "server-status",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::ServerStatus),
     },
     PaletteCommandSpec {
         canonical: "reload-config",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::ReloadConfig),
     },
     PaletteCommandSpec {
         canonical: "dump-config",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::DumpConfig),
     },
     PaletteCommandSpec {
         canonical: "validate-config",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::ValidateConfig),
     },
     PaletteCommandSpec {
         canonical: "reconnect",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::Reconnect),
     },
     PaletteCommandSpec {
         canonical: "connect",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::Connect),
     },
     PaletteCommandSpec {
         canonical: "shutdown-server",
         aliases: &[],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::ShutdownServer),
     },
     PaletteCommandSpec {
         canonical: "quit",
         aliases: &["exit"],
         arity: 0,
+        argument: ArgumentKind::None,
         build: |_| Ok(Command::Quit),
     },
 ];
@@ -284,9 +362,7 @@ pub fn parse(input: &str) -> Result<Command> {
         .ok_or_else(|| ObsctlError::CommandParseError("empty command".to_string()))?;
 
     let name = normalize_command_name(&head.text)?;
-    let spec = PALETTE_COMMANDS
-        .iter()
-        .find(|spec| spec.canonical == name || spec.aliases.contains(&name.as_str()))
+    let spec = find_spec(&name)
         .ok_or_else(|| ObsctlError::CommandParseError(format!("unknown command: {}", head.text)))?;
 
     if args.len() != spec.arity {
@@ -305,6 +381,23 @@ pub fn parse(input: &str) -> Result<Command> {
     }
 
     (spec.build)(args)
+}
+
+/// The row of [`PALETTE_COMMANDS`] that `name` spells, whether it spells the
+/// canonical name or one of the aliases. `name` is expected to be lowercase.
+fn find_spec(name: &str) -> Option<&'static PaletteCommandSpec> {
+    PALETTE_COMMANDS
+        .iter()
+        .find(|spec| spec.canonical == name || spec.aliases.contains(&name))
+}
+
+/// What the first argument of `name` names, for completion.
+///
+/// Deliberately does not go through `normalize_command_name`: that one
+/// validates and returns an error for oversize or control-character input,
+/// while this is fed raw keystrokes and must simply say "nothing to complete".
+pub fn argument_kind(name: &str) -> ArgumentKind {
+    find_spec(&name.to_ascii_lowercase()).map_or(ArgumentKind::None, |spec| spec.argument)
 }
 
 /// The single target argument of a one-argument command. Safe to index
@@ -475,6 +568,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A command that names something in its first argument must have one.
+    #[test]
+    fn every_command_with_an_argument_has_arity_at_least_one() {
+        for spec in PALETTE_COMMANDS {
+            if spec.argument != ArgumentKind::None {
+                assert!(
+                    spec.arity >= 1,
+                    "`{}` describes a first argument but takes none",
+                    spec.canonical
+                );
+            }
+        }
+    }
+
+    /// And the converse: a command that takes no arguments cannot describe one,
+    /// or completion would offer a list for a word that accepts nothing.
+    #[test]
+    fn zero_arity_commands_take_no_argument_kind() {
+        for spec in PALETTE_COMMANDS {
+            if spec.arity == 0 {
+                assert_eq!(
+                    spec.argument,
+                    ArgumentKind::None,
+                    "`{}` takes no arguments but describes one",
+                    spec.canonical
+                );
+            }
+        }
+    }
+
+    /// Aliases share their command's argument kind, so completion works for
+    /// every spelling the parser accepts.
+    #[test]
+    fn argument_kind_is_found_by_alias_and_case_insensitively() {
+        assert_eq!(argument_kind("set-scene"), ArgumentKind::Scene);
+        assert_eq!(argument_kind("SET-SCENE"), ArgumentKind::Scene);
+        assert_eq!(argument_kind("volume"), ArgumentKind::AudioInput);
+        assert_eq!(argument_kind("stream"), ArgumentKind::None);
+        // Input completion feeds it is arbitrary, and must never error.
+        assert_eq!(argument_kind("frobnicate"), ArgumentKind::None);
+        assert_eq!(argument_kind(""), ArgumentKind::None);
+        assert_eq!(argument_kind("a\0b"), ArgumentKind::None);
+        assert_eq!(
+            argument_kind(&"a".repeat(MAX_TARGET_TOKEN_LENGTH + 1)),
+            ArgumentKind::None
+        );
     }
 
     /// No duplicates, so a completion menu cannot list the same command twice.

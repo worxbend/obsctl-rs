@@ -2,7 +2,54 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::support::fs;
+use crate::support::validation::{MAX_TARGET_TOKEN_LENGTH, trim_and_validate_token_with_max_len};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+/// The five log verbosities `obsctl` accepts on `--log-level` and `RUST_LOG`.
+///
+/// Parsing once into this enum means the rest of the program carries a proof
+/// that the level is valid, instead of passing a `String` around and re-parsing
+/// it (with a silent fallback) at every use site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFilterLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogFilterLevel {
+    /// The canonical lowercase spelling, which is also a valid `EnvFilter`
+    /// directive.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Trace => "trace",
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl std::str::FromStr for LogFilterLevel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let level = trim_and_validate_token_with_max_len(value, MAX_TARGET_TOKEN_LENGTH)
+            .map_err(|error| format!("log level {error}"))?
+            .to_ascii_lowercase();
+        match level.as_str() {
+            "trace" => Ok(Self::Trace),
+            "debug" => Ok(Self::Debug),
+            "info" => Ok(Self::Info),
+            "warn" => Ok(Self::Warn),
+            "error" => Ok(Self::Error),
+            _ => Err("log level must be one of trace, debug, info, warn, error".to_string()),
+        }
+    }
+}
 
 pub fn default_log_path() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.data_local_dir().join("obsctl/obsctl.log"))
@@ -11,9 +58,8 @@ pub fn default_log_path() -> Option<PathBuf> {
 /// Initialize tracing for server mode.
 ///
 /// Writes to both stderr (human-readable) and optionally a log file.
-/// `level` should be one of "debug", "info", "warn", "error".
-pub fn init_server(level: &str, log_file: Option<PathBuf>) {
-    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
+pub fn init_server(level: LogFilterLevel, log_file: Option<PathBuf>) {
+    let filter = EnvFilter::new(level.as_str());
 
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
@@ -55,9 +101,8 @@ pub fn init_server(level: &str, log_file: Option<PathBuf>) {
 }
 
 /// Minimal tracing init for CLI/TUI mode (stderr only).
-/// `level` is an `EnvFilter`-compatible string such as "debug" or "warn".
-pub fn init_cli(level: &str) {
-    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("warn"));
+pub fn init_cli(level: LogFilterLevel) {
+    let filter = EnvFilter::new(level.as_str());
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(fmt::layer().with_writer(std::io::stderr).with_ansi(true))
@@ -109,6 +154,28 @@ fn open_safe_log_file(path: &std::path::Path) -> io::Result<std::fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_filter_level_parses_the_five_accepted_spellings() {
+        use std::str::FromStr;
+
+        assert_eq!(
+            LogFilterLevel::from_str(" TrAcE ").unwrap(),
+            LogFilterLevel::Trace
+        );
+        for level in [
+            LogFilterLevel::Trace,
+            LogFilterLevel::Debug,
+            LogFilterLevel::Info,
+            LogFilterLevel::Warn,
+            LogFilterLevel::Error,
+        ] {
+            assert_eq!(LogFilterLevel::from_str(level.as_str()).unwrap(), level);
+            assert!(EnvFilter::try_new(level.as_str()).is_ok());
+        }
+        assert!(LogFilterLevel::from_str("verbose").is_err());
+        assert!(LogFilterLevel::from_str(&"trace".repeat(100)).is_err());
+    }
 
     #[test]
     fn open_safe_log_file_creates_regular_file() {

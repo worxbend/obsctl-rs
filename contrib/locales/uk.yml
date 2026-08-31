@@ -15,6 +15,9 @@ common:
   warning: "попередження: %{message}"
 
 cli:
+  config:
+    load_failed: "не вдалося завантажити конфігурацію: %{error}"
+
   init:
     no_config_dir: "не вдалося визначити каталог конфігурації"
     already_exists: "Конфігурацію вже існує за шляхом %{path}. Використайте --force для перезапису."
@@ -44,6 +47,7 @@ cli:
 
   service:
     no_unit_dir: "не вдалося визначити каталог користувацьких unit-файлів systemd"
+    exec_path_unresolved: "не вдалося визначити шлях до виконуваного файлу: %{error}"
     installed: "Службу встановлено за шляхом %{path}"
     enable_hint: "Увімкнути: %{hint}"
     uninstalled: "Службу видалено."
@@ -259,6 +263,7 @@ tui:
   # відправлення (`tui::daemon`).
   daemon:
     help_line: "Команди: %{commands}  —  <space> відкриває меню which-key"
+    ok: "ок"
     reply_error: "помилка: %{error}"
     reply_error_bare: "помилка"
     reply_error_with_code: "помилка [%{code}]: %{message}"
@@ -268,3 +273,54 @@ tui:
     invalid_scene_name: "помилка: неприпустима назва сцени: %{error}"
     too_many_hidden_scenes: "помилка: профіль сцен може приховувати щонайбільше %{max} сцен"
     volume_set: "гучність → %{percent}%"
+    not_a_daemon_command: "це не команда демона"
+
+  # Назви тем, які є описом, а не власною назвою (бренди на кшталт Nord чи
+  # Dracula не перекладаються) (`tui::theme`).
+  theme:
+    mono: "Моно (безпечна для TTY)"
+    custom: "Власна"
+
+  # Рядки меню which-key: короткий опис кожного присвоєння клавіш
+  # (`tui::keymap`). Назви груп водночас є заголовками підменю.
+  whichkey:
+    g:
+      top_of_list: "на початок списку"
+    leader:
+      find: "пошук"
+      panel: "панель"
+      stream: "трансляція"
+      config: "конфіг"
+      obs: "obs"
+      ui: "інтерфейс"
+      scene_profiles: "профілі сцен"
+      next_scene_profile: "наступний профіль"
+      command_palette: "палітра команд"
+      quit: "вихід"
+    find:
+      scene: "сцена"
+      profile: "профіль"
+      scene_profile: "профіль сцен"
+      collection: "колекція"
+      audio_input: "аудіовхід"
+    panel:
+      scenes: "сцени"
+      audio: "аудіо"
+      profiles: "профілі"
+      collections: "колекції"
+    stream:
+      toggle_stream: "перемкнути ефір"
+      toggle_record: "перемкнути запис"
+    config:
+      reload: "перезавантажити"
+      dump: "вивантажити з OBS"
+      validate: "перевірити конфіг"
+    obs:
+      reconnect_obs: "перепідключити OBS"
+      obs_status: "стан OBS"
+      daemon_status: "стан демона"
+      reconnect_daemon: "перепідключити демон"
+    ui:
+      theme_picker: "вибір теми"
+      toggle_icons: "перемкнути значки"
+      toggle_advanced: "розширений інтерфейс"

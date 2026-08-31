@@ -6,6 +6,7 @@ use tokio::sync::{RwLock, RwLockWriteGuard};
 use tracing::debug;
 
 use crate::config::model::{AudioInputConfig, Config, SceneConfig};
+use crate::domain::aliases::AliasEntry;
 use crate::domain::scene_profiles::SceneVisibility;
 use crate::ipc::{
     protocol::{ServerMessage, Topic},
@@ -56,6 +57,24 @@ impl ConfigProjection {
                 .collect(),
             active_scene_profile: config.active_scene_profile().map(|p| p.name.clone()),
         }
+    }
+
+    /// Config entry for a scene OBS reported, matched by exact name.
+    ///
+    /// The rule is byte-for-byte equality with the name as OBS reports it: the
+    /// config is written by hand against scene names copied out of OBS, and a
+    /// looser match would silently attach one scene's aliases to another. Four
+    /// call sites used to spell this scan out, so if the rule should ever move
+    /// to `domain::names::normalized_name`, this is the single place to change.
+    pub(crate) fn scene_config(&self, name: &str) -> Option<&SceneConfig> {
+        self.scenes.iter().find(|c| c.name == name)
+    }
+
+    /// Config entry for an audio input OBS reported, matched by exact name.
+    ///
+    /// Same rule, and the same single point of change, as `scene_config`.
+    pub(crate) fn audio_config(&self, name: &str) -> Option<&AudioInputConfig> {
+        self.audio_inputs.iter().find(|c| c.name == name)
     }
 }
 
@@ -113,8 +132,38 @@ impl StateStore {
         Self::broadcast(&self.hub, guard);
     }
 
-    pub async fn read(&self) -> ObsSnapshot {
+    pub async fn snapshot(&self) -> ObsSnapshot {
         self.inner.read().await.clone()
+    }
+
+    /// Alias/shortcut lookup table for scenes, built under the read guard.
+    ///
+    /// Callers only ever want the projection, not the whole snapshot, so the
+    /// projection happens here: the guard is taken, the `Vec` is built, and the
+    /// guard is dropped at the end of the expression — never held across an
+    /// `.await`.
+    pub async fn scene_aliases(&self) -> Vec<AliasEntry> {
+        alias_entries(
+            self.inner
+                .read()
+                .await
+                .scenes
+                .iter()
+                .map(|s| (&s.name, &s.alias, &s.shortcut)),
+        )
+    }
+
+    /// Alias/shortcut lookup table for audio inputs. See
+    /// [`scene_aliases`](Self::scene_aliases) for why the projection lives here.
+    pub async fn audio_aliases(&self) -> Vec<AliasEntry> {
+        alias_entries(
+            self.inner
+                .read()
+                .await
+                .audio_inputs
+                .iter()
+                .map(|a| (&a.name, &a.alias, &a.shortcut)),
+        )
     }
 
     /// Overwrite the entire snapshot and broadcast — a test-seeding entry
@@ -261,14 +310,11 @@ impl StateStore {
     pub async fn merge_config(&self, projection: &ConfigProjection) {
         let mut guard = self.inner.write().await;
         for scene in guard.scenes.iter_mut() {
-            let cfg = projection.scenes.iter().find(|c| c.name == scene.name);
+            let cfg = projection.scene_config(&scene.name);
             apply_scene_config(scene, cfg, &projection.visibility);
         }
         for input in guard.audio_inputs.iter_mut() {
-            let cfg = projection
-                .audio_inputs
-                .iter()
-                .find(|c| c.name == input.name);
+            let cfg = projection.audio_config(&input.name);
             apply_audio_config(input, cfg);
         }
         guard.scene_profiles = projection.scene_profiles.clone();
@@ -568,7 +614,7 @@ pub fn build_snapshot(refreshed: &RefreshedObsState, projection: &ConfigProjecti
             };
             apply_scene_config(
                 &mut scene,
-                projection.scenes.iter().find(|c| c.name == *name),
+                projection.scene_config(name),
                 &projection.visibility,
             );
             scene
@@ -589,13 +635,7 @@ pub fn build_snapshot(refreshed: &RefreshedObsState, projection: &ConfigProjecti
                 Some(volume_mul) => state.set_level(volume_mul),
                 None => state.clear_level(),
             }
-            apply_audio_config(
-                &mut state,
-                projection
-                    .audio_inputs
-                    .iter()
-                    .find(|c| c.name == input.name),
-            );
+            apply_audio_config(&mut state, projection.audio_config(&input.name));
             state
         })
         .collect();
@@ -618,6 +658,21 @@ pub fn build_snapshot(refreshed: &RefreshedObsState, projection: &ConfigProjecti
         updated_at: OffsetDateTime::now_utc(),
         ..ObsSnapshot::default()
     }
+}
+
+/// `resolve` works off `AliasEntry`, so both snapshot lists are projected into
+/// it the same way.
+fn alias_entries<'a>(
+    items: impl IntoIterator<Item = (&'a String, &'a Option<String>, &'a Option<String>)>,
+) -> Vec<AliasEntry> {
+    items
+        .into_iter()
+        .map(|(name, alias, shortcut)| AliasEntry {
+            name: name.clone(),
+            alias: alias.clone(),
+            shortcut: shortcut.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -690,7 +745,7 @@ mod tests {
 
         store.mark_disconnected(Some("timeout".to_string())).await;
 
-        let current = store.read().await;
+        let current = store.snapshot().await;
         assert!(!current.connected);
         assert_eq!(current.last_error.as_deref(), Some("timeout"));
     }
@@ -723,7 +778,7 @@ mod tests {
             )
             .await;
 
-        let current = store.read().await;
+        let current = store.snapshot().await;
         assert!(current.connected);
         assert_eq!(current.obs_studio_version.as_deref(), Some("30.1.0"));
         assert_eq!(current.obs_websocket_version.as_deref(), Some("5.3.0"));
@@ -763,7 +818,7 @@ mod tests {
             })
             .await;
 
-        let current = store.read().await;
+        let current = store.snapshot().await;
         assert_eq!(current.current_scene.as_deref(), Some("B"));
         assert!(current.scenes[1].active);
         assert!(!current.scenes[0].active);
@@ -782,12 +837,12 @@ mod tests {
                 ..ObsSnapshot::default()
             })
             .await;
-        let before = store.read().await.updated_at;
+        let before = store.snapshot().await.updated_at;
 
         store
             .apply_event(ObsEvent::StreamStateChanged { active: true })
             .await;
-        let after_change = store.read().await;
+        let after_change = store.snapshot().await;
         assert!(after_change.streaming);
         assert!(
             after_change.updated_at > before,
@@ -799,7 +854,7 @@ mod tests {
             .apply_event(ObsEvent::StreamStateChanged { active: true })
             .await;
         assert_eq!(
-            store.read().await.updated_at,
+            store.snapshot().await.updated_at,
             after_change.updated_at,
             "a no-op event must leave the timestamp alone"
         );
@@ -825,7 +880,7 @@ mod tests {
             })
             .await;
 
-        let current = store.read().await;
+        let current = store.snapshot().await;
         assert_eq!(current.audio_inputs[0].muted, Some(true));
     }
 
@@ -844,7 +899,7 @@ mod tests {
             })
             .await;
 
-        let current = store.read().await;
+        let current = store.snapshot().await;
         assert_eq!(current.current_profile.as_deref(), Some("Streaming"));
     }
 
@@ -902,7 +957,7 @@ mod tests {
             .await;
         assert!(!superseded, "no events landed during this refresh");
 
-        let current = store.read().await;
+        let current = store.snapshot().await;
         assert_eq!(current.current_scene.as_deref(), Some("Main"));
         assert_eq!(current.stream_bitrate_kbps, Some(4500.0));
         assert_eq!(current.stream_duration_ms, Some(12_000));
@@ -954,7 +1009,10 @@ mod tests {
         // The stale fetch did overwrite the event — that part is unavoidable,
         // its data predates it — but it says so rather than leaving the wrong
         // scene showing until the next event of that kind.
-        assert_eq!(store.read().await.current_scene.as_deref(), Some("Main"));
+        assert_eq!(
+            store.snapshot().await.current_scene.as_deref(),
+            Some("Main")
+        );
         assert!(
             superseded,
             "a refresh overtaken by an event must ask to be run again"
@@ -1003,7 +1061,7 @@ mod tests {
         );
         // Showing what it overwrote, so the reason for the re-fetch is on the
         // record: the daemon is now claiming a connection that is gone.
-        let current = store.read().await;
+        let current = store.snapshot().await;
         assert!(current.connected);
         assert_eq!(current.last_error, None);
     }
@@ -1152,7 +1210,7 @@ mod tests {
         // A reloaded config that no longer mentions either of them.
         store.merge_config(&no_config()).await;
 
-        let snap = store.read().await;
+        let snap = store.snapshot().await;
         assert_eq!(snap.scenes[0].alias, None);
         assert_eq!(snap.scenes[0].shortcut, None);
         assert_eq!(snap.scenes[0].group, None);
@@ -1225,7 +1283,7 @@ mod tests {
             ))
             .await;
 
-        let snap = store.read().await;
+        let snap = store.snapshot().await;
         // Listed by the profile, and not marked hidden in `scenes:`.
         assert!(snap.scenes[0].hidden, "Main is hidden by the profile");
         // Marked hidden in `scenes:`, and absent from the profile.
@@ -1250,7 +1308,7 @@ mod tests {
             ))
             .await;
 
-        let snap = store.read().await;
+        let snap = store.snapshot().await;
         assert!(!snap.scenes[0].hidden);
         assert!(snap.scenes[1].hidden);
         assert_eq!(snap.active_scene_profile, None);
@@ -1272,7 +1330,7 @@ mod tests {
             ))
             .await;
 
-        let snap = store.read().await;
+        let snap = store.snapshot().await;
         assert_eq!(snap.active_scene_profile, None);
         // ...and the baseline decides, exactly as if nothing were selected.
         assert!(!snap.scenes[0].hidden);
@@ -1292,7 +1350,7 @@ mod tests {
             ))
             .await;
 
-        let snap = store.read().await;
+        let snap = store.snapshot().await;
         assert_eq!(snap.active_scene_profile.as_deref(), Some("streaming"));
         assert!(snap.scenes[0].hidden);
     }
@@ -1357,7 +1415,7 @@ mod tests {
             })
             .await;
 
-        let current = store.read().await;
+        let current = store.snapshot().await;
         assert_eq!(current.current_scene_collection.as_deref(), Some("Gaming"));
     }
 
@@ -1380,7 +1438,7 @@ mod tests {
             ))
             .await;
 
-        let current = store.read().await;
+        let current = store.snapshot().await;
         assert_eq!(current.stats, Some(stats));
         assert_eq!(current.stream_bitrate_kbps, Some(4500.0));
         assert_eq!(current.stream_duration_ms, Some(12_000));

@@ -20,12 +20,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     } else {
         theme.border
     };
-    let title_text = t!(chrome::glyph(
-        model,
-        "tui.header.title",
-        "tui.header.title_ascii"
-    ))
-    .into_owned();
+    let title_text = chrome::phrase(model, "tui.header.title", "tui.header.title_ascii");
     let title = chrome::heading(model, title_text, theme.accent, theme.accent_alt);
     let block = chrome::bordered(model, BorderType::Rounded, border, title);
     let Some(inner) = chrome::frame(f, area, block) else {

@@ -77,7 +77,11 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
         .collect();
 
     let title = t!("tui.panels.scenes.title");
-    let hint = t!(model.symbol("tui.panels.scenes.hint", "tui.panels.scenes.hint_ascii"));
+    let hint = chrome::phrase(
+        model,
+        "tui.panels.scenes.hint",
+        "tui.panels.scenes.hint_ascii",
+    );
     let badge = filter_badge(model);
     let block = chrome::panel_badged(
         model.symbol("🎬", "S"),

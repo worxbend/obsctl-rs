@@ -2,7 +2,9 @@
 //! in-app settings view (styled after btop's theme switcher).
 
 use ratatui::style::{Color, Modifier, Style};
+use rust_i18n::t;
 
+use crate::config::model::CustomThemeConfig;
 use crate::tui::anim;
 
 /// How much of the highlight color is mixed into the panel background for the
@@ -613,26 +615,8 @@ pub fn at(index: usize) -> Theme {
 /// The `ui.theme` id that selects the user-supplied `ui.custom_theme` palette.
 pub const CUSTOM_ID: &str = "custom";
 
-/// A user-supplied palette, read from config `ui.custom_theme`. Every field
-/// is an optional `"#RRGGBB"` (or `"RRGGBB"`) hex string; unset fields fall
-/// back to the corresponding [`Theme::default_theme`] color so a partial
-/// override (e.g. just `accent`) still produces a usable theme.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CustomThemeSpec {
-    pub bg: Option<String>,
-    pub accent: Option<String>,
-    pub accent_alt: Option<String>,
-    pub fg: Option<String>,
-    pub muted: Option<String>,
-    pub border: Option<String>,
-    pub border_focus: Option<String>,
-    pub success: Option<String>,
-    pub warning: Option<String>,
-    pub danger: Option<String>,
-    pub info: Option<String>,
-    pub highlight_bg: Option<String>,
-    pub highlight_fg: Option<String>,
-}
+/// The `ui.theme` id of the TTY-safe monochrome palette.
+pub const MONO_ID: &str = "mono";
 
 /// Parse a `"#RRGGBB"` or `"RRGGBB"` hex string into a truecolor `Color`.
 /// Returns `None` for anything else (wrong length, non-hex digits, etc.)
@@ -667,15 +651,21 @@ impl Theme {
     /// Resolve the configured theme, honoring the reserved [`CUSTOM_ID`]
     /// which builds a one-off theme from `custom` instead of looking it up
     /// in [`ALL`].
-    pub fn resolve(id: &str, custom: Option<&CustomThemeSpec>) -> Theme {
+    pub fn resolve(id: &str, custom: Option<&CustomThemeConfig>) -> Theme {
         if id.eq_ignore_ascii_case(CUSTOM_ID) {
-            Theme::from_custom_spec(custom.cloned().unwrap_or_default())
+            let fallback = CustomThemeConfig::default();
+            Theme::from_custom_spec(custom.unwrap_or(&fallback))
         } else {
             Theme::by_id(id)
         }
     }
 
-    pub fn from_custom_spec(spec: CustomThemeSpec) -> Theme {
+    /// Build a one-off theme from the on-disk `ui.custom_theme` palette. Every
+    /// field is an optional `"#RRGGBB"` (or `"RRGGBB"`) hex string; unset or
+    /// unparseable fields fall back to the corresponding
+    /// [`Theme::default_theme`] color, so a partial override (e.g. just
+    /// `accent`) still produces a usable theme.
+    pub fn from_custom_spec(spec: &CustomThemeConfig) -> Theme {
         let base = Theme::default_theme();
         let pick = |value: &Option<String>, fallback: Color| {
             value.as_deref().and_then(parse_hex).unwrap_or(fallback)
@@ -696,6 +686,20 @@ impl Theme {
             info: pick(&spec.info, base.info),
             highlight_bg: pick(&spec.highlight_bg, base.highlight_bg),
             highlight_fg: pick(&spec.highlight_fg, base.highlight_fg),
+        }
+    }
+
+    /// The theme's name as shown to the user.
+    ///
+    /// Most themes are named after the palette they copy (Nord, Dracula,
+    /// Gruvbox); those are proper nouns and stay as they are in every locale.
+    /// The two that are descriptions rather than names — the TTY-safe mono
+    /// theme and the user's own custom palette — are translated.
+    pub fn display_label(&self) -> std::borrow::Cow<'static, str> {
+        match self.id {
+            MONO_ID => std::borrow::Cow::Owned(t!("tui.theme.mono").into_owned()),
+            CUSTOM_ID => std::borrow::Cow::Owned(t!("tui.theme.custom").into_owned()),
+            _ => std::borrow::Cow::Borrowed(self.label),
         }
     }
 
@@ -748,6 +752,18 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Brand palettes keep their own name in every locale; the two themes
+    /// whose "name" is really a description go through the locale files.
+    #[test]
+    fn display_label_translates_only_the_descriptive_names() {
+        assert_eq!(Theme::by_id("nord").display_label(), "Nord");
+        assert_eq!(Theme::by_id(MONO_ID).display_label(), "Mono (TTY-safe)");
+        assert_eq!(
+            Theme::from_custom_spec(&CustomThemeConfig::default()).display_label(),
+            "Custom"
+        );
+    }
 
     #[test]
     fn by_id_falls_back_to_default_for_unknown_name() {
@@ -808,11 +824,11 @@ mod tests {
 
     #[test]
     fn from_custom_spec_uses_overrides_and_falls_back_for_unset_fields() {
-        let spec = CustomThemeSpec {
+        let spec = CustomThemeConfig {
             accent: Some("#112233".to_string()),
             ..Default::default()
         };
-        let theme = Theme::from_custom_spec(spec);
+        let theme = Theme::from_custom_spec(&spec);
         assert_eq!(theme.id, CUSTOM_ID);
         assert_eq!(theme.accent, Color::Rgb(0x11, 0x22, 0x33));
         assert_eq!(theme.fg, Theme::default_theme().fg);
@@ -820,7 +836,7 @@ mod tests {
 
     #[test]
     fn resolve_dispatches_custom_id_to_custom_spec() {
-        let spec = CustomThemeSpec {
+        let spec = CustomThemeConfig {
             accent: Some("#abcdef".to_string()),
             ..Default::default()
         };
@@ -846,17 +862,17 @@ mod tests {
 
     #[test]
     fn from_custom_spec_overrides_background() {
-        let spec = CustomThemeSpec {
+        let spec = CustomThemeConfig {
             bg: Some("#101010".to_string()),
             ..Default::default()
         };
-        let theme = Theme::from_custom_spec(spec);
+        let theme = Theme::from_custom_spec(&spec);
         assert_eq!(theme.bg, Color::Rgb(0x10, 0x10, 0x10));
     }
 
     #[test]
     fn from_custom_spec_falls_back_to_default_background() {
-        let theme = Theme::from_custom_spec(CustomThemeSpec::default());
+        let theme = Theme::from_custom_spec(&CustomThemeConfig::default());
         assert_eq!(theme.bg, Theme::default_theme().bg);
     }
 
@@ -988,7 +1004,7 @@ mod tests {
 
     #[test]
     fn custom_themes_derive_a_tint_from_their_own_palette() {
-        let theme = Theme::from_custom_spec(CustomThemeSpec {
+        let theme = Theme::from_custom_spec(&CustomThemeConfig {
             bg: Some("#000000".to_string()),
             highlight_bg: Some("#ffffff".to_string()),
             ..Default::default()

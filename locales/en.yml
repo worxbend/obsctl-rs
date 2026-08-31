@@ -11,6 +11,9 @@ common:
   warning: "warning: %{message}"
 
 cli:
+  config:
+    load_failed: "failed to load config: %{error}"
+
   init:
     no_config_dir: "could not determine config directory"
     already_exists: "Config already exists at %{path}. Use --force to overwrite."
@@ -40,6 +43,7 @@ cli:
 
   service:
     no_unit_dir: "could not determine systemd user unit directory"
+    exec_path_unresolved: "could not determine executable path: %{error}"
     installed: "Service installed at %{path}"
     enable_hint: "Enable with: %{hint}"
     uninstalled: "Service uninstalled."
@@ -111,11 +115,13 @@ tui:
   # --- TUI widget layer ---------------------------------------------------
   # Everything the dashboard panels draw. A key ending in `_ascii` is the
   # plain-ASCII spelling of the key above it, for terminals that cannot show
-  # arrows, box drawing or emoji. The widget picks between the pair with
-  # `TuiModel::symbol` where the difference is a pictogram, and with
-  # `chrome::glyph` where it is box drawing — so the two keys must stay
-  # adjacent and describe the same thing. Keep this whole block in the same
-  # key order in contrib/locales/uk.yml.
+  # arrows, box drawing or typographic punctuation. Widgets pick between such
+  # a pair with `chrome::phrase`, which asks `advanced_ui` — whether the
+  # terminal can draw Unicode at all — so the two keys must stay adjacent and
+  # describe the same thing. `TuiModel::symbol`, which asks the separate
+  # `show_icons` switch, is for inline pictogram literals in the widgets
+  # (`model.symbol("🎬", "S")`) and never for a key in this file. Keep this
+  # whole block in the same key order in contrib/locales/uk.yml.
 
   audio:
     title: "Audio Matrix"
@@ -263,6 +269,7 @@ tui:
   # line here has to keep that prefix.
   daemon:
     help_line: "Commands: %{commands}  —  <space> opens the which-key menu"
+    ok: "ok"
     reply_error: "error: %{error}"
     reply_error_bare: "error"
     reply_error_with_code: "error [%{code}]: %{message}"
@@ -272,3 +279,55 @@ tui:
     invalid_scene_name: "error: invalid scene name: %{error}"
     too_many_hidden_scenes: "error: a scene profile may hide at most %{max} scenes"
     volume_set: "volume → %{percent}%"
+    not_a_daemon_command: "not a daemon command"
+
+  # Theme names that describe rather than name (brand palettes such as Nord
+  # or Dracula are proper nouns and stay untranslated) (`tui::theme`).
+  theme:
+    mono: "Mono (TTY-safe)"
+    custom: "Custom"
+
+  # Rows of the which-key overlay: one short description per mapping
+  # (`tui::keymap`). The group keys double as the heading of the submenu
+  # they open.
+  whichkey:
+    g:
+      top_of_list: "top of list"
+    leader:
+      find: "find"
+      panel: "panel"
+      stream: "stream"
+      config: "config"
+      obs: "obs"
+      ui: "ui"
+      scene_profiles: "scene profiles"
+      next_scene_profile: "next scene profile"
+      command_palette: "command palette"
+      quit: "quit"
+    find:
+      scene: "scene"
+      profile: "profile"
+      scene_profile: "scene profile"
+      collection: "collection"
+      audio_input: "audio input"
+    panel:
+      scenes: "scenes"
+      audio: "audio"
+      profiles: "profiles"
+      collections: "collections"
+    stream:
+      toggle_stream: "toggle stream"
+      toggle_record: "toggle record"
+    config:
+      reload: "reload config"
+      dump: "dump config from OBS"
+      validate: "validate config"
+    obs:
+      reconnect_obs: "reconnect to OBS"
+      obs_status: "OBS status"
+      daemon_status: "daemon status"
+      reconnect_daemon: "reconnect to daemon"
+    ui:
+      theme_picker: "theme picker"
+      toggle_icons: "toggle icons"
+      toggle_advanced: "toggle advanced UI"

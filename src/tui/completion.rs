@@ -1,5 +1,5 @@
 use super::model::TuiModel;
-use crate::domain::parser::{CANONICAL_PALETTE_COMMANDS, PALETTE_PREFIXES};
+use crate::domain::parser::{self, ArgumentKind, CANONICAL_PALETTE_COMMANDS, PALETTE_PREFIXES};
 
 /// Split a leading palette prefix off `input`, if it has one.
 fn split_prefix(input: &str) -> (&str, &str) {
@@ -25,21 +25,39 @@ fn sort_candidates(candidates: &mut Vec<String>, prefix: &str) {
 pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
     let (prefix, body) = split_prefix(input);
 
-    if !body.contains(' ') {
-        let lower = body.to_ascii_lowercase();
-        let mut matches: Vec<String> = CANONICAL_PALETTE_COMMANDS
-            .iter()
-            .filter(|cmd| cmd.starts_with(lower.as_str()))
-            .map(|cmd| format!("{prefix}{cmd}"))
-            .collect();
-        sort_candidates(&mut matches, input);
-        return matches;
+    // No space yet means the user is still naming the command; once there is
+    // one, the word before it picks which pool of arguments to complete from.
+    match body.split_once(' ') {
+        None => complete_command(prefix, body, input),
+        Some((typed_cmd, raw_arg_prefix)) => {
+            complete_argument(prefix, typed_cmd, raw_arg_prefix, model)
+        }
     }
+}
 
-    let (typed_cmd, raw_arg_prefix) = match body.split_once(' ') {
-        Some(parts) => parts,
-        None => return vec![],
-    };
+/// Complete the command word itself, e.g. `/sc` -> `/scene`.
+///
+/// `input` is the full raw text including the palette prefix: candidates are
+/// `{prefix}{cmd}`, so the exact-match sort has to compare against the raw
+/// input, not the prefix-stripped `body`.
+fn complete_command(prefix: &str, body: &str, input: &str) -> Vec<String> {
+    let lower = body.to_ascii_lowercase();
+    let mut matches: Vec<String> = CANONICAL_PALETTE_COMMANDS
+        .iter()
+        .filter(|cmd| cmd.starts_with(lower.as_str()))
+        .map(|cmd| format!("{prefix}{cmd}"))
+        .collect();
+    sort_candidates(&mut matches, input);
+    matches
+}
+
+/// Complete the argument after a command word, e.g. `/scene m` -> `/scene main`.
+fn complete_argument(
+    prefix: &str,
+    typed_cmd: &str,
+    raw_arg_prefix: &str,
+    model: &TuiModel,
+) -> Vec<String> {
     let typed_cmd = typed_cmd.trim_end();
     // Candidates echo back exactly what the user typed, prefix and casing
     // included; only the lookup key is normalized.
@@ -51,25 +69,23 @@ pub fn compute(input: &str, model: &TuiModel) -> Vec<String> {
     // Each arm answers only "what could the user be naming here?"; the
     // filtering, sorting, and re-attaching of the command word are the same
     // for all of them and happen once, below.
-    let pool: Vec<String> = match cmd_key.as_str() {
-        "scene" | "set-scene" => model
+    let pool: Vec<String> = match parser::argument_kind(&cmd_key) {
+        ArgumentKind::Scene => model
             .scenes()
             .iter()
             .flat_map(|s| name_and_alias(&s.name, &s.alias))
             .collect(),
-        "profile" | "set-profile" => model.profiles().to_vec(),
+        ArgumentKind::Profile => model.profiles().to_vec(),
         // The obsctl scene profiles, which the daemon publishes in the same
         // snapshot as the OBS profiles above and which are a different thing.
-        "scene-profile" | "set-scene-profile" | "scene-profile-delete" | "delete-scene-profile" => {
-            model.scene_profile_names()
-        }
-        "collection" | "set-collection" | "scene-collection" => model.scene_collections().to_vec(),
-        "mute" | "unmute" | "toggle-mute" | "vol" | "volume" => model
+        ArgumentKind::SceneProfile => model.scene_profile_names(),
+        ArgumentKind::SceneCollection => model.scene_collections().to_vec(),
+        ArgumentKind::AudioInput => model
             .audio_inputs()
             .iter()
             .flat_map(|a| name_and_alias(&a.name, &a.alias))
             .collect(),
-        _ => return vec![],
+        ArgumentKind::None => return vec![],
     };
 
     let mut candidates: Vec<String> = pool
@@ -308,6 +324,22 @@ mod tests {
         assert_eq!(
             result,
             vec!["/mute mIc".to_string(), "/mute Mic Aux".to_string()]
+        );
+    }
+
+    /// Argument completion follows the parser's alias table, so every spelling
+    /// the parser accepts offers the same list. `set-collection` used to offer
+    /// nothing because the completion menu kept its own copy of the aliases.
+    #[test]
+    fn aliases_complete_the_same_argument_list_as_their_canonical_command() {
+        let mut model = make_model(vec![], vec![]);
+        model.set_snapshot(ObsSnapshot {
+            scene_collections: vec!["Podcast".to_string(), "Gaming".to_string()],
+            ..Default::default()
+        });
+        assert_eq!(
+            compute("/set-collection G", &model),
+            vec!["/set-collection Gaming".to_string()]
         );
     }
 

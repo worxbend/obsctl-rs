@@ -56,6 +56,35 @@ pub struct TuiOptions {
     pub config_path: Option<PathBuf>,
 }
 
+impl TuiOptions {
+    /// Translate the `ui` section of an already-loaded config into the TUI's
+    /// appearance and input options: refresh interval, built-in theme id or
+    /// the `ui.custom_theme` palette, icons, mouse, command-palette prefix.
+    ///
+    /// This used to read the config file itself and silently substitute
+    /// defaults when the read failed — the third read of the same file in one
+    /// launch, and a swallowed error that could disagree with what the rest of
+    /// the launch had decided. It is now a plain transformation with no I/O:
+    /// the caller has already read the file once and reported any problem, and
+    /// passes in the path it used.
+    pub fn from_config(
+        config: &crate::config::model::Config,
+        config_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            refresh_ms: config.ui.refresh_interval_ms,
+            theme: Theme::resolve(&config.ui.theme, config.ui.custom_theme.as_ref()),
+            show_icons: config.ui.show_icons,
+            advanced_ui: config.ui.advanced_ui,
+            mouse: config.ui.mouse,
+            palette_prefix: crate::domain::parser::palette_prefix_or_default(
+                &config.ui.command_palette_prefix,
+            ),
+            config_path,
+        }
+    }
+}
+
 impl Default for TuiOptions {
     fn default() -> Self {
         Self {
@@ -461,4 +490,65 @@ fn spawn_volume_debouncer(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::model::{Config, CustomThemeConfig};
+
+    #[test]
+    fn from_config_defaults_match_option_defaults() {
+        let options = TuiOptions::from_config(&Config::default(), None);
+        let defaults = TuiOptions::default();
+        assert_eq!(options.refresh_ms, defaults.refresh_ms);
+        assert_eq!(options.show_icons, defaults.show_icons);
+        assert_eq!(options.advanced_ui, defaults.advanced_ui);
+        assert_eq!(options.mouse, defaults.mouse);
+        assert_eq!(options.palette_prefix, defaults.palette_prefix);
+        assert_eq!(options.config_path, None);
+    }
+
+    #[test]
+    fn from_config_resolves_custom_theme_palette() {
+        let mut config = Config::default();
+        config.ui.theme = "custom".to_string();
+        config.ui.custom_theme = Some(CustomThemeConfig {
+            accent: Some("#abcdef".to_string()),
+            ..Default::default()
+        });
+        let options = TuiOptions::from_config(&config, None);
+        assert_eq!(
+            options.theme.accent,
+            ratatui::style::Color::Rgb(0xab, 0xcd, 0xef)
+        );
+    }
+
+    #[test]
+    fn from_config_falls_back_on_unsupported_palette_prefix() {
+        for value in ["x", "", ":x"] {
+            let mut config = Config::default();
+            config.ui.command_palette_prefix = value.to_string();
+            let expected = if value == ":x" {
+                ':'
+            } else {
+                DEFAULT_PALETTE_PREFIX
+            };
+            assert_eq!(
+                TuiOptions::from_config(&config, None).palette_prefix,
+                expected,
+                "prefix {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_config_carries_refresh_interval_and_path() {
+        let mut config = Config::default();
+        config.ui.refresh_interval_ms = 1234;
+        let path = PathBuf::from("/tmp/obsctl-test-config.yml");
+        let options = TuiOptions::from_config(&config, Some(path.clone()));
+        assert_eq!(options.refresh_ms, 1234);
+        assert_eq!(options.config_path, Some(path));
+    }
 }

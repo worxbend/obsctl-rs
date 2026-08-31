@@ -10,6 +10,7 @@ use rust_i18n::t;
 
 use crate::{
     ipc::protocol::LogLevel,
+    obs::state::ObsSnapshot,
     tui::{
         model::{TuiLogEntry, TuiModel},
         theme::Theme,
@@ -18,27 +19,16 @@ use crate::{
 };
 
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
-    let height = area.height.saturating_sub(2) as usize;
-    let skip = model.log_view_start(height);
-    let resources = known_resources(model);
-
-    let items: Vec<ListItem> = model
-        .logs
-        .iter()
-        .skip(skip)
-        .take(height)
-        .map(|entry| ListItem::new(log_line(entry, model, &resources)))
-        .collect();
-
     // Scrolling back pauses the tail, so say so rather than leaving the pane
     // looking like a live feed that stopped updating.
     let hint = if model.log_scroll > 0 {
-        t!(model.symbol(
+        chrome::phrase(
+            model,
             "tui.panels.logs.hint_scrolled_back",
-            "tui.panels.logs.hint_scrolled_back_ascii"
-        ))
+            "tui.panels.logs.hint_scrolled_back_ascii",
+        )
     } else {
-        t!("tui.panels.logs.hint_following")
+        t!("tui.panels.logs.hint_following").to_string()
     };
     let title = t!("tui.panels.logs.title");
     let block = chrome::panel(
@@ -49,14 +39,26 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         false,
         model,
     );
-    f.render_widget(List::new(items).block(block), area);
+    let Some(inner) = chrome::frame(f, area, block) else {
+        return;
+    };
+
+    let height = usize::from(inner.height);
+    let skip = model.log_view_start(height);
+    let resources = model.resource_index();
+
+    let items: Vec<ListItem> = model
+        .logs
+        .iter()
+        .skip(skip)
+        .take(height)
+        .map(|entry| ListItem::new(log_line(entry, model, resources)))
+        .collect();
+
+    f.render_widget(List::new(items), inner);
 }
 
-fn log_line(
-    entry: &TuiLogEntry,
-    model: &TuiModel,
-    resources: &[(&str, ResourceKind)],
-) -> Line<'static> {
+fn log_line(entry: &TuiLogEntry, model: &TuiModel, resources: &ResourceIndex) -> Line<'static> {
     let theme = model.theme;
     let time = format!(
         "{:02}:{:02}:{:02}",
@@ -91,7 +93,7 @@ fn log_line(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResourceKind {
+pub(crate) enum ResourceKind {
     Scene,
     Audio,
     Profile,
@@ -101,7 +103,7 @@ enum ResourceKind {
 fn highlight_message(
     message: &str,
     model: &TuiModel,
-    resources: &[(&str, ResourceKind)],
+    resources: &ResourceIndex,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut cursor = 0;
@@ -110,8 +112,9 @@ fn highlight_message(
         let rest = &message[cursor..];
 
         if let Some((name, kind)) = resources
+            .entries()
             .iter()
-            .find(|(name, _)| resource_matches(rest, name))
+            .find(|(name, _)| resource_matches(rest, name.as_str()))
         {
             spans.push(Span::styled(
                 rest[..name.len()].to_string(),
@@ -183,38 +186,64 @@ fn highlight_message(
     spans
 }
 
-fn known_resources(model: &TuiModel) -> Vec<(&str, ResourceKind)> {
-    let mut resources = Vec::new();
-    if let Some(snapshot) = model.snapshot() {
-        for scene in &snapshot.scenes {
-            resources.push((scene.name.as_str(), ResourceKind::Scene));
-            if let Some(alias) = scene.alias.as_deref() {
-                resources.push((alias, ResourceKind::Scene));
+/// The resource names the log pane tints, paired with what kind of thing each
+/// one names.
+///
+/// The entries are non-empty, case-insensitively unique, and ordered
+/// longest-name-first so that `highlight_message`'s greedy prefix match never
+/// picks a shorter name that prefixes a longer one — with "main" before
+/// "main-cam", the text "main-cam" would be tinted as "main" plus a stray
+/// "-cam". That ordering used to be an unwritten side effect of the function
+/// that built the list; naming the type is what lets the invariant be stated
+/// (and tested) in one place.
+///
+/// The names are owned `String`s rather than borrows of the snapshot because
+/// the index is cached inside [`TuiModel`], and a borrowing index would make
+/// the model self-referential.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ResourceIndex(Vec<(String, ResourceKind)>);
+
+impl ResourceIndex {
+    /// Build the index from the daemon's latest snapshot (`None` before the
+    /// first one arrives, which yields an empty index).
+    pub(crate) fn from_snapshot(snapshot: Option<&ObsSnapshot>) -> Self {
+        let mut resources: Vec<(String, ResourceKind)> = Vec::new();
+        if let Some(snapshot) = snapshot {
+            for scene in &snapshot.scenes {
+                resources.push((scene.name.clone(), ResourceKind::Scene));
+                if let Some(alias) = scene.alias.as_deref() {
+                    resources.push((alias.to_string(), ResourceKind::Scene));
+                }
             }
-        }
-        for input in &snapshot.audio_inputs {
-            resources.push((input.name.as_str(), ResourceKind::Audio));
-            if let Some(alias) = input.alias.as_deref() {
-                resources.push((alias, ResourceKind::Audio));
+            for input in &snapshot.audio_inputs {
+                resources.push((input.name.clone(), ResourceKind::Audio));
+                if let Some(alias) = input.alias.as_deref() {
+                    resources.push((alias.to_string(), ResourceKind::Audio));
+                }
             }
+            resources.extend(
+                snapshot
+                    .profiles
+                    .iter()
+                    .map(|profile| (profile.clone(), ResourceKind::Profile)),
+            );
+            resources.extend(
+                snapshot
+                    .scene_collections
+                    .iter()
+                    .map(|collection| (collection.clone(), ResourceKind::Collection)),
+            );
         }
+        resources.retain(|(name, _)| !name.is_empty());
+        resources.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
+        resources.dedup_by(|left, right| left.0.eq_ignore_ascii_case(&right.0));
+        Self(resources)
     }
-    resources.extend(
-        model
-            .profiles()
-            .iter()
-            .map(|profile| (profile.as_str(), ResourceKind::Profile)),
-    );
-    resources.extend(
-        model
-            .scene_collections()
-            .iter()
-            .map(|collection| (collection.as_str(), ResourceKind::Collection)),
-    );
-    resources.retain(|(name, _)| !name.is_empty());
-    resources.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
-    resources.dedup_by(|left, right| left.0.eq_ignore_ascii_case(right.0));
-    resources
+
+    /// The indexed names, longest first — see the type's invariant.
+    pub(crate) fn entries(&self) -> &[(String, ResourceKind)] {
+        &self.0
+    }
 }
 
 fn resource_matches(candidate: &str, name: &str) -> bool {
@@ -230,13 +259,11 @@ fn resource_matches(candidate: &str, name: &str) -> bool {
         .is_none_or(|ch| !is_boundary_word_char(ch))
 }
 
-fn exact_resource_kind(
-    candidate: &str,
-    resources: &[(&str, ResourceKind)],
-) -> Option<ResourceKind> {
+fn exact_resource_kind(candidate: &str, resources: &ResourceIndex) -> Option<ResourceKind> {
     resources
+        .entries()
         .iter()
-        .find(|(name, _)| candidate.eq_ignore_ascii_case(name))
+        .find(|(name, _)| candidate.eq_ignore_ascii_case(name.as_str()))
         .map(|(_, kind)| *kind)
 }
 
@@ -440,10 +467,10 @@ mod tests {
     #[test]
     fn highlights_resources_keywords_commands_and_numbers() {
         let model = semantic_model();
-        let resources = known_resources(&model);
+        let resources = model.resource_index();
         let message =
             "scene Main Scene switched -> profile Streaming via /scene in 42ms; OBS connected";
-        let spans = highlight_message(message, &model, &resources);
+        let spans = highlight_message(message, &model, resources);
         assert_eq!(
             spans
                 .iter()
@@ -477,11 +504,11 @@ mod tests {
     #[test]
     fn highlights_quoted_resource_names_and_error_terms() {
         let model = semantic_model();
-        let resources = known_resources(&model);
+        let resources = model.resource_index();
         let spans = highlight_message(
             "failed to switch scene 'Main Scene': timeout on Desktop Audio",
             &model,
-            &resources,
+            resources,
         );
         assert_eq!(
             span_for(&spans, "failed").style.fg,
@@ -502,10 +529,40 @@ mod tests {
     }
 
     #[test]
+    fn resource_index_orders_longer_names_before_the_names_that_prefix_them() {
+        let mut model = TuiModel::default();
+        model.set_snapshot(ObsSnapshot {
+            scenes: vec![
+                SceneState {
+                    name: "main".into(),
+                    ..SceneState::default()
+                },
+                SceneState {
+                    name: "main-cam".into(),
+                    ..SceneState::default()
+                },
+            ],
+            ..ObsSnapshot::default()
+        });
+        let names: Vec<&str> = model
+            .resource_index()
+            .entries()
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(names, ["main-cam", "main"]);
+
+        // The greedy prefix match therefore tints the whole longer name
+        // rather than "main" plus a leftover "-cam".
+        let spans = highlight_message("main-cam is live", &model, model.resource_index());
+        assert_eq!(spans[0].content, "main-cam");
+    }
+
+    #[test]
     fn resource_matching_respects_word_boundaries() {
         let model = semantic_model();
-        let resources = known_resources(&model);
-        let spans = highlight_message("Mainframe and Sceneography", &model, &resources);
+        let resources = model.resource_index();
+        let spans = highlight_message("Mainframe and Sceneography", &model, resources);
         assert_eq!(spans[0].content, "Mainframe");
         assert_eq!(spans[0].style.fg, Some(model.theme.fg));
         assert!(spans.iter().all(|span| span.content != "Main Scene"));

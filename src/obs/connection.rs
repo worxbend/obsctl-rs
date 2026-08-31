@@ -3,8 +3,8 @@ use tokio::sync::mpsc;
 use crate::config::model::ConnectionConfig;
 use crate::config::schema::validate_connection_config;
 use crate::domain::{errors::ObsctlError, result::Result};
-use crate::obs::client::{ObsClient, ObsEvent, handshake};
-use crate::support::validation::{password_config_error_message, resolve_connection_password};
+use crate::obs::client::{ObsEvent, ObsSession, handshake};
+use crate::support::validation::resolve_connection_password;
 
 /// Derived connection parameters, with password resolved from env if needed.
 pub struct ObsConnectionParams {
@@ -31,9 +31,7 @@ impl ObsConnectionParams {
 
         let password =
             resolve_connection_password(config.password.as_deref(), &config.password_env).map_err(
-                |error| {
-                    ObsctlError::ConfigInvalid(password_config_error_message(&error).to_string())
-                },
+                |error| ObsctlError::ConfigInvalid(error.config_field_message().to_string()),
             )?;
 
         Ok(Self {
@@ -46,16 +44,10 @@ impl ObsConnectionParams {
 }
 
 /// Connect to OBS WebSocket, complete the handshake, and return a client handle.
-/// Returns `(client, obs_studio_version, obs_websocket_version, disconnect_rx)`.
 pub async fn connect(
     params: &ObsConnectionParams,
     event_tx: mpsc::Sender<ObsEvent>,
-) -> Result<(
-    ObsClient,
-    String,
-    String,
-    tokio::sync::oneshot::Receiver<()>,
-)> {
+) -> Result<ObsSession> {
     let (ws_stream, _) = tokio::time::timeout(
         std::time::Duration::from_millis(params.connect_timeout_ms),
         tokio_tungstenite::connect_async(&params.url),

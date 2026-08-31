@@ -78,7 +78,7 @@ pub(super) async fn dispatch_palette_command(socket_path: &Path, input: &str) ->
                 }
             };
             PaletteOutcome::Status(
-                ReplyStyle::Acknowledge.format(send_command(socket_path, payload).await, "ok"),
+                ReplyStyle::Acknowledge.format(send_command(socket_path, payload).await),
             )
         }
     }
@@ -136,7 +136,7 @@ fn command_to_payload(cmd: Command) -> std::result::Result<CommandPayload, Strin
         // here. An `Err` rather than a panic: a future caller that does reach
         // it gets a status line, not a dead TUI.
         Command::Help | Command::Quit | Command::Themes => {
-            Err(format!("{cmd:?} is not a daemon command"))
+            Err(t!("tui.daemon.not_a_daemon_command").into_owned())
         }
     }
 }
@@ -151,26 +151,33 @@ fn sanitize_target_arg(value: &str) -> std::result::Result<String, String> {
 pub(super) enum ReplyStyle {
     /// Commands whose worth is that they succeeded — say so and stop.
     Acknowledge,
-    /// Query commands whose worth is in the payload; a bare "ok" would throw
-    /// away the very thing the user asked for, so render the payload instead.
+    /// Query commands whose worth is in the payload; a bare acknowledgement
+    /// would throw away the very thing the user asked for, so render the
+    /// payload instead.
     ShowPayload,
 }
 
 impl ReplyStyle {
     pub(super) async fn send(self, socket_path: &Path, command: ServerCommand) -> String {
         let payload = CommandPayload::simple(command);
-        self.format(send_command(socket_path, payload).await, "ok")
+        self.format(send_command(socket_path, payload).await)
     }
 
     /// Turn a daemon reply into the one status line the TUI has room for.
-    fn format(self, res: Result<ServerMessage>, ok_fallback: &str) -> String {
+    fn format(self, res: Result<ServerMessage>) -> String {
+        self.format_with(res, &t!("tui.daemon.ok"))
+    }
+
+    /// Same as [`ReplyStyle::format`], but with the caller's own wording for a
+    /// success the daemon described with neither a `message` nor a payload.
+    fn format_with(self, res: Result<ServerMessage>, line: &str) -> String {
         match reply_payload(res) {
-            Ok(result) => self.describe_success(result.as_ref(), ok_fallback),
+            Ok(result) => self.describe_success_with(result.as_ref(), line),
             Err(line) => line,
         }
     }
 
-    fn describe_success(self, result: Option<&Value>, ok_fallback: &str) -> String {
+    fn describe_success_with(self, result: Option<&Value>, ok_fallback: &str) -> String {
         result
             .and_then(|v| v.get("message"))
             .and_then(|m| m.as_str())
@@ -180,6 +187,11 @@ impl ReplyStyle {
                 ReplyStyle::ShowPayload => result.map(summarize_json),
             })
             .unwrap_or_else(|| ok_fallback.to_string())
+    }
+
+    #[cfg(test)]
+    fn describe_success(self, result: Option<&Value>) -> String {
+        self.describe_success_with(result, &t!("tui.daemon.ok"))
     }
 }
 
@@ -226,7 +238,7 @@ pub(super) async fn send_simple_with_target(
     };
 
     let payload = CommandPayload::with_target(command, &target);
-    ReplyStyle::Acknowledge.format(send_command(socket_path, payload).await, "ok")
+    ReplyStyle::Acknowledge.format(send_command(socket_path, payload).await)
 }
 
 /// Validate a target name, returning the status line to show on rejection.
@@ -506,7 +518,7 @@ pub(super) async fn send_set_volume(socket_path: &Path, target: &str, percent: u
     };
 
     let payload = CommandPayload::set_volume(&target, percent);
-    ReplyStyle::Acknowledge.format(
+    ReplyStyle::Acknowledge.format_with(
         send_command(socket_path, payload).await,
         &t!("tui.daemon.volume_set", percent = percent.to_string()),
     )
@@ -525,10 +537,22 @@ fn summarize_json(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SaveFollowUp, SceneProfileReply, command_to_payload, save_follow_up};
+    use super::{ReplyStyle, SaveFollowUp, SceneProfileReply, command_to_payload, save_follow_up};
     use crate::domain::command::Command;
     use crate::support::validation::MAX_TARGET_TOKEN_LENGTH;
+    use rust_i18n::t;
     use serde_json::json;
+
+    /// A reply with neither a `message` nor a payload is acknowledged with the
+    /// translated string, never a hard-coded literal — so dropping the key
+    /// fails here rather than showing English inside a translated TUI.
+    #[test]
+    fn acknowledge_falls_back_to_the_translated_ok_line() {
+        assert_eq!(
+            ReplyStyle::Acknowledge.describe_success(None),
+            t!("tui.daemon.ok")
+        );
+    }
 
     #[test]
     fn command_to_payload_rejects_invalid_target_values() {

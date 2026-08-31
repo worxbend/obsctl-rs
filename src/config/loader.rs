@@ -56,12 +56,32 @@ pub fn load_or_default(path: &Path) -> Result<Config> {
     }
 }
 
-pub fn load_or_default_with_runtime(path: &Path) -> Result<(Config, std::path::PathBuf, u64)> {
+/// Resolve the daemon socket path from the `server.socket_path` config field.
+///
+/// The `server.socket_path` prefix on the error message is the config field
+/// name as the user wrote it, so a rejected path points at the line to fix.
+/// That prefix is asserted by tests here and in `cli::router`; keep it.
+pub(crate) fn resolve_configured_socket_path(
+    configured: Option<&str>,
+) -> Result<std::path::PathBuf> {
+    resolve_server_socket_path(configured)
+        .map_err(|error| ObsctlError::ConfigInvalid(format!("server.socket_path {error}")))
+}
+
+/// A config plus the daemon socket path it names.
+#[derive(Debug)]
+pub struct LoadedRuntime {
+    pub config: Config,
+    pub socket_path: std::path::PathBuf,
+}
+
+pub fn load_runtime(path: &Path) -> Result<LoadedRuntime> {
     let config = load_or_default(path)?;
-    let socket_path = resolve_server_socket_path(config.server.socket_path.as_deref())
-        .map_err(|error| ObsctlError::ConfigInvalid(format!("server.socket_path {error}")))?;
-    let refresh_interval_ms = config.ui.refresh_interval_ms;
-    Ok((config, socket_path, refresh_interval_ms))
+    let socket_path = resolve_configured_socket_path(config.server.socket_path.as_deref())?;
+    Ok(LoadedRuntime {
+        config,
+        socket_path,
+    })
 }
 
 #[cfg(test)]
@@ -121,14 +141,13 @@ mod tests {
     }
 
     #[test]
-    fn load_or_default_with_runtime_uses_defaults_when_missing() {
+    fn load_runtime_uses_defaults_when_missing() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("missing.yml");
-        let (_config, socket_path, refresh_interval_ms) =
-            load_or_default_with_runtime(&path).unwrap();
-        assert!(socket_path.ends_with("obsctl.sock"));
+        let rt = load_runtime(&path).unwrap();
+        assert!(rt.socket_path.ends_with("obsctl.sock"));
         assert_eq!(
-            refresh_interval_ms,
+            rt.config.ui.refresh_interval_ms,
             Config::default().ui.refresh_interval_ms
         );
     }
@@ -160,11 +179,19 @@ mod tests {
     }
 
     #[test]
-    fn load_or_default_with_runtime_rejects_invalid_socket_path() {
+    fn resolve_configured_socket_path_prefixes_the_config_field_name() {
+        let err = resolve_configured_socket_path(Some("relative.sock"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("server.socket_path"));
+    }
+
+    #[test]
+    fn load_runtime_rejects_invalid_socket_path() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yml");
         std::fs::write(&path, "version: 1\nserver:\n  socket_path: relative.sock\n").unwrap();
-        let err = load_or_default_with_runtime(&path).unwrap_err().to_string();
+        let err = load_runtime(&path).unwrap_err().to_string();
         assert!(err.contains("server.socket_path"));
     }
 

@@ -156,26 +156,14 @@ async fn run_session(
                         let trimmed = frame.trim_end_matches(['\n', '\r']);
                         if !trimmed.is_empty()
                             && handle_line(
-                                trimmed.to_string(), &mut subs, &command_tx, &writer,
+                                trimmed, &mut subs, &command_tx, &writer,
                             ).await == SessionControl::Close
                         {
                             break;
                         }
                     }
-                    Err(FrameError::Oversized) => {
-                        warn!("IPC frame exceeded max size ({MAX_IPC_LINE_BYTES} bytes), dropping client");
-                        break;
-                    }
-                    Err(FrameError::MissingDelimiter) => {
-                        warn!("IPC frame missing newline delimiter, dropping client");
-                        break;
-                    }
-                    Err(FrameError::NotUtf8(e)) => {
-                        debug!("IPC session read error: {e}");
-                        break;
-                    }
-                    Err(FrameError::Io(e)) => {
-                        debug!("IPC session read error: {e}");
+                    Err(error) => {
+                        log_frame_error(&error);
                         break;
                     }
                 }
@@ -310,13 +298,27 @@ async fn forward_broadcast(
     }
 }
 
+/// Report why a frame could not be read, right before the session is closed.
+fn log_frame_error(error: &FrameError) {
+    match error {
+        FrameError::Oversized => {
+            warn!("IPC frame exceeded max size ({MAX_IPC_LINE_BYTES} bytes), dropping client");
+        }
+        FrameError::MissingDelimiter => {
+            warn!("IPC frame missing newline delimiter, dropping client");
+        }
+        FrameError::NotUtf8(e) => debug!("IPC session read error: {e}"),
+        FrameError::Io(e) => debug!("IPC session read error: {e}"),
+    }
+}
+
 async fn handle_line(
-    line: String,
+    line: &str,
     subs: &mut SessionSubscriptions,
     command_tx: &mpsc::Sender<CommandDispatch>,
     writer: &SessionWriter,
 ) -> SessionControl {
-    let msg = match decode::<ClientMessage>(&line) {
+    let msg = match decode::<ClientMessage>(line) {
         Ok(m) => m,
         Err(e) => {
             warn!("Malformed IPC message: {e}");
@@ -630,7 +632,7 @@ mod tests {
         let mut subs = SessionSubscriptions::default();
 
         let handled = handle_line(
-            serde_json::to_string(&ClientMessage::Subscribe {
+            &serde_json::to_string(&ClientMessage::Subscribe {
                 id: "sub-1".to_string(),
                 topics: vec![],
             })
@@ -657,7 +659,7 @@ mod tests {
             .map(|idx| format!("topic-{idx}"))
             .collect::<Vec<_>>();
         let handled = handle_line(
-            serde_json::to_string(&ClientMessage::Subscribe {
+            &serde_json::to_string(&ClientMessage::Subscribe {
                 id: "sub-2".to_string(),
                 topics,
             })
@@ -681,7 +683,7 @@ mod tests {
         let mut subs = SessionSubscriptions::default();
 
         let handled = handle_line(
-            serde_json::to_string(&ClientMessage::Subscribe {
+            &serde_json::to_string(&ClientMessage::Subscribe {
                 id: "sub-3".to_string(),
                 topics: vec![
                     TOPIC_STATE.to_string(),
@@ -770,7 +772,7 @@ mod tests {
         let mut subs = SessionSubscriptions::default();
 
         let handled = handle_line(
-            serde_json::to_string(&ClientMessage::Command {
+            &serde_json::to_string(&ClientMessage::Command {
                 id: "has space".to_string(),
                 command: CommandPayload {
                     name: "ping".to_string(),
@@ -797,7 +799,7 @@ mod tests {
         let mut subs = SessionSubscriptions::default();
 
         let handled = handle_line(
-            serde_json::to_string(&ClientMessage::Command {
+            &serde_json::to_string(&ClientMessage::Command {
                 id: "cmd-1".to_string(),
                 command: CommandPayload {
                     name: "has space".to_string(),
@@ -824,7 +826,7 @@ mod tests {
         let mut subs = SessionSubscriptions::default();
 
         let handled = handle_line(
-            serde_json::to_string(&ClientMessage::Command {
+            &serde_json::to_string(&ClientMessage::Command {
                 id: "cmd-1".to_string(),
                 command: CommandPayload {
                     name: "ping".to_string(),

@@ -4,10 +4,7 @@ use crate::domain::aliases::ensure_unique_aliases_and_shortcuts;
 use crate::domain::errors::ObsctlError;
 use crate::domain::names::{ResourceKind, checked_name, normalized_name};
 use crate::domain::result::Result;
-use crate::ipc::socket_path::resolve_server_socket_path;
-use crate::support::validation::{
-    password_config_error_message, resolve_connection_password, validate_no_control_or_whitespace,
-};
+use crate::support::validation::{resolve_connection_password, validate_no_control_or_whitespace};
 
 use super::model::{Config, ConnectionConfig};
 
@@ -66,10 +63,7 @@ fn validate_ui_config(ui: &super::model::UiConfig) -> Result<Vec<ValidationWarni
     // the characters that round-trip through it work. Warn rather than fail:
     // this field went unread for several releases, so an unusable value in an
     // existing config must not start blocking the daemon.
-    if !crate::domain::parser::PALETTE_PREFIXES
-        .iter()
-        .any(|c| ui.command_palette_prefix == c.to_string())
-    {
+    if !crate::domain::parser::is_supported_palette_prefix(&ui.command_palette_prefix) {
         let supported: Vec<String> = crate::domain::parser::PALETTE_PREFIXES
             .iter()
             .map(char::to_string)
@@ -109,9 +103,7 @@ fn validate_reconnect_config(reconnect: &super::model::ReconnectConfig) -> Resul
 }
 
 fn validate_socket_path(config: &Config) -> Result<()> {
-    resolve_server_socket_path(config.server.socket_path.as_deref())
-        .map(|_| ())
-        .map_err(|error| config_invalid(format!("server.socket_path {error}")))
+    super::loader::resolve_configured_socket_path(config.server.socket_path.as_deref()).map(|_| ())
 }
 
 /// Where the OBS password comes from, and whether that choice is a good one.
@@ -122,7 +114,7 @@ fn validate_socket_path(config: &Config) -> Result<()> {
 fn validate_password_config(connection: &ConnectionConfig) -> Result<Vec<ValidationWarning>> {
     let resolved_password =
         resolve_connection_password(connection.password.as_deref(), &connection.password_env)
-            .map_err(|error| config_invalid(password_config_error_message(&error)))?;
+            .map_err(|error| config_invalid(error.config_field_message()))?;
 
     let mut warnings = Vec::new();
 

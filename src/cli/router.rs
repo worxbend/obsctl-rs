@@ -11,16 +11,14 @@ use crate::{
     },
     config::{loader, model, paths, schema, writer},
     domain::errors::ObsctlError,
-    ipc::{protocol::CommandPayload, socket_path::resolve_server_socket_path},
-    runtime::logger,
+    ipc::protocol::CommandPayload,
+    runtime::logger::{self, LogFilterLevel},
     server::{daemon, options::ServerOptions},
     service::{
         installer::{self, ServiceInstaller},
         systemd_user_service::{self, SystemctlRunner},
     },
-    support::validation::{
-        password_config_error_message, read_env_token, resolve_connection_password,
-    },
+    support::validation::{read_env_token, resolve_connection_password},
 };
 
 /// Resolve the config file this launch will use.
@@ -71,41 +69,22 @@ struct Startup {
     /// `ObsctlError::exit_code()`, usually 2. That divergence predates this and
     /// is deliberately left alone — exit codes are a frozen contract (see the
     /// README's "Exit Codes" table).
-    runtime: Result<StartupRuntime, ObsctlError>,
-}
-
-/// The parts of a loaded config the commands actually use.
-#[derive(Debug)]
-struct StartupRuntime {
-    config: model::Config,
-    socket_path: PathBuf,
-    refresh_interval_ms: u64,
+    runtime: Result<loader::LoadedRuntime, ObsctlError>,
 }
 
 impl Startup {
     fn resolve(config_path: Option<PathBuf>) -> Self {
         let runtime = match config_path.as_deref() {
-            Some(path) => loader::load_or_default_with_runtime(path).map(
-                |(config, socket_path, refresh_interval_ms)| StartupRuntime {
-                    config,
-                    socket_path,
-                    refresh_interval_ms,
-                },
-            ),
+            Some(path) => loader::load_runtime(path),
             // No config file could be resolved at all, so the built-in
             // defaults plus the default socket location are the whole
             // configuration.
-            None => resolve_server_socket_path(None)
-                .map_err(|error| ObsctlError::ConfigInvalid(format!("server.socket_path {error}")))
-                .map(|socket_path| {
-                    let config = model::Config::default();
-                    let refresh_interval_ms = config.ui.refresh_interval_ms;
-                    StartupRuntime {
-                        config,
-                        socket_path,
-                        refresh_interval_ms,
-                    }
-                }),
+            None => loader::resolve_configured_socket_path(None).map(|socket_path| {
+                loader::LoadedRuntime {
+                    config: model::Config::default(),
+                    socket_path,
+                }
+            }),
         };
 
         Self {
@@ -124,7 +103,7 @@ impl Startup {
     }
 
     /// The loaded config, or the error explaining why there is none.
-    fn runtime(&self) -> Result<&StartupRuntime, &ObsctlError> {
+    fn runtime(&self) -> Result<&loader::LoadedRuntime, &ObsctlError> {
         self.runtime.as_ref()
     }
 }
@@ -139,7 +118,7 @@ pub fn run(cli: Cli) -> i32 {
     // explanation. Installing the subscriber first is what makes the
     // diagnostic reachable.
     let level = effective_log_level(&cli);
-    init_logging(cli.command.as_ref(), &level);
+    init_logging(cli.command.as_ref(), level);
 
     let startup = Startup::resolve(resolve_config_path(cli.config.clone()));
     crate::localization::init(startup.config_path.as_deref(), startup.config_locale());
@@ -160,7 +139,7 @@ pub fn run(cli: Cli) -> i32 {
 /// outlive the terminal it was started from and is also replayed to connected
 /// clients over the `logs` IPC topic. Every other mode is a short-lived
 /// foreground command, so stderr alone is enough.
-fn init_logging(command: Option<&Commands>, level: &str) {
+fn init_logging(command: Option<&Commands>, level: LogFilterLevel) {
     match command {
         Some(Commands::Server { .. }) => logger::init_server(level, logger::default_log_path()),
         _ => logger::init_cli(level),
@@ -170,11 +149,11 @@ fn init_logging(command: Option<&Commands>, level: &str) {
 /// Derive the effective log level from CLI flags.
 ///
 /// Priority: `--verbose` > `--log-level` > `RUST_LOG` env var > mode default.
-fn effective_log_level(cli: &Cli) -> String {
+fn effective_log_level(cli: &Cli) -> LogFilterLevel {
     if cli.verbose {
-        return "debug".to_string();
+        return LogFilterLevel::Debug;
     }
-    if let Some(level) = cli.log_level.clone() {
+    if let Some(level) = cli.log_level {
         return level;
     }
     if let Some(rust_log) = read_env_token("RUST_LOG")
@@ -183,10 +162,9 @@ fn effective_log_level(cli: &Cli) -> String {
         return level;
     }
     match &cli.command {
-        Some(Commands::Server { .. }) => "info",
-        _ => "warn",
+        Some(Commands::Server { .. }) => LogFilterLevel::Info,
+        _ => LogFilterLevel::Warn,
     }
-    .to_string()
 }
 
 // ── Local commands ────────────────────────────────────────────────────────────
@@ -296,7 +274,7 @@ fn first_time_setup(config_path: &std::path::Path) -> std::io::Result<()> {
     let password = loop {
         let value = prompt_line(&stdin, &mut buf, &t!("cli.setup.prompt_password"), "")?;
         if let Err(error) = resolve_connection_password(Some(&value), "") {
-            eprintln!("  {}", password_config_error_message(&error));
+            eprintln!("  {}", error.config_field_message());
             continue;
         }
         break value;
@@ -311,7 +289,7 @@ fn first_time_setup(config_path: &std::path::Path) -> std::io::Result<()> {
         config.connection.password = Some(password);
     }
 
-    crate::config::writer::write(&config, config_path)
+    crate::config::writer::write_atomic(&config, config_path)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     eprint!("{}", t!("cli.setup.written", path = config_path.display()));
@@ -361,12 +339,11 @@ fn prompt_line(
 fn run_tui(startup: &Startup) -> i32 {
     let runtime = match startup.runtime() {
         Ok(runtime) => runtime,
-        Err(error) => return fail(format!("failed to load config: {error}")),
+        Err(error) => return fail(t!("cli.config.load_failed", error = error)),
     };
 
-    let mut options = tui_appearance(&runtime.config);
-    options.refresh_ms = runtime.refresh_interval_ms;
-    options.config_path = startup.config_path.clone();
+    let options =
+        crate::tui::app::TuiOptions::from_config(&runtime.config, startup.config_path.clone());
 
     let rt = match tokio_runtime("TUI") {
         Ok(rt) => rt,
@@ -379,52 +356,6 @@ fn run_tui(startup: &Startup) -> i32 {
             eprintln!("{}", t!("cli.tui.error", error = e));
             1
         }
-    }
-}
-
-/// Translate the `ui` section of an already-loaded config into the TUI's
-/// appearance and input options: built-in theme id or a `custom` palette,
-/// icons, mouse, command-palette prefix.
-///
-/// This used to read the config file itself and silently substitute defaults
-/// when the read failed — the third read of the same file in one launch, and a
-/// swallowed error that could disagree with what the rest of the launch had
-/// decided. It is now a plain transformation with no I/O: the caller has
-/// already read the file once and reported any problem. `refresh_ms` and
-/// `config_path` are filled in by the caller, which has them to hand.
-fn tui_appearance(config: &model::Config) -> crate::tui::app::TuiOptions {
-    let custom = config
-        .ui
-        .custom_theme
-        .clone()
-        .map(|c| crate::tui::theme::CustomThemeSpec {
-            bg: c.bg,
-            accent: c.accent,
-            accent_alt: c.accent_alt,
-            fg: c.fg,
-            muted: c.muted,
-            border: c.border,
-            border_focus: c.border_focus,
-            success: c.success,
-            warning: c.warning,
-            danger: c.danger,
-            info: c.info,
-            highlight_bg: c.highlight_bg,
-            highlight_fg: c.highlight_fg,
-        });
-    crate::tui::app::TuiOptions {
-        theme: crate::tui::theme::Theme::resolve(&config.ui.theme, custom.as_ref()),
-        show_icons: config.ui.show_icons,
-        advanced_ui: config.ui.advanced_ui,
-        mouse: config.ui.mouse,
-        palette_prefix: config
-            .ui
-            .command_palette_prefix
-            .chars()
-            .next()
-            .filter(|c| crate::domain::parser::PALETTE_PREFIXES.contains(c))
-            .unwrap_or(crate::domain::parser::DEFAULT_PALETTE_PREFIX),
-        ..crate::tui::app::TuiOptions::default()
     }
 }
 
@@ -559,8 +490,8 @@ fn run_service(action: ServiceAction) -> i32 {
 }
 
 fn resolve_service_exec_path() -> Result<std::path::PathBuf, String> {
-    let exec =
-        std::env::current_exe().map_err(|e| format!("could not determine executable path: {e}"))?;
+    let exec = std::env::current_exe()
+        .map_err(|e| t!("cli.service.exec_path_unresolved", error = e).to_string())?;
     installer::validate_service_exec_path(&exec).map_err(|e| e.to_string())
 }
 
@@ -704,7 +635,7 @@ fn run_proxy(startup: &Startup, cmd: Commands, json_output: bool) -> i32 {
     // user hears about that first, whatever they were trying to run.
     let socket_path = match startup.runtime() {
         Ok(runtime) => runtime.socket_path.clone(),
-        Err(error) => return fail(format!("failed to load config: {error}")),
+        Err(error) => return fail(t!("cli.config.load_failed", error = error)),
     };
     let ctx = ProxyCtx {
         socket_path,
@@ -816,7 +747,7 @@ mod tests {
         // `logger::init_cli` is a no-op if another test already installed a
         // subscriber, which is why the assertion is about a subscriber being
         // present rather than about this call being the one that set it.
-        init_logging(Some(&Commands::Tui), "warn");
+        init_logging(Some(&Commands::Tui), LogFilterLevel::Warn);
         assert!(
             tracing::dispatcher::has_been_set(),
             "a global tracing subscriber must exist before localization warns"
@@ -952,20 +883,20 @@ mod tests {
             json: false,
             command: None,
         };
-        assert_eq!(effective_log_level(&cli), "debug");
+        assert_eq!(effective_log_level(&cli), LogFilterLevel::Debug);
     }
 
     #[test]
     fn effective_log_level_uses_log_level_arg() {
         let cli = Cli {
             config: None,
-            log_level: Some("error".to_string()),
+            log_level: Some(LogFilterLevel::Error),
             verbose: false,
             force: false,
             json: false,
             command: None,
         };
-        assert_eq!(effective_log_level(&cli), "error");
+        assert_eq!(effective_log_level(&cli), LogFilterLevel::Error);
     }
 
     #[test]
@@ -979,7 +910,7 @@ mod tests {
             command: Some(Commands::Server { headless: false }),
         };
         with_rust_log_env(Some("verbose"), || {
-            assert_eq!(effective_log_level(&cli), "info");
+            assert_eq!(effective_log_level(&cli), LogFilterLevel::Info);
         });
     }
 
@@ -997,7 +928,7 @@ mod tests {
             command: Some(Commands::Tui),
         };
         with_rust_log_env_os(Some(std::ffi::OsString::from_vec(vec![0xff])), || {
-            assert_eq!(effective_log_level(&cli), "warn");
+            assert_eq!(effective_log_level(&cli), LogFilterLevel::Warn);
         });
     }
 
@@ -1148,7 +1079,7 @@ mod tests {
             Some("obsctl.sock")
         );
         assert_eq!(
-            runtime.refresh_interval_ms,
+            runtime.config.ui.refresh_interval_ms,
             model::Config::default().ui.refresh_interval_ms
         );
     }
@@ -1196,7 +1127,7 @@ mod tests {
             assert_eq!(startup.config_path.as_deref(), Some(config_path.as_path()));
             let runtime = startup.runtime().unwrap();
             assert_eq!(runtime.socket_path, socket_path);
-            assert_eq!(runtime.refresh_interval_ms, 321);
+            assert_eq!(runtime.config.ui.refresh_interval_ms, 321);
         });
     }
 

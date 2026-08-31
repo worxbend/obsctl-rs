@@ -1,4 +1,5 @@
 pub mod client_registry;
+pub mod command_args;
 pub mod command_executor;
 pub mod command_lanes;
 pub mod daemon;
@@ -6,4 +7,6 @@ pub mod log_relay;
 pub mod obs_event_adapter;
 pub mod obs_supervisor;
 pub mod options;
+pub mod snapshot_refresh;
 pub mod state_store;
+pub mod stats_poller;

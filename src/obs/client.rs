@@ -122,21 +122,25 @@ type WsStream = futures_util::stream::SplitStream<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
+/// An established, identified OBS connection and the metadata the handshake
+/// learned about the other end.
+#[derive(Debug)]
+pub struct ObsSession {
+    pub client: ObsClient,
+    pub obs_studio_version: String,
+    pub obs_websocket_version: String,
+    /// Resolves when the underlying WebSocket task exits (OBS disconnect).
+    pub disconnect: tokio::sync::oneshot::Receiver<()>,
+}
+
 /// Complete the WebSocket handshake, spawning the client task.
-/// Returns `(client, obs_studio_version, obs_websocket_version, disconnect_rx)`.
-/// `disconnect_rx` resolves when the underlying WebSocket task exits (OBS disconnect).
 pub async fn handshake(
     mut sink: WsSink,
     mut stream: WsStream,
     password: Option<&str>,
     event_tx: mpsc::Sender<ObsEvent>,
     request_timeout_ms: u64,
-) -> Result<(
-    ObsClient,
-    String,
-    String,
-    tokio::sync::oneshot::Receiver<()>,
-)> {
+) -> Result<ObsSession> {
     let hello = read_hello(&mut stream).await?;
     let obs_ws_version = hello.obs_web_socket_version.clone();
 
@@ -177,7 +181,12 @@ pub async fn handshake(
         .unwrap_or("unknown")
         .to_string();
 
-    Ok((client, obs_studio_version, obs_ws_version, disconnect_rx))
+    Ok(ObsSession {
+        client,
+        obs_studio_version,
+        obs_websocket_version: obs_ws_version,
+        disconnect: disconnect_rx,
+    })
 }
 
 /// Read the first frame of the handshake, which obs-websocket guarantees is a
@@ -269,6 +278,27 @@ pub(crate) async fn read_ws_message(stream: &mut WsStream) -> Result<ObsMessage>
     ))
 }
 
+/// Fails every in-flight request with the same transport error text.
+///
+/// `reason` is taken as a `&str` because `ObsctlError` is not `Clone`, so a
+/// fresh error value has to be built for each waiting sender anyway.
+fn fail_all_pending(pending: &mut HashMap<String, oneshot::Sender<Result<Value>>>, reason: &str) {
+    for (_, s) in pending.drain() {
+        let _ = s.send(Err(ObsctlError::ConnectionFailed(reason.to_string())));
+    }
+}
+
+/// Serializes one request into the obs-websocket op-6 (Request) frame text.
+fn encode_request(request: &RequestData) -> Result<String> {
+    let d =
+        serde_json::to_value(request).map_err(|e| ObsctlError::ObsRequestFailed(e.to_string()))?;
+    serde_json::to_string(&ObsMessage {
+        op: OPCODE_REQUEST,
+        d,
+    })
+    .map_err(|e| ObsctlError::ObsRequestFailed(e.to_string()))
+}
+
 async fn run_client_task(
     mut sink: WsSink,
     mut stream: WsStream,
@@ -285,26 +315,17 @@ async fn run_client_task(
                 let Some(ObsClientRequest { request, reply }) = maybe_req else { break; };
                 let id = request.request_id.clone();
 
-                let d = match serde_json::to_value(&request) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let _ = reply.send(Err(ObsctlError::ObsRequestFailed(e.to_string())));
-                        continue;
-                    }
-                };
-                let text = match serde_json::to_string(&ObsMessage { op: OPCODE_REQUEST, d }) {
+                let text = match encode_request(&request) {
                     Ok(t) => t,
                     Err(e) => {
-                        let _ = reply.send(Err(ObsctlError::ObsRequestFailed(e.to_string())));
+                        let _ = reply.send(Err(e));
                         continue;
                     }
                 };
 
                 if sink.send(Message::Text(text)).await.is_err() {
                     let _ = reply.send(Err(ObsctlError::ConnectionFailed("WebSocket send failed".to_string())));
-                    for (_, s) in pending.drain() {
-                        let _ = s.send(Err(ObsctlError::ConnectionFailed("WebSocket closed".to_string())));
-                    }
+                    fail_all_pending(&mut pending, "WebSocket closed");
                     break;
                 }
                 pending.insert(id, reply);
@@ -319,15 +340,11 @@ async fn run_client_task(
             maybe_msg = stream.next() => {
                 match maybe_msg {
                     None => {
-                        for (_, s) in pending.drain() {
-                            let _ = s.send(Err(ObsctlError::ConnectionFailed("WebSocket closed".to_string())));
-                        }
+                        fail_all_pending(&mut pending, "WebSocket closed");
                         break;
                     }
                     Some(Err(e)) => {
-                        for (_, s) in pending.drain() {
-                            let _ = s.send(Err(ObsctlError::ConnectionFailed(e.to_string())));
-                        }
+                        fail_all_pending(&mut pending, &e.to_string());
                         break;
                     }
                     Some(Ok(msg)) => {
@@ -405,6 +422,22 @@ mod tests {
             rpc_version: 1,
             authentication,
         }
+    }
+
+    #[test]
+    fn encode_request_wraps_the_request_in_an_op_six_frame() {
+        let text = encode_request(&RequestData {
+            request_type: "GetVersion".to_string(),
+            request_id: "req-1".to_string(),
+            request_data: None,
+        })
+        .unwrap();
+
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["op"], OPCODE_REQUEST);
+        assert_eq!(parsed["d"]["requestId"], "req-1");
+        assert_eq!(parsed["d"]["requestType"], "GetVersion");
+        assert_eq!(parsed["d"].get("requestData"), None);
     }
 
     #[test]

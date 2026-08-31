@@ -95,39 +95,51 @@ pub enum TuiAction {
     /// between the last one and the first.
     SceneProfileCycleNext,
     CloseSceneProfiles,
-    SceneProfileNavUp(usize),
-    SceneProfileNavDown(usize),
-    /// Mouse: move the editor's cursor to the row that was clicked.
-    SceneProfileSelect(usize),
-    /// Enter on the picker: make a new scene profile, or edit the selected one.
-    SceneProfilePickerConfirm,
-    /// Switch to the selected scene profile and close the editor.
-    SceneProfileActivate,
-    /// Switch to no scene profile at all and close the editor.
-    SceneProfileClearActive,
-    /// `d` on the picker: ask whether the selected profile should go. Sends
-    /// nothing on its own — see [`TuiAction::SceneProfileDeleteConfirm`].
-    SceneProfileDelete,
-    /// `y` (or `Enter`) on that question: send the delete.
-    SceneProfileDeleteConfirm,
-    /// `n`, `Esc`, or `q` on that question: leave the profile alone.
-    SceneProfileDeleteCancel,
-    SceneProfileToggleHidden,
-    SceneProfileBeginNaming,
-    SceneProfileNameChar(char),
-    SceneProfileNameBackspace,
-    SceneProfileNameClear,
-    SceneProfileNameDeleteWord,
-    SceneProfileNameCommit,
-    SceneProfileNameCancel,
-    SceneProfileSave,
-    /// Esc on the scene list: back to the picker, editor still open.
-    SceneProfileBack,
+    /// Everything the editor answers while it is open — see
+    /// [`SceneProfileAction`].
+    SceneProfile(SceneProfileAction),
 
     // Pending-key (vim sequence) bookkeeping
     SetPending(Pending),
     ClearPending,
     PushCount(u32),
+}
+
+/// What the scene-profile editor does with a key or a click. Every one of
+/// these is only meaningful while the editor is open — that is, while
+/// `TuiModel::scene_profile` is `Some` — which is why opening, closing and
+/// cycling profiles stay on [`TuiAction`] itself: those three happen with no
+/// editor on screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceneProfileAction {
+    NavUp(usize),
+    NavDown(usize),
+    /// Mouse: move the editor's cursor to the row that was clicked.
+    Select(usize),
+    /// Enter on the picker: make a new scene profile, or edit the selected one.
+    PickerConfirm,
+    /// Switch to the selected scene profile and close the editor.
+    Activate,
+    /// Switch to no scene profile at all and close the editor.
+    ClearActive,
+    /// `d` on the picker: ask whether the selected profile should go. Sends
+    /// nothing on its own — see [`SceneProfileAction::DeleteConfirm`].
+    Delete,
+    /// `y` (or `Enter`) on that question: send the delete.
+    DeleteConfirm,
+    /// `n`, `Esc`, or `q` on that question: leave the profile alone.
+    DeleteCancel,
+    ToggleHidden,
+    BeginNaming,
+    NameChar(char),
+    NameBackspace,
+    NameClear,
+    NameDeleteWord,
+    NameCommit,
+    NameCancel,
+    Save,
+    /// Esc on the scene list: back to the picker, editor still open.
+    Back,
 }
 
 pub fn handle_key(model: &TuiModel, key: KeyEvent) -> Option<TuiAction> {
@@ -200,12 +212,12 @@ fn scene_profile_key(editor: &SceneProfileEditor, key: KeyEvent) -> Option<TuiAc
     if editor.pending_delete.is_some() {
         return match key.code {
             KeyCode::Char('y') | KeyCode::Enter if !ctrl => {
-                Some(TuiAction::SceneProfileDeleteConfirm)
+                Some(TuiAction::SceneProfile(SceneProfileAction::DeleteConfirm))
             }
             KeyCode::Char('n') | KeyCode::Char('q') if !ctrl => {
-                Some(TuiAction::SceneProfileDeleteCancel)
+                Some(TuiAction::SceneProfile(SceneProfileAction::DeleteCancel))
             }
-            KeyCode::Esc => Some(TuiAction::SceneProfileDeleteCancel),
+            KeyCode::Esc => Some(TuiAction::SceneProfile(SceneProfileAction::DeleteCancel)),
             // Every other key is ignored rather than treated as a "no": a
             // question this consequential is answered on purpose, and a
             // mistyped key that silently dismissed it would leave the user
@@ -216,36 +228,60 @@ fn scene_profile_key(editor: &SceneProfileEditor, key: KeyEvent) -> Option<TuiAc
 
     match editor.stage {
         SceneProfileStage::Picker => match key.code {
-            KeyCode::Down | KeyCode::Char('j') if !ctrl => Some(TuiAction::SceneProfileNavDown(1)),
-            KeyCode::Up | KeyCode::Char('k') if !ctrl => Some(TuiAction::SceneProfileNavUp(1)),
-            KeyCode::Enter => Some(TuiAction::SceneProfilePickerConfirm),
-            KeyCode::Char('a') if !ctrl => Some(TuiAction::SceneProfileActivate),
-            KeyCode::Char('c') if !ctrl => Some(TuiAction::SceneProfileClearActive),
-            KeyCode::Char('d') if !ctrl => Some(TuiAction::SceneProfileDelete),
+            KeyCode::Down | KeyCode::Char('j') if !ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::NavDown(1)))
+            }
+            KeyCode::Up | KeyCode::Char('k') if !ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::NavUp(1)))
+            }
+            KeyCode::Enter => Some(TuiAction::SceneProfile(SceneProfileAction::PickerConfirm)),
+            KeyCode::Char('a') if !ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::Activate))
+            }
+            KeyCode::Char('c') if !ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::ClearActive))
+            }
+            KeyCode::Char('d') if !ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::Delete))
+            }
             KeyCode::Esc | KeyCode::Char('q') => Some(TuiAction::CloseSceneProfiles),
             _ => None,
         },
         SceneProfileStage::Scenes => match key.code {
-            KeyCode::Down | KeyCode::Char('j') if !ctrl => Some(TuiAction::SceneProfileNavDown(1)),
-            KeyCode::Up | KeyCode::Char('k') if !ctrl => Some(TuiAction::SceneProfileNavUp(1)),
-            KeyCode::Char('t') if !ctrl => Some(TuiAction::SceneProfileToggleHidden),
-            KeyCode::Char('n') if !ctrl => Some(TuiAction::SceneProfileBeginNaming),
-            KeyCode::Enter => Some(TuiAction::SceneProfileSave),
-            KeyCode::Esc => Some(TuiAction::SceneProfileBack),
+            KeyCode::Down | KeyCode::Char('j') if !ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::NavDown(1)))
+            }
+            KeyCode::Up | KeyCode::Char('k') if !ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::NavUp(1)))
+            }
+            KeyCode::Char('t') if !ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::ToggleHidden))
+            }
+            KeyCode::Char('n') if !ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::BeginNaming))
+            }
+            KeyCode::Enter => Some(TuiAction::SceneProfile(SceneProfileAction::Save)),
+            KeyCode::Esc => Some(TuiAction::SceneProfile(SceneProfileAction::Back)),
             // `q` is deliberately unbound here. It closes the picker one stage
             // up, but on this stage there are unsaved toggles to lose, and
             // muscle memory should not be able to throw them away.
             _ => None,
         },
         SceneProfileStage::Naming => match key.code {
-            KeyCode::Char('u') if ctrl => Some(TuiAction::SceneProfileNameClear),
-            KeyCode::Char('w') if ctrl => Some(TuiAction::SceneProfileNameDeleteWord),
-            KeyCode::Backspace => Some(TuiAction::SceneProfileNameBackspace),
-            KeyCode::Enter => Some(TuiAction::SceneProfileNameCommit),
-            KeyCode::Esc => Some(TuiAction::SceneProfileNameCancel),
+            KeyCode::Char('u') if ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::NameClear))
+            }
+            KeyCode::Char('w') if ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::NameDeleteWord))
+            }
+            KeyCode::Backspace => Some(TuiAction::SceneProfile(SceneProfileAction::NameBackspace)),
+            KeyCode::Enter => Some(TuiAction::SceneProfile(SceneProfileAction::NameCommit)),
+            KeyCode::Esc => Some(TuiAction::SceneProfile(SceneProfileAction::NameCancel)),
             // Space included: on this stage it is a character in a name, not
             // the leader key.
-            KeyCode::Char(c) if !ctrl => Some(TuiAction::SceneProfileNameChar(c)),
+            KeyCode::Char(c) if !ctrl => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::NameChar(c)))
+            }
             _ => None,
         },
     }
@@ -871,27 +907,27 @@ mod tests {
         let model = editor_on(SceneProfileStage::Naming);
         assert_eq!(
             handle_key(&model, ch(LEADER)),
-            Some(TuiAction::SceneProfileNameChar(' '))
+            Some(TuiAction::SceneProfile(SceneProfileAction::NameChar(' ')))
         );
         assert_eq!(
             handle_key(&model, ch('n')),
-            Some(TuiAction::SceneProfileNameChar('n'))
+            Some(TuiAction::SceneProfile(SceneProfileAction::NameChar('n')))
         );
         assert_eq!(
             handle_key(&model, key(KeyCode::Enter)),
-            Some(TuiAction::SceneProfileNameCommit)
+            Some(TuiAction::SceneProfile(SceneProfileAction::NameCommit))
         );
         assert_eq!(
             handle_key(&model, key(KeyCode::Esc)),
-            Some(TuiAction::SceneProfileNameCancel)
+            Some(TuiAction::SceneProfile(SceneProfileAction::NameCancel))
         );
         assert_eq!(
             handle_key(&model, ctrl_key(KeyCode::Char('u'))),
-            Some(TuiAction::SceneProfileNameClear)
+            Some(TuiAction::SceneProfile(SceneProfileAction::NameClear))
         );
         assert_eq!(
             handle_key(&model, ctrl_key(KeyCode::Char('w'))),
-            Some(TuiAction::SceneProfileNameDeleteWord)
+            Some(TuiAction::SceneProfile(SceneProfileAction::NameDeleteWord))
         );
     }
 
@@ -908,7 +944,7 @@ mod tests {
         );
         assert_eq!(
             handle_key(&model, ch('j')),
-            Some(TuiAction::SceneProfileNavDown(1))
+            Some(TuiAction::SceneProfile(SceneProfileAction::NavDown(1)))
         );
     }
 
@@ -930,19 +966,19 @@ mod tests {
         let model = editor_on(SceneProfileStage::Picker);
         assert_eq!(
             handle_key(&model, key(KeyCode::Enter)),
-            Some(TuiAction::SceneProfilePickerConfirm)
+            Some(TuiAction::SceneProfile(SceneProfileAction::PickerConfirm))
         );
         assert_eq!(
             handle_key(&model, ch('a')),
-            Some(TuiAction::SceneProfileActivate)
+            Some(TuiAction::SceneProfile(SceneProfileAction::Activate))
         );
         assert_eq!(
             handle_key(&model, ch('c')),
-            Some(TuiAction::SceneProfileClearActive)
+            Some(TuiAction::SceneProfile(SceneProfileAction::ClearActive))
         );
         assert_eq!(
             handle_key(&model, ch('d')),
-            Some(TuiAction::SceneProfileDelete)
+            Some(TuiAction::SceneProfile(SceneProfileAction::Delete))
         );
         assert_eq!(
             handle_key(&model, ch('q')),
@@ -972,16 +1008,16 @@ mod tests {
 
         assert_eq!(
             handle_key(&model, ch('y')),
-            Some(TuiAction::SceneProfileDeleteConfirm)
+            Some(TuiAction::SceneProfile(SceneProfileAction::DeleteConfirm))
         );
         assert_eq!(
             handle_key(&model, key(KeyCode::Enter)),
-            Some(TuiAction::SceneProfileDeleteConfirm)
+            Some(TuiAction::SceneProfile(SceneProfileAction::DeleteConfirm))
         );
         for cancel in [ch('n'), ch('q'), key(KeyCode::Esc)] {
             assert_eq!(
                 handle_key(&model, cancel),
-                Some(TuiAction::SceneProfileDeleteCancel)
+                Some(TuiAction::SceneProfile(SceneProfileAction::DeleteCancel))
             );
         }
         // Not an answer, and not a way past the question either.
@@ -999,19 +1035,19 @@ mod tests {
         let model = editor_on(SceneProfileStage::Scenes);
         assert_eq!(
             handle_key(&model, ch('t')),
-            Some(TuiAction::SceneProfileToggleHidden)
+            Some(TuiAction::SceneProfile(SceneProfileAction::ToggleHidden))
         );
         assert_eq!(
             handle_key(&model, ch('n')),
-            Some(TuiAction::SceneProfileBeginNaming)
+            Some(TuiAction::SceneProfile(SceneProfileAction::BeginNaming))
         );
         assert_eq!(
             handle_key(&model, key(KeyCode::Enter)),
-            Some(TuiAction::SceneProfileSave)
+            Some(TuiAction::SceneProfile(SceneProfileAction::Save))
         );
         assert_eq!(
             handle_key(&model, key(KeyCode::Esc)),
-            Some(TuiAction::SceneProfileBack)
+            Some(TuiAction::SceneProfile(SceneProfileAction::Back))
         );
         // `q` is unbound here: there are unsaved toggles to lose.
         assert_eq!(handle_key(&model, ch('q')), None);

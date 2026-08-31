@@ -19,12 +19,13 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let theme = model.theme;
     let title = t!("tui.panels.palette.title");
     let hint = if model.command_palette.active {
-        t!(model.symbol(
+        chrome::phrase(
+            model,
             "tui.panels.palette.hint_typing",
-            "tui.panels.palette.hint_typing_ascii"
-        ))
+            "tui.panels.palette.hint_typing_ascii",
+        )
     } else {
-        t!("tui.panels.palette.hint_idle")
+        t!("tui.panels.palette.hint_idle").to_string()
     };
     let block = chrome::panel(
         model.symbol("⌘", ">"),
@@ -83,12 +84,11 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         ])
     } else {
         Line::from(vec![Span::styled(
-            t!(chrome::glyph(
+            chrome::phrase(
                 model,
                 "tui.panels.palette.keys",
-                "tui.panels.palette.keys_ascii"
-            ))
-            .into_owned(),
+                "tui.panels.palette.keys_ascii",
+            ),
             Style::default().fg(theme.muted),
         )])
     };

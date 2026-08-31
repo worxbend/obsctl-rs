@@ -2,9 +2,9 @@
 //!
 //! Two things live here: the *pending key* state machine (`g`-prefixed
 //! motions and the `<leader>` tree) and the which-key tables that describe
-//! each pending menu to the user. Keeping the resolution and the menu in one
-//! file is deliberate — a mapping that resolves but isn't listed (or the
-//! reverse) is a documentation bug the tests at the bottom catch.
+//! each pending menu to the user. Resolution and menu are the same data: an
+//! entry carries the action it runs (or the submenu it opens), so a mapping
+//! that resolves but isn't listed — or the reverse — cannot be written.
 
 use crate::tui::input::TuiAction;
 
@@ -32,101 +32,233 @@ impl Pending {
     }
 }
 
-/// One row of a which-key menu. `group` marks a prefix that opens another
-/// menu rather than running something.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What pressing a which-key entry does: open another menu, or run something.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyOutcome {
+    /// A prefix. `prefix` is the literal key sequence typed so far (drawn
+    /// as-is), and `title_key` is the i18n key of the word after it.
+    Group {
+        prefix: &'static str,
+        title_key: &'static str,
+        entries: &'static [WhichKeyEntry],
+    },
+    Action(TuiAction),
+}
+
+/// One row of a which-key menu, and the mapping it stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WhichKeyEntry {
     pub key: &'static str,
-    pub label: &'static str,
-    pub group: bool,
+    /// i18n key of the row's description; resolved at render time with
+    /// `rust_i18n::t!` rather than stored as an English literal.
+    pub label_key: &'static str,
+    pub outcome: KeyOutcome,
 }
 
-const fn entry(key: &'static str, label: &'static str) -> WhichKeyEntry {
-    WhichKeyEntry {
-        key,
-        label,
-        group: false,
+impl WhichKeyEntry {
+    /// True when pressing this key opens another menu instead of acting.
+    pub const fn is_group(&self) -> bool {
+        matches!(self.outcome, KeyOutcome::Group { .. })
     }
 }
 
-const fn group(key: &'static str, label: &'static str) -> WhichKeyEntry {
+const fn entry(key: &'static str, label_key: &'static str, action: TuiAction) -> WhichKeyEntry {
     WhichKeyEntry {
         key,
-        label,
-        group: true,
+        label_key,
+        outcome: KeyOutcome::Action(action),
     }
 }
 
-const G_MENU: &[WhichKeyEntry] = &[entry("g", "top of list")];
+const fn group(
+    key: &'static str,
+    label_key: &'static str,
+    prefix: &'static str,
+    entries: &'static [WhichKeyEntry],
+) -> WhichKeyEntry {
+    WhichKeyEntry {
+        key,
+        label_key,
+        outcome: KeyOutcome::Group {
+            prefix,
+            title_key: label_key,
+            entries,
+        },
+    }
+}
+
+/// Open the palette pre-filled with `seed` after the configured prefix, the
+/// way `<leader>f…` mappings jump straight into a filtered command.
+const fn seeded(seed: &'static str) -> TuiAction {
+    TuiAction::OpenPalette { prefix: None, seed }
+}
+
+const G_MENU: &[WhichKeyEntry] = &[entry("g", "tui.whichkey.g.top_of_list", TuiAction::NavTop)];
 
 const LEADER_ROOT: &[WhichKeyEntry] = &[
-    group("f", "find"),
-    group("p", "panel"),
-    group("s", "stream"),
-    group("c", "config"),
-    group("o", "obs"),
-    group("u", "ui"),
+    group("f", "tui.whichkey.leader.find", "<leader>f", LEADER_FIND),
+    group("p", "tui.whichkey.leader.panel", "<leader>p", LEADER_PANEL),
+    group(
+        "s",
+        "tui.whichkey.leader.stream",
+        "<leader>s",
+        LEADER_STREAM,
+    ),
+    group(
+        "c",
+        "tui.whichkey.leader.config",
+        "<leader>c",
+        LEADER_CONFIG,
+    ),
+    group("o", "tui.whichkey.leader.obs", "<leader>o", LEADER_OBS),
+    group("u", "tui.whichkey.leader.ui", "<leader>u", LEADER_UI),
     // A leaf, not a group: `P` opens the scene-profile editor outright. Note
     // the case — `<leader>p` is the panel group, and a scene profile is not an
     // OBS profile.
-    entry("P", "scene profiles"),
+    entry(
+        "P",
+        "tui.whichkey.leader.scene_profiles",
+        TuiAction::OpenSceneProfiles,
+    ),
     // The cycle key spelled out. `P` on the dashboard does the same thing in
     // one keystroke, but an unlisted key is one nobody finds.
-    entry("N", "next scene profile"),
-    entry(":", "command palette"),
-    entry("q", "quit"),
+    entry(
+        "N",
+        "tui.whichkey.leader.next_scene_profile",
+        TuiAction::SceneProfileCycleNext,
+    ),
+    entry(
+        ":",
+        "tui.whichkey.leader.command_palette",
+        TuiAction::OpenPalette {
+            prefix: None,
+            seed: "",
+        },
+    ),
+    entry("q", "tui.whichkey.leader.quit", TuiAction::Quit),
 ];
 
 const LEADER_FIND: &[WhichKeyEntry] = &[
-    entry("s", "scene"),
-    entry("p", "profile"),
-    entry("P", "scene profile"),
-    entry("c", "collection"),
-    entry("a", "audio input"),
+    entry("s", "tui.whichkey.find.scene", seeded("scene ")),
+    entry("p", "tui.whichkey.find.profile", seeded("profile ")),
+    entry(
+        "P",
+        "tui.whichkey.find.scene_profile",
+        seeded("scene-profile "),
+    ),
+    entry("c", "tui.whichkey.find.collection", seeded("collection ")),
+    entry("a", "tui.whichkey.find.audio_input", seeded("toggle-mute ")),
 ];
 
 const LEADER_PANEL: &[WhichKeyEntry] = &[
-    entry("s", "scenes"),
-    entry("a", "audio"),
-    entry("p", "profiles"),
-    entry("c", "collections"),
+    entry("s", "tui.whichkey.panel.scenes", TuiAction::FocusScenes),
+    entry("a", "tui.whichkey.panel.audio", TuiAction::FocusAudio),
+    entry("p", "tui.whichkey.panel.profiles", TuiAction::FocusProfiles),
+    entry(
+        "c",
+        "tui.whichkey.panel.collections",
+        TuiAction::FocusCollections,
+    ),
 ];
 
-const LEADER_STREAM: &[WhichKeyEntry] = &[entry("s", "toggle stream"), entry("r", "toggle record")];
+const LEADER_STREAM: &[WhichKeyEntry] = &[
+    entry(
+        "s",
+        "tui.whichkey.stream.toggle_stream",
+        TuiAction::ToggleStream,
+    ),
+    entry(
+        "r",
+        "tui.whichkey.stream.toggle_record",
+        TuiAction::ToggleRecord,
+    ),
+];
 
 const LEADER_CONFIG: &[WhichKeyEntry] = &[
-    entry("r", "reload config"),
-    entry("d", "dump config from OBS"),
-    entry("v", "validate config"),
+    entry("r", "tui.whichkey.config.reload", TuiAction::ReloadConfig),
+    entry("d", "tui.whichkey.config.dump", TuiAction::DumpConfig),
+    entry(
+        "v",
+        "tui.whichkey.config.validate",
+        TuiAction::ValidateConfig,
+    ),
 ];
 
 const LEADER_OBS: &[WhichKeyEntry] = &[
-    entry("r", "reconnect to OBS"),
-    entry("s", "OBS status"),
-    entry("d", "daemon status"),
-    entry("c", "reconnect to daemon"),
+    entry(
+        "r",
+        "tui.whichkey.obs.reconnect_obs",
+        TuiAction::ReconnectObs,
+    ),
+    entry("s", "tui.whichkey.obs.obs_status", TuiAction::ObsStatus),
+    entry(
+        "d",
+        "tui.whichkey.obs.daemon_status",
+        TuiAction::ServerStatus,
+    ),
+    entry(
+        "c",
+        "tui.whichkey.obs.reconnect_daemon",
+        TuiAction::RetryConnect,
+    ),
 ];
 
 const LEADER_UI: &[WhichKeyEntry] = &[
-    entry("t", "theme picker"),
-    entry("i", "toggle icons"),
-    entry("a", "toggle advanced UI"),
+    entry("t", "tui.whichkey.ui.theme_picker", TuiAction::OpenSettings),
+    entry("i", "tui.whichkey.ui.toggle_icons", TuiAction::ToggleIcons),
+    entry(
+        "a",
+        "tui.whichkey.ui.toggle_advanced",
+        TuiAction::ToggleAdvancedUi,
+    ),
 ];
+
+/// The two halves of a which-key menu heading: the literal key sequence
+/// typed so far, and (for a subgroup) the i18n key of the word that names it.
+/// Kept apart so the key sequence stays verbatim while the word is localized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MenuTitle {
+    pub prefix: &'static str,
+    pub title_key: Option<&'static str>,
+}
+
+impl MenuTitle {
+    const fn bare(prefix: &'static str) -> Self {
+        Self {
+            prefix,
+            title_key: None,
+        }
+    }
+}
 
 /// Title and rows of the which-key overlay for `pending`, or `None` when
 /// nothing is pending.
-pub fn menu(pending: Pending) -> Option<(&'static str, &'static [WhichKeyEntry])> {
+pub fn menu(pending: Pending) -> Option<(MenuTitle, &'static [WhichKeyEntry])> {
     match pending {
         Pending::None => None,
-        Pending::G => Some(("g", G_MENU)),
-        Pending::Leader => Some(("<leader>", LEADER_ROOT)),
-        Pending::LeaderGroup('f') => Some(("<leader>f  find", LEADER_FIND)),
-        Pending::LeaderGroup('p') => Some(("<leader>p  panel", LEADER_PANEL)),
-        Pending::LeaderGroup('s') => Some(("<leader>s  stream", LEADER_STREAM)),
-        Pending::LeaderGroup('c') => Some(("<leader>c  config", LEADER_CONFIG)),
-        Pending::LeaderGroup('o') => Some(("<leader>o  obs", LEADER_OBS)),
-        Pending::LeaderGroup('u') => Some(("<leader>u  ui", LEADER_UI)),
-        Pending::LeaderGroup(_) => None,
+        Pending::G => Some((MenuTitle::bare("g"), G_MENU)),
+        Pending::Leader => Some((MenuTitle::bare("<leader>"), LEADER_ROOT)),
+        // Only a root entry that is actually a group opens a submenu: keys
+        // like `<leader>P` start with a letter but are leaves.
+        Pending::LeaderGroup(ch) => {
+            LEADER_ROOT
+                .iter()
+                .find(|e| e.key.starts_with(ch))
+                .and_then(|e| match &e.outcome {
+                    KeyOutcome::Group {
+                        prefix,
+                        title_key,
+                        entries,
+                    } => Some((
+                        MenuTitle {
+                            prefix,
+                            title_key: Some(title_key),
+                        },
+                        *entries,
+                    )),
+                    KeyOutcome::Action(_) => None,
+                })
+        }
     }
 }
 
@@ -134,122 +266,60 @@ pub fn menu(pending: Pending) -> Option<(&'static str, &'static [WhichKeyEntry])
 /// key isn't mapped here — callers dismiss the menu, which is how which-key
 /// behaves for an unknown key.
 pub fn resolve(pending: Pending, ch: char) -> Option<TuiAction> {
-    match pending {
-        Pending::None => None,
-        Pending::G => match ch {
-            'g' => Some(TuiAction::NavTop),
-            _ => None,
-        },
-        Pending::Leader => match ch {
-            'f' | 'p' | 's' | 'c' | 'o' | 'u' => {
-                Some(TuiAction::SetPending(Pending::LeaderGroup(ch)))
-            }
-            ':' => Some(TuiAction::OpenPalette {
-                prefix: None,
-                seed: "",
-            }),
-            'q' => Some(TuiAction::Quit),
-            'P' => Some(TuiAction::OpenSceneProfiles),
-            'N' => Some(TuiAction::SceneProfileCycleNext),
-            _ => None,
-        },
-        Pending::LeaderGroup('f') => match ch {
-            's' => Some(seeded("scene ")),
-            'p' => Some(seeded("profile ")),
-            'P' => Some(seeded("scene-profile ")),
-            'c' => Some(seeded("collection ")),
-            'a' => Some(seeded("toggle-mute ")),
-            _ => None,
-        },
-        Pending::LeaderGroup('p') => match ch {
-            's' => Some(TuiAction::FocusScenes),
-            'a' => Some(TuiAction::FocusAudio),
-            'p' => Some(TuiAction::FocusProfiles),
-            'c' => Some(TuiAction::FocusCollections),
-            _ => None,
-        },
-        Pending::LeaderGroup('s') => match ch {
-            's' => Some(TuiAction::ToggleStream),
-            'r' => Some(TuiAction::ToggleRecord),
-            _ => None,
-        },
-        Pending::LeaderGroup('c') => match ch {
-            'r' => Some(TuiAction::ReloadConfig),
-            'd' => Some(TuiAction::DumpConfig),
-            'v' => Some(TuiAction::ValidateConfig),
-            _ => None,
-        },
-        Pending::LeaderGroup('o') => match ch {
-            'r' => Some(TuiAction::ReconnectObs),
-            's' => Some(TuiAction::ObsStatus),
-            'd' => Some(TuiAction::ServerStatus),
-            'c' => Some(TuiAction::RetryConnect),
-            _ => None,
-        },
-        Pending::LeaderGroup('u') => match ch {
-            't' => Some(TuiAction::OpenSettings),
-            'i' => Some(TuiAction::ToggleIcons),
-            'a' => Some(TuiAction::ToggleAdvancedUi),
-            _ => None,
-        },
-        Pending::LeaderGroup(_) => None,
-    }
-}
-
-/// Open the palette pre-filled with `seed` after the configured prefix, the
-/// way `<leader>f…` mappings jump straight into a filtered command.
-fn seeded(seed: &'static str) -> TuiAction {
-    TuiAction::OpenPalette { prefix: None, seed }
+    let (_, entries) = menu(pending)?;
+    entries
+        .iter()
+        .find(|e| e.key.starts_with(ch))
+        .map(|e| match &e.outcome {
+            KeyOutcome::Group { .. } => TuiAction::SetPending(Pending::LeaderGroup(ch)),
+            KeyOutcome::Action(action) => action.clone(),
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn all_menus() -> Vec<Pending> {
+    fn all_tables() -> Vec<(&'static str, &'static [WhichKeyEntry])> {
         vec![
-            Pending::G,
-            Pending::Leader,
-            Pending::LeaderGroup('f'),
-            Pending::LeaderGroup('p'),
-            Pending::LeaderGroup('s'),
-            Pending::LeaderGroup('c'),
-            Pending::LeaderGroup('o'),
-            Pending::LeaderGroup('u'),
+            ("g", G_MENU),
+            ("<leader>", LEADER_ROOT),
+            ("<leader>f", LEADER_FIND),
+            ("<leader>p", LEADER_PANEL),
+            ("<leader>s", LEADER_STREAM),
+            ("<leader>c", LEADER_CONFIG),
+            ("<leader>o", LEADER_OBS),
+            ("<leader>u", LEADER_UI),
         ]
     }
 
+    /// Lookup takes the *first* entry whose key matches, so a duplicated key
+    /// in a table would silently shadow the later one — with no compile error
+    /// and no visible sign except a mapping that never fires.
     #[test]
-    fn every_listed_which_key_entry_resolves() {
-        for pending in all_menus() {
-            let (_, entries) = menu(pending).expect("menu for {pending:?}");
+    fn no_table_lists_the_same_key_twice() {
+        for (name, entries) in all_tables() {
+            let mut seen: Vec<&str> = Vec::new();
             for e in entries {
-                let ch = e.key.chars().next().expect("single-char key");
-                let action = resolve(pending, ch)
-                    .unwrap_or_else(|| panic!("{pending:?} + '{ch}' is listed but unmapped"));
-                if e.group {
-                    assert!(
-                        matches!(action, TuiAction::SetPending(_)),
-                        "{pending:?} + '{ch}' is listed as a group but does not open one"
-                    );
-                } else {
-                    assert!(
-                        !matches!(action, TuiAction::SetPending(_)),
-                        "{pending:?} + '{ch}' is listed as an action but opens a group"
-                    );
-                }
+                assert!(
+                    !seen.contains(&e.key),
+                    "{name} lists the key '{}' twice; the second one is unreachable",
+                    e.key
+                );
+                seen.push(e.key);
             }
         }
     }
 
     #[test]
     fn every_group_entry_has_a_menu_of_its_own() {
-        let (_, root) = menu(Pending::Leader).unwrap();
-        for e in root.iter().filter(|e| e.group) {
+        for e in LEADER_ROOT.iter().filter(|e| e.is_group()) {
             let ch = e.key.chars().next().unwrap();
+            let (_, entries) = menu(Pending::LeaderGroup(ch))
+                .unwrap_or_else(|| panic!("<leader>{ch} is a group with no which-key menu"));
             assert!(
-                menu(Pending::LeaderGroup(ch)).is_some(),
-                "<leader>{ch} is a group with no which-key menu"
+                !entries.is_empty(),
+                "<leader>{ch} opens an empty which-key menu"
             );
         }
     }
@@ -286,6 +356,8 @@ mod tests {
             resolve(Pending::Leader, 'p'),
             Some(TuiAction::SetPending(Pending::LeaderGroup('p')))
         );
+        // A leaf key never opens a menu, even though it looks like a prefix.
+        assert!(menu(Pending::LeaderGroup('P')).is_none());
     }
 
     /// The cycle key has to be reachable from the which-key menu as well as
@@ -299,7 +371,7 @@ mod tests {
         );
         let (_, root) = menu(Pending::Leader).unwrap();
         assert!(
-            root.iter().any(|e| e.key == "N" && !e.group),
+            root.iter().any(|e| e.key == "N" && !e.is_group()),
             "the cycle key is listed in the which-key root"
         );
     }

@@ -21,12 +21,11 @@ use crate::tui::{model::TuiModel, theme, theme::Theme, widgets::chrome};
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> (Rect, usize) {
     let theme = model.theme;
 
-    let title_text = t!(chrome::glyph(
+    let title_text = chrome::phrase(
         model,
         "tui.panels.settings.title",
-        "tui.panels.settings.title_ascii"
-    ))
-    .into_owned();
+        "tui.panels.settings.title_ascii",
+    );
     let title = chrome::heading(model, title_text, theme.accent, theme.accent_alt);
     let outer = chrome::ascii_aware(
         Block::default()
@@ -63,7 +62,7 @@ fn render_theme_list(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
                 Span::styled(cell, Style::default().fg(t.warning)),
                 Span::styled(cell, Style::default().fg(t.danger)),
                 Span::raw("  "),
-                Span::raw(t.label),
+                Span::raw(t.display_label()),
             ]);
             ListItem::new(swatch)
         })
@@ -162,12 +161,11 @@ fn render_preview(f: &mut Frame, area: Rect, model: &TuiModel) {
 
     // The heading is the one row the table cannot describe: with the advanced
     // UI on it is an animated colour wave rather than a single style.
-    let heading_text = t!(chrome::glyph(
+    let heading_text = chrome::phrase(
         model,
         "tui.panels.settings.preview_heading",
-        "tui.panels.settings.preview_heading_ascii"
-    ))
-    .into_owned();
+        "tui.panels.settings.preview_heading_ascii",
+    );
     // Unbolded on purpose or by oversight — this heading's plain fallback has
     // always been drawn at the lighter weight, unlike every other heading in
     // the UI. Left as it was rather than changed under cover of a refactor.

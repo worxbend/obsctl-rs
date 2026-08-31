@@ -9,6 +9,8 @@ use ratatui::{
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use rust_i18n::t;
+
 use crate::tui::{anim, model::TuiModel, spinner::BroadcastState, theme::Theme};
 
 pub const ASCII_BORDER: border::Set = border::Set {
@@ -64,6 +66,25 @@ pub fn bordered<'a>(
 /// decision is what stops the two from being answered differently.
 pub fn glyph(model: &TuiModel, advanced: &'static str, plain: &'static str) -> &'static str {
     if model.advanced_ui { advanced } else { plain }
+}
+
+/// [`glyph`] for a pair of *translation keys* rather than a pair of literal
+/// glyphs: looks the chosen key up and hands back the translated text.
+///
+/// The rule this encodes is the one written down at `locales/en.yml:112-117`:
+/// a key ending in `_ascii` is the plain-ASCII spelling of the key above it,
+/// and which of the two a widget wants is a question about what the terminal
+/// can draw — arrows, box drawing, typographic punctuation — so it is decided
+/// on `advanced_ui`, not on whether the user asked for emoji. Only an inline
+/// pictogram literal (`model.symbol("🎬", "S")`) is a `show_icons` question.
+///
+/// Writing `t!(glyph(model, a, b))` by hand worked, but it left the choice
+/// looking interchangeable with `t!(model.symbol(a, b))`, which reads the
+/// other switch — and the two spellings had already drifted apart across the
+/// panels. Naming the lookup is what keeps every hint answering the same
+/// question.
+pub fn phrase(model: &TuiModel, advanced_key: &'static str, plain_key: &'static str) -> String {
+    t!(glyph(model, advanced_key, plain_key)).to_string()
 }
 
 /// [`glyph`] for the call sites that build a string a character at a time,

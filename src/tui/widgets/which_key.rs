@@ -6,6 +6,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
+use rust_i18n::t;
+use unicode_width::UnicodeWidthChar;
+
 use crate::tui::{keymap, model::TuiModel, widgets::chrome};
 
 /// Columns the key part of a cell takes: ` key ` with the key right-aligned
@@ -24,6 +27,29 @@ const CELL_WIDTH: u16 = 26;
 const _: () = assert!(KEY_COLS + ARROW_COLS + LABEL_COLS <= CELL_WIDTH);
 /// Widest the popup grows, however much room the terminal has.
 const MAX_WIDTH: u16 = 78;
+
+/// Cut `label` to at most `cols` terminal columns, then pad it back out to
+/// exactly `cols`.
+///
+/// Padding with `{:<width$}` would count `char`s, not display columns, so a
+/// translated label (Ukrainian labels are longer than the English ones, and a
+/// wide glyph occupies two columns) would push the cell past `CELL_WIDTH` and
+/// shift the whole popup grid. Measuring in columns keeps every cell the same
+/// width whatever the locale.
+fn fit_to_columns(label: &str, cols: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in label.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > cols {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.extend(std::iter::repeat_n(' ', cols - used));
+    out
+}
 
 /// AstroNvim-style which-key popup: whenever a key sequence is half-typed,
 /// show what the next keystroke can be. Rendered last so it floats over the
@@ -62,14 +88,15 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
                 ));
                 // which-key marks a prefix that opens another menu with a
                 // leading `+`; keep that vocabulary so muscle memory carries.
-                let (label, style) = if e.group {
+                let text = t!(e.label_key);
+                let (label, style) = if e.is_group() {
                     (
-                        format!("+{:<width$}", e.label, width = LABEL_COLS as usize - 1),
+                        format!("+{}", fit_to_columns(&text, LABEL_COLS as usize - 1)),
                         Style::default().fg(theme.accent_alt),
                     )
                 } else {
                     (
-                        format!("{:<width$}", e.label, width = LABEL_COLS as usize),
+                        fit_to_columns(&text, LABEL_COLS as usize),
                         Style::default().fg(theme.fg),
                     )
                 };
@@ -91,8 +118,12 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         height,
     };
 
+    let heading_text = match title.title_key {
+        Some(key) => format!(" {}  {} ", title.prefix, t!(key)),
+        None => format!(" {} ", title.prefix),
+    };
     let mut heading = vec![Span::styled(
-        format!(" {title} "),
+        heading_text,
         Style::default()
             .fg(theme.highlight_fg)
             .bg(theme.highlight_bg)

@@ -188,7 +188,8 @@ fn name_line(model: &TuiModel, editor: &SceneProfileEditor) -> Line<'static> {
 /// user wants to be trusting when the answer destroys a profile with no undo.
 fn hint_line(model: &TuiModel, editor: &SceneProfileEditor) -> Line<'static> {
     if let Some(name) = editor.pending_delete.as_deref() {
-        let key = model.symbol(
+        let key = chrome::glyph(
+            model,
             "tui.panels.scene_profiles.hint_confirm_delete",
             "tui.panels.scene_profiles.hint_confirm_delete_ascii",
         );
@@ -200,15 +201,18 @@ fn hint_line(model: &TuiModel, editor: &SceneProfileEditor) -> Line<'static> {
         ));
     }
     let key = match editor.stage {
-        SceneProfileStage::Picker => model.symbol(
+        SceneProfileStage::Picker => chrome::glyph(
+            model,
             "tui.panels.scene_profiles.hint_picker",
             "tui.panels.scene_profiles.hint_picker_ascii",
         ),
-        SceneProfileStage::Scenes => model.symbol(
+        SceneProfileStage::Scenes => chrome::glyph(
+            model,
             "tui.panels.scene_profiles.hint_scenes",
             "tui.panels.scene_profiles.hint_scenes_ascii",
         ),
-        SceneProfileStage::Naming => model.symbol(
+        SceneProfileStage::Naming => chrome::glyph(
+            model,
             "tui.panels.scene_profiles.hint_naming",
             "tui.panels.scene_profiles.hint_naming_ascii",
         ),
@@ -261,10 +265,11 @@ fn row_item(model: &TuiModel, row: &SceneProfileRow) -> ListItem<'static> {
                 " {}",
                 chrome::typographic(
                     model,
-                    &t!(model.symbol(
+                    &chrome::phrase(
+                        model,
                         "tui.panels.scene_profiles.new_entry",
-                        "tui.panels.scene_profiles.new_entry_ascii"
-                    ))
+                        "tui.panels.scene_profiles.new_entry_ascii",
+                    )
                 )
             ),
             Style::default()
@@ -300,10 +305,11 @@ fn row_item(model: &TuiModel, row: &SceneProfileRow) -> ListItem<'static> {
                 spans.push(Span::styled(
                     format!(
                         "  {}",
-                        t!(model.symbol(
+                        chrome::phrase(
+                            model,
                             "tui.panels.scene_profiles.active_marker",
-                            "tui.panels.scene_profiles.active_marker_ascii"
-                        ))
+                            "tui.panels.scene_profiles.active_marker_ascii",
+                        )
                     ),
                     Style::default().fg(theme.success),
                 ));
@@ -369,10 +375,11 @@ fn row_item(model: &TuiModel, row: &SceneProfileRow) -> ListItem<'static> {
                         "  {}",
                         chrome::typographic(
                             model,
-                            &t!(model.symbol(
+                            &chrome::phrase(
+                                model,
                                 "tui.panels.scene_profiles.state_missing",
-                                "tui.panels.scene_profiles.state_missing_ascii"
-                            ))
+                                "tui.panels.scene_profiles.state_missing_ascii",
+                            )
                         )
                     ),
                     Style::default().fg(theme.warning),

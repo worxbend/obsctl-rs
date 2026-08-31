@@ -7,11 +7,6 @@ use crate::support::fs;
 
 use super::model::Config;
 
-/// Stable name for writing a config file; delegates to [`write_atomic`].
-pub fn write(config: &Config, path: &Path) -> Result<()> {
-    write_atomic(config, path)
-}
-
 pub fn write_atomic(config: &Config, path: &Path) -> Result<()> {
     // `write_atomic_with_temp_file` re-checks the parent directory, but it
     // reports failures as `Io` (exit code 1); checking here first keeps an
@@ -29,5 +24,5 @@ pub fn write_atomic(config: &Config, path: &Path) -> Result<()> {
 }
 
 pub fn write_default(path: &Path) -> Result<()> {
-    write(&Config::default(), path)
+    write_atomic(&Config::default(), path)
 }

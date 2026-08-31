@@ -30,8 +30,8 @@ pub async fn run(options: ServerOptions) -> i32 {
         .or_else(crate::config::paths::config_path)
         .unwrap_or_else(fallback_config_path);
 
-    let (config, socket_path, _) = match loader::load_or_default_with_runtime(&config_path) {
-        Ok(c) => c,
+    let rt = match loader::load_runtime(&config_path) {
+        Ok(rt) => rt,
         Err(e) => {
             return startup_failure(
                 format!("Failed to load config: {e}"),
@@ -39,6 +39,7 @@ pub async fn run(options: ServerOptions) -> i32 {
             );
         }
     };
+    let (config, socket_path) = (rt.config, rt.socket_path);
 
     if let Err(message) = socket_path::prepare(&socket_path).await {
         return startup_failure(&message, ObsctlError::IpcConnectionFailed(message.clone()));

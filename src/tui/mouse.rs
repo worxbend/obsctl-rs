@@ -13,7 +13,7 @@ use ratatui::layout::{Position, Rect};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 use crate::tui::{
-    input::TuiAction,
+    input::{SceneProfileAction, TuiAction},
     model::{FocusPanel, SceneProfileStage, TuiModel},
 };
 
@@ -229,7 +229,9 @@ fn scene_profile_mouse(
     // survives a click aimed at whatever the modal was showing a moment ago.
     if model.scene_profile_pending_delete().is_some() {
         return match event.kind {
-            MouseEventKind::Down(_) => Some(TuiAction::SceneProfileDeleteCancel),
+            MouseEventKind::Down(_) => {
+                Some(TuiAction::SceneProfile(SceneProfileAction::DeleteCancel))
+            }
             _ => None,
         };
     }
@@ -239,8 +241,8 @@ fn scene_profile_mouse(
     if matches!(event.kind, MouseEventKind::Down(MouseButton::Right)) {
         return Some(match stage {
             SceneProfileStage::Picker => TuiAction::CloseSceneProfiles,
-            SceneProfileStage::Scenes => TuiAction::SceneProfileBack,
-            SceneProfileStage::Naming => TuiAction::SceneProfileNameCancel,
+            SceneProfileStage::Scenes => TuiAction::SceneProfile(SceneProfileAction::Back),
+            SceneProfileStage::Naming => TuiAction::SceneProfile(SceneProfileAction::NameCancel),
         });
     }
 
@@ -248,8 +250,12 @@ fn scene_profile_mouse(
         return None;
     }
     match event.kind {
-        MouseEventKind::ScrollUp => Some(TuiAction::SceneProfileNavUp(WHEEL_ROWS)),
-        MouseEventKind::ScrollDown => Some(TuiAction::SceneProfileNavDown(WHEEL_ROWS)),
+        MouseEventKind::ScrollUp => Some(TuiAction::SceneProfile(SceneProfileAction::NavUp(
+            WHEEL_ROWS,
+        ))),
+        MouseEventKind::ScrollDown => Some(TuiAction::SceneProfile(SceneProfileAction::NavDown(
+            WHEEL_ROWS,
+        ))),
         // Not while a name is being typed: the rows showing through under the
         // naming overlay belong to the stage behind it, and moving that cursor
         // out from under a half-typed name is not what a click there means.
@@ -267,9 +273,9 @@ fn scene_profile_mouse(
                 && rows.get(index).is_some_and(|row| row.selected)
                 && index > 0;
             if repeat {
-                Some(TuiAction::SceneProfileActivate)
+                Some(TuiAction::SceneProfile(SceneProfileAction::Activate))
             } else {
-                Some(TuiAction::SceneProfileSelect(index))
+                Some(TuiAction::SceneProfile(SceneProfileAction::Select(index)))
             }
         }
         _ => None,
@@ -688,12 +694,12 @@ mod tests {
         // The editor opens on row 1, so row 2 is a different row: it selects.
         assert_eq!(
             handle_mouse(&model, &hits, click(5, 2)),
-            Some(TuiAction::SceneProfileSelect(2))
+            Some(TuiAction::SceneProfile(SceneProfileAction::Select(2)))
         );
         model.scene_profile_set_cursor(2);
         assert_eq!(
             handle_mouse(&model, &hits, click(5, 2)),
-            Some(TuiAction::SceneProfileActivate)
+            Some(TuiAction::SceneProfile(SceneProfileAction::Activate))
         );
 
         // Row 0 names a profile that does not exist yet, so clicking it twice
@@ -701,7 +707,7 @@ mod tests {
         model.scene_profile_set_cursor(0);
         assert_eq!(
             handle_mouse(&model, &hits, click(5, 0)),
-            Some(TuiAction::SceneProfileSelect(0))
+            Some(TuiAction::SceneProfile(SceneProfileAction::Select(0)))
         );
     }
 }

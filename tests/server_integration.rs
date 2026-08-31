@@ -273,7 +273,7 @@ fn extract_response(msg: ServerMessage) -> (bool, Option<Value>, Option<String>)
 async fn wait_for_obs_connected(state: &StateStore) {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if state.read().await.connected {
+            if state.snapshot().await.connected {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -467,7 +467,9 @@ async fn obs_command_timeout_returns_request_timeout_ipc_code_and_exit_4() {
     cfg.connection.request_timeout_ms = TIMEOUT_MS;
     let params = ObsConnectionParams::from_config(&cfg.connection).unwrap();
     let (event_tx, _event_rx) = mpsc::channel(8);
-    let (obs_client, _, _, _disconnect) = connect(&params, event_tx).await.unwrap();
+    let session = connect(&params, event_tx).await.unwrap();
+    let obs_client = session.client;
+    let _disconnect = session.disconnect;
 
     let snapshot = ObsSnapshot {
         connected: true,
@@ -601,7 +603,7 @@ async fn a_scene_change_during_a_refresh_is_not_left_reverted() {
     // re-fetch produces both at once.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let snap = state.read().await;
+        let snap = state.snapshot().await;
         let refreshed = snap.scenes.iter().any(|scene| scene.name == "Live");
         if refreshed && snap.current_scene.as_deref() == Some("Live") {
             break;
@@ -863,7 +865,7 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
         ],
     );
 
-    let state_before_unknown = serde_json::to_value(state.read().await).unwrap();
+    let state_before_unknown = serde_json::to_value(state.snapshot().await).unwrap();
     let mut unknown_events_client = IpcClient::connect(&socket_path).await.unwrap();
     unknown_events_client
         .subscribe(&[TOPIC_EVENTS])
@@ -882,7 +884,7 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
     );
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
-        serde_json::to_value(state.read().await).unwrap(),
+        serde_json::to_value(state.snapshot().await).unwrap(),
         state_before_unknown
     );
 
@@ -903,7 +905,7 @@ async fn obs_supervisor_publishes_obs_events_only_to_events_subscribers() {
 
     assert_eq!(
         state
-            .read()
+            .snapshot()
             .await
             .audio_inputs
             .iter()
@@ -1905,7 +1907,9 @@ async fn a_scene_profile_survives_dump_config() {
     cfg.connection.request_timeout_ms = 500;
     let params = ObsConnectionParams::from_config(&cfg.connection).unwrap();
     let (event_tx, _event_rx) = mpsc::channel(8);
-    let (obs_client, _, _, _disconnect) = connect(&params, event_tx).await.unwrap();
+    let session = connect(&params, event_tx).await.unwrap();
+    let obs_client = session.client;
+    let _disconnect = session.disconnect;
 
     let (socket_path, _shutdown) = spawn_server_with_obs_client(
         &dir,
@@ -2368,7 +2372,9 @@ async fn start_obs_connected_server(
     cfg.connection.request_timeout_ms = 500;
     let params = ObsConnectionParams::from_config(&cfg.connection).unwrap();
     let (event_tx, _event_rx) = mpsc::channel(8);
-    let (obs_client, _, _, _disconnect) = connect(&params, event_tx).await.unwrap();
+    let session = connect(&params, event_tx).await.unwrap();
+    let obs_client = session.client;
+    let _disconnect = session.disconnect;
 
     let snapshot = ObsSnapshot {
         connected: true,
@@ -2556,7 +2562,9 @@ impl HoldableObsDaemon {
 
         let params = ObsConnectionParams::from_config(&cfg.connection).unwrap();
         let (event_tx, obs_events) = mpsc::channel(8);
-        let (obs_client, _, _, obs_disconnected) = connect(&params, event_tx).await.unwrap();
+        let session = connect(&params, event_tx).await.unwrap();
+        let obs_client = session.client;
+        let obs_disconnected = session.disconnect;
 
         let snapshot = ObsSnapshot {
             connected: true,

@@ -92,48 +92,41 @@ pub fn gradient_line(text: &str, from: Color, to: Color, frame: u64, bold: bool)
     Line::from(spans)
 }
 
-/// Render numeric history as a compact Unicode sparkline. Empty history is
-/// represented by a dim baseline so the dashboard does not jump as data arrives.
-pub fn sparkline(values: &[f64], width: usize) -> String {
-    const BARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// Scale `values` against the peak of the visible window and render one
+/// character per column from `ramp`, lowest level first.
+fn ramp_line(values: &[f64], width: usize, ramp: &[char]) -> String {
     if width == 0 {
         return String::new();
     }
     if values.is_empty() {
-        return "▁".repeat(width);
+        return ramp[0].to_string().repeat(width);
     }
 
-    let start = values.len().saturating_sub(width);
-    let visible = &values[start..];
+    let visible = &values[values.len().saturating_sub(width)..];
     let max = visible.iter().copied().fold(0.0_f64, f64::max).max(1.0);
-    let mut result = "▁".repeat(width.saturating_sub(visible.len()));
+    let mut result = ramp[0]
+        .to_string()
+        .repeat(width.saturating_sub(visible.len()));
     for value in visible {
         let normalized = (value / max).clamp(0.0, 1.0);
-        let index = (normalized * (BARS.len() - 1) as f64).round() as usize;
-        result.push(BARS[index]);
+        let index = (normalized * (ramp.len() - 1) as f64).round() as usize;
+        result.push(ramp[index]);
     }
     result
 }
 
-/// ASCII-only history graph for terminals without Unicode block support.
+/// Render numeric history as a compact Unicode sparkline. Empty history is
+/// represented by a dim baseline so the dashboard does not jump as data arrives.
+pub fn sparkline(values: &[f64], width: usize) -> String {
+    ramp_line(values, width, &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'])
+}
+
+/// ASCII-only history graph for terminals without Unicode block support. Uses
+/// the same scale as the Unicode sparkline -- absolute against the window peak --
+/// so a steady non-zero series reads as a high flat line instead of bottoming
+/// out the way the previous min-to-max scaling made it.
 pub fn sparkline_ascii(values: &[f64], width: usize) -> String {
-    const LEVELS: &[u8] = b".-=+*#";
-    if width == 0 {
-        return String::new();
-    }
-    if values.is_empty() {
-        return ".".repeat(width);
-    }
-    let visible = &values[values.len().saturating_sub(width)..];
-    let min = visible.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = visible.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let range = (max - min).max(f64::EPSILON);
-    let mut result = ".".repeat(width.saturating_sub(visible.len()));
-    for value in visible {
-        let index = (((value - min) / range) * (LEVELS.len() - 1) as f64).round() as usize;
-        result.push(LEVELS[index.min(LEVELS.len() - 1)] as char);
-    }
-    result
+    ramp_line(values, width, &['.', '-', '=', '+', '*', '#'])
 }
 
 #[cfg(test)]
@@ -219,5 +212,19 @@ mod tests {
         let line = sparkline(&[0.0, 5.0, 10.0], 4);
         assert_eq!(line.chars().count(), 4);
         assert!(line.ends_with('█'));
+    }
+
+    #[test]
+    fn ascii_and_unicode_sparklines_agree_on_shape() {
+        let unicode = sparkline(&[0.0, 5.0, 10.0], 3);
+        let ascii = sparkline_ascii(&[0.0, 5.0, 10.0], 3);
+        assert_eq!(unicode.chars().count(), 3);
+        assert_eq!(ascii.chars().count(), 3);
+        assert_eq!(
+            unicode.chars().position(|c| c == '█'),
+            ascii.chars().position(|c| c == '#')
+        );
+        assert_eq!(sparkline_ascii(&[], 4), "....");
+        assert!(sparkline_ascii(&[60.0, 60.0, 60.0], 3).ends_with('#'));
     }
 }

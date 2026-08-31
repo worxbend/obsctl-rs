@@ -75,6 +75,9 @@ const YELLOW_DB: f32 = -20.0;
 const STRIP_MIN_WIDTH: u16 = 11;
 const STRIP_MAX_WIDTH: u16 = 16;
 const STRIP_GAP: u16 = 1;
+/// Rows a channel strip spends on its own top and bottom border, drawn inside
+/// the pane interior `chrome::frame` already returned.
+const STRIP_BORDER_ROWS: u16 = 2;
 /// Columns reserved on the right of a strip for the dB scale (`-20`), plus
 /// the blank column before it. Dropped entirely on strips too narrow to
 /// afford both a scale and a meter worth looking at.
@@ -189,11 +192,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let inputs = model.audio_inputs();
 
     let title = t!("tui.audio.title");
-    let hint = t!(chrome::glyph(
-        model,
-        "tui.audio.hint",
-        "tui.audio.hint_ascii"
-    ));
+    let hint = chrome::phrase(model, "tui.audio.hint", "tui.audio.hint_ascii");
     let block = chrome::panel(
         model.symbol("🎚", "A"),
         &title,
@@ -223,7 +222,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     // the same things, so the meters start and end level with each other and
     // their dB scales can be read straight across.
     let plan = RowPlan::for_height(
-        usize::from(inner.height.saturating_sub(2)),
+        usize::from(inner.height.saturating_sub(STRIP_BORDER_ROWS)),
         inputs.iter().any(|input| strip_tag(input).is_some()),
     );
 

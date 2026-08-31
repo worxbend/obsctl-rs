@@ -111,54 +111,35 @@ impl fmt::Display for ValidationError {
     }
 }
 
-impl fmt::Display for PasswordConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl PasswordConfigError {
+    pub fn config_field_message(&self) -> &'static str {
         match self {
             Self::ConflictingPasswordSources => {
-                write!(f, "password and password_env are both set")
+                "connection.password and connection.password_env are mutually exclusive"
             }
             Self::PlaintextPasswordHasControlCharacters => {
-                write!(f, "password contains control characters")
+                "connection.password must not contain control characters"
             }
-            Self::PlaintextPasswordTooLong => {
-                write!(f, "password exceeds maximum length")
-            }
-            Self::PasswordEnvError(error) => {
-                write!(f, "{error}")
-            }
+            Self::PlaintextPasswordTooLong => "connection.password exceeds maximum length",
+            // Every `ValidationError` variant is spelled out rather than covered by
+            // a `_` arm. An earlier catch-all reported any unlisted variant as a
+            // control-character problem, so a variant added later would have been
+            // described to the user as something it is not, with nothing failing to
+            // say so. Listing them all makes the compiler point at this match the
+            // next time the enum grows.
+            Self::PasswordEnvError(error) => match error {
+                ValidationError::InvalidUtf8 => "connection.password_env must be valid UTF-8",
+                ValidationError::InvalidEnvVarFormat | ValidationError::Blank => {
+                    "connection.password_env must be a valid environment variable name"
+                }
+                ValidationError::MaxLengthExceeded(_) => {
+                    "connection.password_env value exceeds maximum length"
+                }
+                ValidationError::ControlCharacters | ValidationError::ContainsWhitespace => {
+                    "connection.password_env value must not contain control characters"
+                }
+            },
         }
-    }
-}
-
-pub fn password_config_error_message(error: &PasswordConfigError) -> &'static str {
-    match error {
-        PasswordConfigError::ConflictingPasswordSources => {
-            "connection.password and connection.password_env are mutually exclusive"
-        }
-        PasswordConfigError::PlaintextPasswordHasControlCharacters => {
-            "connection.password must not contain control characters"
-        }
-        PasswordConfigError::PlaintextPasswordTooLong => {
-            "connection.password exceeds maximum length"
-        }
-        // Every `ValidationError` variant is spelled out rather than covered by
-        // a `_` arm. An earlier catch-all reported any unlisted variant as a
-        // control-character problem, so a variant added later would have been
-        // described to the user as something it is not, with nothing failing to
-        // say so. Listing them all makes the compiler point at this match the
-        // next time the enum grows.
-        PasswordConfigError::PasswordEnvError(error) => match error {
-            ValidationError::InvalidUtf8 => "connection.password_env must be valid UTF-8",
-            ValidationError::InvalidEnvVarFormat | ValidationError::Blank => {
-                "connection.password_env must be a valid environment variable name"
-            }
-            ValidationError::MaxLengthExceeded(_) => {
-                "connection.password_env value exceeds maximum length"
-            }
-            ValidationError::ControlCharacters | ValidationError::ContainsWhitespace => {
-                "connection.password_env value must not contain control characters"
-            }
-        },
     }
 }
 
@@ -507,7 +488,7 @@ mod tests {
     #[test]
     fn password_config_error_message_for_conflicting_sources() {
         assert_eq!(
-            password_config_error_message(&PasswordConfigError::ConflictingPasswordSources),
+            PasswordConfigError::ConflictingPasswordSources.config_field_message(),
             "connection.password and connection.password_env are mutually exclusive"
         );
     }
@@ -515,9 +496,7 @@ mod tests {
     #[test]
     fn password_config_error_message_for_plaintext_control_chars() {
         assert_eq!(
-            password_config_error_message(
-                &PasswordConfigError::PlaintextPasswordHasControlCharacters
-            ),
+            PasswordConfigError::PlaintextPasswordHasControlCharacters.config_field_message(),
             "connection.password must not contain control characters"
         );
     }
@@ -525,9 +504,8 @@ mod tests {
     #[test]
     fn password_config_error_message_for_password_env_invalid_utf8() {
         assert_eq!(
-            password_config_error_message(&PasswordConfigError::PasswordEnvError(
-                ValidationError::InvalidUtf8
-            )),
+            PasswordConfigError::PasswordEnvError(ValidationError::InvalidUtf8)
+                .config_field_message(),
             "connection.password_env must be valid UTF-8"
         );
     }
@@ -535,9 +513,8 @@ mod tests {
     #[test]
     fn password_config_error_message_for_password_env_invalid_name() {
         assert_eq!(
-            password_config_error_message(&PasswordConfigError::PasswordEnvError(
-                ValidationError::InvalidEnvVarFormat
-            )),
+            PasswordConfigError::PasswordEnvError(ValidationError::InvalidEnvVarFormat)
+                .config_field_message(),
             "connection.password_env must be a valid environment variable name"
         );
     }
@@ -545,9 +522,7 @@ mod tests {
     #[test]
     fn password_config_error_message_for_password_env_blank() {
         assert_eq!(
-            password_config_error_message(&PasswordConfigError::PasswordEnvError(
-                ValidationError::Blank
-            )),
+            PasswordConfigError::PasswordEnvError(ValidationError::Blank).config_field_message(),
             "connection.password_env must be a valid environment variable name"
         );
     }
@@ -555,9 +530,8 @@ mod tests {
     #[test]
     fn password_config_error_message_for_password_env_control_characters() {
         assert_eq!(
-            password_config_error_message(&PasswordConfigError::PasswordEnvError(
-                ValidationError::ControlCharacters
-            )),
+            PasswordConfigError::PasswordEnvError(ValidationError::ControlCharacters)
+                .config_field_message(),
             "connection.password_env value must not contain control characters"
         );
     }
@@ -565,9 +539,10 @@ mod tests {
     #[test]
     fn password_config_error_message_for_password_env_too_long() {
         assert_eq!(
-            password_config_error_message(&PasswordConfigError::PasswordEnvError(
-                ValidationError::MaxLengthExceeded(MAX_PASSWORD_LENGTH)
-            )),
+            PasswordConfigError::PasswordEnvError(ValidationError::MaxLengthExceeded(
+                MAX_PASSWORD_LENGTH
+            ))
+            .config_field_message(),
             "connection.password_env value exceeds maximum length"
         );
     }
@@ -575,14 +550,14 @@ mod tests {
     #[test]
     fn password_config_error_message_for_plaintext_too_long() {
         assert_eq!(
-            password_config_error_message(&PasswordConfigError::PlaintextPasswordTooLong),
+            PasswordConfigError::PlaintextPasswordTooLong.config_field_message(),
             "connection.password exceeds maximum length"
         );
     }
 
     /// Every `ValidationError` variant, in declaration order.
     ///
-    /// `password_config_error_message` renders each variant into its own
+    /// `PasswordConfigError::config_field_message` renders each variant into its own
     /// sentence. Adding a variant without extending that match used to be
     /// invisible, because the match ended in a catch-all. This list plus the
     /// count assertion below is the same guard `domain::errors` and
@@ -608,15 +583,14 @@ mod tests {
         );
 
         for error in ALL_VALIDATION_ERRORS {
-            let message = password_config_error_message(&PasswordConfigError::PasswordEnvError(
-                error.clone(),
-            ));
+            let message =
+                PasswordConfigError::PasswordEnvError(error.clone()).config_field_message();
             assert!(
                 message.starts_with("connection.password_env"),
                 "{error:?} must be reported as a connection.password_env problem"
             );
-            // The Display text and this table are two separate wordings of the
-            // same failure; both must actually say something.
+            // `ValidationError`'s own `Display` text and this table are two
+            // separate wordings of the same failure; both must say something.
             assert!(!error.to_string().is_empty(), "{error:?} has no Display");
         }
     }

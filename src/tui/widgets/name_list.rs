@@ -29,15 +29,18 @@ pub struct NameListPanel {
     pub names: fn(&TuiModel) -> &[String],
     /// The one of `names` OBS is currently using, if any.
     pub current: fn(&TuiModel) -> Option<&str>,
-    /// Panel icon, as `(rich, ascii)` — the model picks per `rich_ui`.
+    /// Panel icon, as `(rich, ascii)` — a pictogram pair, read with
+    /// [`TuiModel::symbol`], so it follows `rich_ui` (icons *and* Unicode).
     pub icon: (&'static str, &'static str),
     /// Translation key for the panel title. A key rather than the text
     /// itself because these panels are built as `const`s, which cannot call
     /// `t!` — so the lookup is deferred to render time.
     pub title_key: &'static str,
     /// Translation keys for the key hint in the panel's top-right corner, as
-    /// `(rich, ascii)`. The model picks per `rich_ui`, the same way the icon
-    /// above it does.
+    /// `(advanced, plain)`. Read with [`chrome::phrase`], so unlike the icon
+    /// above it this pair follows `advanced_ui` alone: the hint's arrows are
+    /// box-drawing-class characters, not emoji, and a terminal that can draw
+    /// them should get them even with icons switched off.
     pub hint_keys: (&'static str, &'static str),
 }
 
@@ -67,7 +70,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel, spec: &NameListPanel)
         .collect();
 
     let title = t!(spec.title_key);
-    let hint = t!(model.symbol(spec.hint_keys.0, spec.hint_keys.1));
+    let hint = chrome::phrase(model, spec.hint_keys.0, spec.hint_keys.1);
     let block = chrome::panel(
         model.symbol(spec.icon.0, spec.icon.1),
         &title,

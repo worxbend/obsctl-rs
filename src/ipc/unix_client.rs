@@ -63,6 +63,53 @@ impl UnmatchedFrames {
     }
 }
 
+/// What a read is waiting for, and the words used to describe a failure.
+///
+/// The three helpers below used to take two adjacent `&'static str`
+/// parameters each, in inconsistent orders, so swapping them silently changed
+/// error text instead of failing to compile. Naming the situation once keeps
+/// the three strings that belong to it together.
+#[derive(Clone, Copy)]
+enum Awaiting {
+    /// A reply to a command.
+    Response,
+    /// A reply to a subscribe request.
+    ///
+    /// `frame_name` is deliberately "response": that is the kind of frame on
+    /// the wire, so a decode failure reads "malformed response frame".
+    /// `waiting_for` is the caller-facing name of what is awaited.
+    SubscribeAck,
+    /// A pushed event.
+    Event,
+}
+
+impl Awaiting {
+    /// The kind of frame expected on the wire.
+    fn frame_name(self) -> &'static str {
+        match self {
+            Self::Response | Self::SubscribeAck => "response",
+            Self::Event => "event",
+        }
+    }
+
+    /// How to describe the peer hanging up at this point.
+    fn closed_error(self) -> &'static str {
+        match self {
+            Self::Response | Self::Event => "connection closed",
+            Self::SubscribeAck => "connection closed before subscribe ack",
+        }
+    }
+
+    /// What the caller is waiting for, in the caller's own terms.
+    fn waiting_for(self) -> &'static str {
+        match self {
+            Self::Response => "response",
+            Self::SubscribeAck => "subscribe response",
+            Self::Event => "event",
+        }
+    }
+}
+
 pub fn next_request_id() -> String {
     let n = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("req-{n:06}")
@@ -132,15 +179,13 @@ impl IpcClient {
     /// Read one frame, saying what went wrong in the caller's terms.
     ///
     /// The framing itself is `FrameReader`'s job; what this adds is the
-    /// vocabulary the rest of the client speaks. `frame_name` is what the
-    /// caller was waiting for ("response", "event"), and `closed_error`
-    /// describes the peer hanging up at that particular point, which is not a
-    /// framing fault but still leaves the caller with no answer.
-    async fn read_frame(
-        &mut self,
-        closed_error: &'static str,
-        frame_name: &'static str,
-    ) -> Result<String> {
+    /// vocabulary the rest of the client speaks, which [`Awaiting`] supplies:
+    /// the name of the frame being waited for, and how to describe the peer
+    /// hanging up at that particular point — not a framing fault, but still no
+    /// answer for the caller.
+    async fn read_frame(&mut self, awaiting: Awaiting) -> Result<String> {
+        let closed_error = awaiting.closed_error();
+        let frame_name = awaiting.frame_name();
         match self.frames.next_frame().await {
             Ok(Some(frame)) => Ok(frame),
             Ok(None) => Err(ObsctlError::IpcProtocolError(closed_error.to_string())),
@@ -186,17 +231,14 @@ impl IpcClient {
 
     /// Read one frame and decode it into a [`ServerMessage`].
     ///
-    /// `frame_name` and `closed_error` mean what they do on [`read_frame`],
-    /// and `frame_name` also names the frame in the decode failure so a caller
-    /// waiting for an event does not read "malformed response frame".
+    /// `awaiting` means what it does on [`read_frame`], and its frame name
+    /// also names the frame in the decode failure so a caller waiting for an
+    /// event does not read "malformed response frame".
     ///
     /// [`read_frame`]: IpcClient::read_frame
-    async fn read_message(
-        &mut self,
-        closed_error: &'static str,
-        frame_name: &'static str,
-    ) -> Result<ServerMessage> {
-        let frame = self.read_frame(closed_error, frame_name).await?;
+    async fn read_message(&mut self, awaiting: Awaiting) -> Result<ServerMessage> {
+        let frame_name = awaiting.frame_name();
+        let frame = self.read_frame(awaiting).await?;
         decode::<ServerMessage>(&frame).map_err(|e| {
             ObsctlError::IpcProtocolError(format!("malformed {frame_name} frame: {e}"))
         })
@@ -207,16 +249,11 @@ impl IpcClient {
     /// The server may interleave pushed events and replies to other requests,
     /// so a frame that is not the awaited one is discarded — but counted, so a
     /// peer that never sends the awaited reply cannot keep this loop running
-    /// forever. `waiting_for` names the awaited reply in that failure.
-    async fn await_response(
-        &mut self,
-        id: &str,
-        waiting_for: &'static str,
-        closed_error: &'static str,
-    ) -> Result<ServerMessage> {
-        let mut unmatched = UnmatchedFrames::waiting_for(waiting_for);
+    /// forever. `awaiting` names the awaited reply in that failure.
+    async fn await_response(&mut self, id: &str, awaiting: Awaiting) -> Result<ServerMessage> {
+        let mut unmatched = UnmatchedFrames::waiting_for(awaiting.waiting_for());
         loop {
-            let msg = self.read_message(closed_error, "response").await?;
+            let msg = self.read_message(awaiting).await?;
             if let ServerMessage::Response {
                 id: ref resp_id, ..
             } = msg
@@ -245,8 +282,7 @@ impl IpcClient {
         };
         self.send_frame(&msg).await?;
 
-        self.await_response(&id, "response", "connection closed")
-            .await
+        self.await_response(&id, Awaiting::Response).await
     }
 
     /// Subscribe to the given topics, returning once the server acks.
@@ -272,13 +308,7 @@ impl IpcClient {
         };
         self.send_frame(&msg).await?;
 
-        let ack = self
-            .await_response(
-                &id,
-                "subscribe response",
-                "connection closed before subscribe ack",
-            )
-            .await?;
+        let ack = self.await_response(&id, Awaiting::SubscribeAck).await?;
 
         match ack {
             ServerMessage::Response { ok: true, .. } => Ok(()),
@@ -298,9 +328,9 @@ impl IpcClient {
 
     /// Read the next pushed event from the server, skipping responses.
     pub async fn next_event(&mut self) -> Result<ServerMessage> {
-        let mut unmatched = UnmatchedFrames::waiting_for("event");
+        let mut unmatched = UnmatchedFrames::waiting_for(Awaiting::Event.waiting_for());
         loop {
-            let msg = self.read_message("connection closed", "event").await?;
+            let msg = self.read_message(Awaiting::Event).await?;
             match msg {
                 msg @ ServerMessage::Event { .. } => return Ok(msg),
                 ServerMessage::Response { id, .. } => {

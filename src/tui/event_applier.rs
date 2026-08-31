@@ -18,7 +18,12 @@ pub fn apply_server_message(model: &mut TuiModel, msg: ServerMessage) -> bool {
     match topic {
         Topic::State => {
             match serde_json::from_value::<ObsSnapshot>(data) {
-                Ok(snapshot) => apply_snapshot(model, snapshot),
+                Ok(snapshot) => {
+                    model.apply_snapshot(snapshot);
+                    // About the IPC link, not the snapshot: hearing from the
+                    // daemon at all is what proves it is there.
+                    model.connected_to_daemon = true;
+                }
                 // Most `ObsSnapshot` fields have no serde default, so a daemon
                 // newer than this TUI lands here. Silently ignoring it left
                 // every panel frozen on stale data while the header still said
@@ -55,18 +60,6 @@ pub fn apply_server_message(model: &mut TuiModel, msg: ServerMessage) -> bool {
             }
         },
     }
-}
-
-fn apply_snapshot(model: &mut TuiModel, snapshot: ObsSnapshot) {
-    let previous_scene = model.current_scene().map(str::to_string);
-    if let (Some(previous), Some(next)) = (previous_scene, snapshot.current_scene.as_deref())
-        && previous != next
-    {
-        model.scene_flash = Some((next.to_string(), model.anim.frame));
-    }
-    model.set_snapshot(snapshot);
-    model.connected_to_daemon = true;
-    model.record_metric_sample();
 }
 
 /// Tell the user, in the log pane, that a message from the daemon was dropped.

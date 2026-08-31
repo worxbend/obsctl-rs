@@ -564,6 +564,73 @@ impl LogEvent {
     }
 }
 
+/// Reply to `dump-config`.
+///
+/// Every field below is part of the public wire contract: the key names, the
+/// types, and the fact that `merge_base_error` and `reload_error` are emitted
+/// as `null` rather than omitted when there is nothing to report. Clients read
+/// them positionally out of the JSON object, so no `skip_serializing_if` and
+/// no rename attributes here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DumpConfigResult {
+    pub message: String,
+    pub merge_base_error: Option<String>,
+    pub reload_failed: bool,
+    pub warnings: Vec<String>,
+    pub reload_error: Option<String>,
+    pub scenes: usize,
+    pub inputs: usize,
+}
+
+/// Reply to `scene-profile set`.
+///
+/// `hidden` is how many scenes really disappear given the scenes the daemon
+/// currently knows about; `listed` is how many entries the profile names in
+/// the config file. The two differ whenever a profile lists a scene OBS does
+/// not have.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSceneProfileResult {
+    pub message: String,
+    pub hidden: usize,
+    pub listed: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Reply to `scene-profile save`.
+///
+/// `hidden`/`listed` mean what they mean in [`SetSceneProfileResult`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveSceneProfileResult {
+    pub message: String,
+    pub hidden: usize,
+    pub listed: usize,
+    pub created: bool,
+    pub renamed: bool,
+    pub active: bool,
+    pub warnings: Vec<String>,
+}
+
+/// Reply to `scene-profile delete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteSceneProfileResult {
+    pub message: String,
+    pub deactivated: bool,
+}
+
+/// One profile in a [`SceneProfileListing`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneProfileEntry {
+    pub name: String,
+    pub hidden: Vec<String>,
+}
+
+/// Reply to `scene-profile list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneProfileListing {
+    pub active: Option<String>,
+    pub profiles: Vec<SceneProfileEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorPayload {
     pub code: String,
@@ -843,6 +910,178 @@ mod tests {
     use crate::support::redaction::REDACTED_SECRET;
     use serde_json::json;
     use time::macros::datetime;
+
+    /// The five command replies below carry a public wire shape: these tests
+    /// pin the exact key sets and the null-valued keys the daemon used to emit
+    /// from hand-written `json!` objects, so a renamed or dropped field fails
+    /// here instead of at a client.
+    fn assert_keys(value: &Value, expected: &[&str]) {
+        let mut actual: Vec<&str> = value
+            .as_object()
+            .expect("result serializes to a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        actual.sort_unstable();
+        let mut expected: Vec<&str> = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn dump_config_result_matches_wire_shape() {
+        let value = serde_json::to_value(DumpConfigResult {
+            message: "config dumped: 2 scenes, 1 inputs".to_string(),
+            merge_base_error: None,
+            reload_failed: false,
+            warnings: vec![],
+            reload_error: None,
+            scenes: 2,
+            inputs: 1,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "message": "config dumped: 2 scenes, 1 inputs",
+                "merge_base_error": null,
+                "reload_failed": false,
+                "warnings": [],
+                "reload_error": null,
+                "scenes": 2,
+                "inputs": 1,
+            })
+        );
+        assert_keys(
+            &value,
+            &[
+                "message",
+                "merge_base_error",
+                "reload_failed",
+                "warnings",
+                "reload_error",
+                "scenes",
+                "inputs",
+            ],
+        );
+    }
+
+    #[test]
+    fn dump_config_result_reports_errors() {
+        let value = serde_json::to_value(DumpConfigResult {
+            message: "config dumped: 0 scenes, 0 inputs".to_string(),
+            merge_base_error: Some("unreadable base".to_string()),
+            reload_failed: true,
+            warnings: vec!["unknown scene".to_string()],
+            reload_error: Some("parse failed".to_string()),
+            scenes: 0,
+            inputs: 0,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "message": "config dumped: 0 scenes, 0 inputs",
+                "merge_base_error": "unreadable base",
+                "reload_failed": true,
+                "warnings": ["unknown scene"],
+                "reload_error": "parse failed",
+                "scenes": 0,
+                "inputs": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn set_scene_profile_result_matches_wire_shape() {
+        let value = serde_json::to_value(SetSceneProfileResult {
+            message: "scene profile set: Stream".to_string(),
+            hidden: 2,
+            listed: 3,
+            warnings: vec!["unknown scene: Old".to_string()],
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "message": "scene profile set: Stream",
+                "hidden": 2,
+                "listed": 3,
+                "warnings": ["unknown scene: Old"],
+            })
+        );
+        assert_keys(&value, &["message", "hidden", "listed", "warnings"]);
+    }
+
+    #[test]
+    fn save_scene_profile_result_matches_wire_shape() {
+        let value = serde_json::to_value(SaveSceneProfileResult {
+            message: "scene profile saved: Stream".to_string(),
+            hidden: 1,
+            listed: 1,
+            created: true,
+            renamed: false,
+            active: true,
+            warnings: vec![],
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "message": "scene profile saved: Stream",
+                "hidden": 1,
+                "listed": 1,
+                "created": true,
+                "renamed": false,
+                "active": true,
+                "warnings": [],
+            })
+        );
+        assert_keys(
+            &value,
+            &[
+                "message", "hidden", "listed", "created", "renamed", "active", "warnings",
+            ],
+        );
+    }
+
+    #[test]
+    fn delete_scene_profile_result_matches_wire_shape() {
+        let value = serde_json::to_value(DeleteSceneProfileResult {
+            message: "scene profile deleted: Stream".to_string(),
+            deactivated: true,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "message": "scene profile deleted: Stream",
+                "deactivated": true,
+            })
+        );
+        assert_keys(&value, &["message", "deactivated"]);
+    }
+
+    #[test]
+    fn scene_profile_listing_matches_wire_shape() {
+        let value = serde_json::to_value(SceneProfileListing {
+            active: None,
+            profiles: vec![SceneProfileEntry {
+                name: "Stream".to_string(),
+                hidden: vec!["BRB".to_string()],
+            }],
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "active": null,
+                "profiles": [{ "name": "Stream", "hidden": ["BRB"] }],
+            })
+        );
+        assert_keys(&value, &["active", "profiles"]);
+        assert_keys(&value["profiles"][0], &["name", "hidden"]);
+    }
 
     // Compile-time exhaustiveness guards: fail to compile when a new variant is
     // added without updating this match, forcing the test cases to be updated too.

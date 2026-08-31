@@ -584,6 +584,30 @@ fn connection_renders_waiting_when_no_snapshot() {
 
 // ── scenes widget ───────────────────────────────────────────────────────────
 
+/// The Scenes panel hint is arrows and a middot rather than emoji, so it is
+/// an `advanced_ui` question: switching icons off on a Unicode terminal must
+/// not fall the hint back to its ASCII spelling.
+#[test]
+fn scenes_hint_follows_unicode_support_rather_than_the_icon_switch() {
+    let mut model = model_connected();
+    model.advanced_ui = true;
+    model.show_icons = false;
+    let mut t = term(60, 10);
+    t.draw(|f| {
+        let _ = widgets::scenes::render(f, Rect::new(0, 0, 60, 10), &model);
+    })
+    .unwrap();
+    let out = buf_string(&t);
+    assert!(
+        out.contains("↵ switch"),
+        "the hint stays Unicode when only icons are off; got: {out}"
+    );
+    assert!(
+        !out.contains("Enter switch"),
+        "the ASCII hint belongs to advanced_ui, not show_icons; got: {out}"
+    );
+}
+
 #[test]
 fn scenes_renders_active_scene_marker() {
     let model = model_connected();
@@ -1730,6 +1754,36 @@ fn which_key_shows_the_subgroup_after_a_second_key() {
 }
 
 #[test]
+fn which_key_never_renders_a_raw_i18n_key() {
+    // Labels come from `locales/en.yml` via `rust_i18n::t!`, which renders a
+    // *missing* key as the key itself. A typo would therefore show up as
+    // "tui.whichkey.…" in the popup instead of a word.
+    for pending in [
+        Pending::G,
+        Pending::Leader,
+        Pending::LeaderGroup('f'),
+        Pending::LeaderGroup('p'),
+        Pending::LeaderGroup('s'),
+        Pending::LeaderGroup('c'),
+        Pending::LeaderGroup('o'),
+        Pending::LeaderGroup('u'),
+    ] {
+        let mut model = model_connected();
+        model.pending = pending;
+        let mut t = term(90, 26);
+        t.draw(|f| {
+            widgets::which_key::render(f, f.area(), &model);
+        })
+        .unwrap();
+        let out = buf_string(&t);
+        assert!(
+            !out.contains("tui."),
+            "{pending:?} rendered an unresolved i18n key: {out}"
+        );
+    }
+}
+
+#[test]
 fn which_key_shows_a_typed_count_prefix() {
     let mut model = model_connected();
     model.pending = Pending::G;
@@ -2415,6 +2469,27 @@ fn scene_profile_editor_renders_without_a_snapshot() {
     );
 }
 
+/// The scene-profile picker's key hint is arrows and middots, not emoji, so
+/// like the panel hints it follows `advanced_ui` rather than `show_icons`: a
+/// Unicode terminal with icons switched off still gets the arrow spelling.
+#[test]
+fn scene_profile_hint_follows_unicode_support_rather_than_the_icon_switch() {
+    let mut model = model_with_scene_profiles();
+    model.advanced_ui = true;
+    model.show_icons = false;
+    model.open_scene_profiles();
+
+    let out = buf_string(&draw_scene_profile(&model));
+    assert!(
+        out.contains("↑↓ move"),
+        "the picker hint stays Unicode when only icons are off; got:\n{out}"
+    );
+    assert!(
+        !out.contains("jk move"),
+        "the ASCII hint belongs to advanced_ui, not show_icons; got:\n{out}"
+    );
+}
+
 #[test]
 fn scene_profile_editor_survives_a_degenerate_area() {
     let mut model = model_with_scene_profiles();
@@ -2430,7 +2505,7 @@ fn scene_profile_editor_survives_a_degenerate_area() {
 /// reaches the dashboard rects still sitting underneath.
 #[test]
 fn clicking_a_row_in_the_scene_profile_editor_moves_its_cursor() {
-    use obsctl_rs::tui::input::TuiAction;
+    use obsctl_rs::tui::input::{SceneProfileAction, TuiAction};
     use obsctl_rs::tui::mouse::{HitView, Hitboxes, handle_mouse};
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
@@ -2461,11 +2536,11 @@ fn clicking_a_row_in_the_scene_profile_editor_moves_its_cursor() {
     // profiles the snapshot defines.
     assert_eq!(
         at(MouseEventKind::Down(MouseButton::Left), 15, 4),
-        Some(TuiAction::SceneProfileSelect(2))
+        Some(TuiAction::SceneProfile(SceneProfileAction::Select(2)))
     );
     assert_eq!(
         at(MouseEventKind::ScrollDown, 15, 4),
-        Some(TuiAction::SceneProfileNavDown(3))
+        Some(TuiAction::SceneProfile(SceneProfileAction::NavDown(3)))
     );
     // Right-click is Esc, which on the picker closes the editor.
     assert_eq!(
