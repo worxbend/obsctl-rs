@@ -40,7 +40,7 @@ impl EventPayload {
             .map_err(|error| {
                 warn!(
                     event_type = %raw_type,
-                    message = %error,
+                    error = %error,
                     "Malformed OBS event payload: invalid eventType"
                 );
             })
@@ -70,7 +70,7 @@ impl EventPayload {
                 warn!(
                     event_type = %self.event_type,
                     field = %field,
-                    message = %error,
+                    error = %error,
                     "Malformed OBS event payload: string field invalid"
                 );
             })
@@ -208,7 +208,7 @@ fn parse_volume_meters(payload: &EventPayload) -> Option<Vec<(String, f32)>> {
         .map_err(|error| {
             warn!(
                 event_type = %payload.event_type,
-                message = %error,
+                error = %error,
                 "Malformed OBS InputVolumeMeters payload: invalid inputName list"
             );
         })
