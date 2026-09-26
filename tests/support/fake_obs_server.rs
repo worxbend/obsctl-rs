@@ -12,8 +12,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot};
-use tokio_tungstenite::accept_async;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+use tokio_tungstenite::{WebSocketStream, accept_async};
 
 const OPCODE_HELLO: u8 = 0;
 const OPCODE_IDENTIFY: u8 = 1;
@@ -21,6 +21,12 @@ const OPCODE_IDENTIFIED: u8 = 2;
 const OPCODE_REQUEST: u8 = 6;
 const OPCODE_REQUEST_RESPONSE: u8 = 7;
 const OPCODE_EVENT: u8 = 5;
+
+const AUTH_SALT: &str = "PZVbYpvAnZut2SS3k3tnTQ==";
+const AUTH_CHALLENGE: &str = "lfYW3AhFLp2YcILmwSQ9rSFRIiEQgxuEk5hSyQ3XGaQ=";
+
+type WsSink = futures_util::stream::SplitSink<WebSocketStream<TcpStream>, Message>;
+type WsSource = futures_util::stream::SplitStream<WebSocketStream<TcpStream>>;
 
 /// A prepared response for a given requestType.
 #[derive(Clone)]
@@ -251,7 +257,7 @@ pub async fn spawn_fake_obs(require_auth: bool, password: Option<&str>) -> FakeO
     let (event_tx, _) = broadcast::channel::<Value>(16);
 
     let state_clone = state.clone();
-    let password = password.map(|p| p.to_string());
+    let password = password.map(str::to_string);
     let disconnect_tx_clone = disconnect_tx.clone();
     let event_tx_clone = event_tx.clone();
 
@@ -296,26 +302,78 @@ async fn handle_connection(
     mut disconnect_rx: broadcast::Receiver<()>,
     mut event_rx: broadcast::Receiver<Value>,
 ) {
-    let ws_stream = match accept_async(stream).await {
-        Ok(s) => s,
-        Err(_) => return,
+    let Ok(ws_stream) = accept_async(stream).await else {
+        return;
     };
 
     let (mut sink, mut source) = ws_stream.split();
 
-    // --- Send Hello ---
-    let salt = "PZVbYpvAnZut2SS3k3tnTQ==";
-    let challenge = "lfYW3AhFLp2YcILmwSQ9rSFRIiEQgxuEk5hSyQ3XGaQ=";
+    if run_handshake(&mut sink, &mut source, require_auth, password.as_deref())
+        .await
+        .is_none()
+    {
+        return;
+    }
 
-    let hello = if require_auth {
+    drain_pending_events(&mut sink, &state).await;
+    serve_requests(
+        &mut sink,
+        &mut source,
+        &state,
+        &req_tx,
+        &mut disconnect_rx,
+        &mut event_rx,
+    )
+    .await;
+}
+
+/// Run the obs-websocket 5.x handshake — Hello, Identify, optional auth
+/// check, Identified. `None` means the connection is finished.
+async fn run_handshake(
+    sink: &mut WsSink,
+    source: &mut WsSource,
+    require_auth: bool,
+    password: Option<&str>,
+) -> Option<()> {
+    if sink
+        .send(Message::Text(hello_message(require_auth).to_string()))
+        .await
+        .is_err()
+    {
+        return None;
+    }
+
+    let identify = receive_identify(source).await?;
+    if identify.get("op").and_then(|v| v.as_u64()) != Some(OPCODE_IDENTIFY as u64) {
+        return None;
+    }
+
+    if !auth_accepted(&identify, require_auth, password) {
+        // Close without Identified — the client will fail.
+        let _ = sink.send(Message::Close(None)).await;
+        return None;
+    }
+
+    let identified = json!({
+        "op": OPCODE_IDENTIFIED,
+        "d": { "negotiatedRpcVersion": 1 }
+    });
+    sink.send(Message::Text(identified.to_string()))
+        .await
+        .ok()?;
+    Some(())
+}
+
+fn hello_message(require_auth: bool) -> Value {
+    if require_auth {
         json!({
             "op": OPCODE_HELLO,
             "d": {
                 "obsWebSocketVersion": "5.0.0",
                 "rpcVersion": 1,
                 "authentication": {
-                    "challenge": challenge,
-                    "salt": salt,
+                    "challenge": AUTH_CHALLENGE,
+                    "salt": AUTH_SALT,
                 }
             }
         })
@@ -327,94 +385,61 @@ async fn handle_connection(
                 "rpcVersion": 1,
             }
         })
-    };
-
-    if sink.send(Message::Text(hello.to_string())).await.is_err() {
-        return;
     }
+}
 
-    // --- Receive Identify ---
-    let identify_msg = loop {
+async fn receive_identify(source: &mut WsSource) -> Option<Value> {
+    let raw = loop {
         match source.next().await {
             Some(Ok(Message::Text(t))) => break t,
-            Some(Ok(Message::Binary(b))) => {
-                break String::from_utf8(b).unwrap_or_default();
-            }
+            Some(Ok(Message::Binary(b))) => break String::from_utf8(b).unwrap_or_default(),
             Some(Ok(_)) => continue,
-            _ => return,
+            _ => return None,
         }
     };
+    serde_json::from_str(&raw).ok()
+}
 
-    let identify: Value = match serde_json::from_str(&identify_msg) {
-        Ok(v) => v,
-        Err(_) => return,
+fn auth_accepted(identify: &Value, require_auth: bool, password: Option<&str>) -> bool {
+    if !require_auth {
+        return true;
+    }
+    let Some(pw) = password else {
+        return true;
     };
+    let provided_auth = identify
+        .get("d")
+        .and_then(|d| d.get("authentication"))
+        .and_then(|a| a.as_str())
+        .unwrap_or("");
+    let expected = obsctl_rs::obs::auth::compute_authentication(pw, AUTH_SALT, AUTH_CHALLENGE);
+    provided_auth == expected
+}
 
-    if identify.get("op").and_then(|v| v.as_u64()) != Some(OPCODE_IDENTIFY as u64) {
-        return;
+/// Push any events queued before this connection identified.
+async fn drain_pending_events(sink: &mut WsSink, state: &Arc<Mutex<ServerState>>) {
+    let mut st = state.lock().await;
+    for event_data in st.pending_events.drain(..) {
+        let event_msg = json!({
+            "op": OPCODE_EVENT,
+            "d": event_data,
+        });
+        let _ = sink.send(Message::Text(event_msg.to_string())).await;
     }
+}
 
-    // Check auth if required
-    if require_auth {
-        let provided_auth = identify
-            .get("d")
-            .and_then(|d| d.get("authentication"))
-            .and_then(|a| a.as_str())
-            .unwrap_or("");
-
-        if let Some(ref pw) = password {
-            let expected = obsctl_rs::obs::auth::compute_authentication(pw, salt, challenge);
-            if provided_auth != expected {
-                // Send close without Identified — client will fail
-                let _ = sink.send(Message::Close(None)).await;
-                return;
-            }
-        }
-    }
-
-    // --- Send Identified ---
-    let identified = json!({
-        "op": OPCODE_IDENTIFIED,
-        "d": { "negotiatedRpcVersion": 1 }
-    });
-    if sink
-        .send(Message::Text(identified.to_string()))
-        .await
-        .is_err()
-    {
-        return;
-    }
-
-    // Push any queued events
-    {
-        let mut st = state.lock().await;
-        for event_data in st.pending_events.drain(..) {
-            let event_msg = json!({
-                "op": OPCODE_EVENT,
-                "d": event_data,
-            });
-            let _ = sink.send(Message::Text(event_msg.to_string())).await;
-        }
-    }
-
-    // --- Handle requests ---
+async fn serve_requests(
+    sink: &mut WsSink,
+    source: &mut WsSource,
+    state: &Arc<Mutex<ServerState>>,
+    req_tx: &mpsc::Sender<(String, Value)>,
+    disconnect_rx: &mut broadcast::Receiver<()>,
+    event_rx: &mut broadcast::Receiver<Value>,
+) {
     loop {
         tokio::select! {
             event = event_rx.recv() => {
-                let event_data = match event {
-                    Ok(event_data) => event_data,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                };
-                let event_msg = json!({
-                    "op": OPCODE_EVENT,
-                    "d": event_data,
-                });
-                if sink
-                    .send(Message::Text(event_msg.to_string()))
-                    .await
-                    .is_err()
-                {
+                if !forward_event(sink, event).await {
                     break;
                 }
             }
@@ -423,108 +448,143 @@ async fn handle_connection(
                 break;
             }
             msg = source.next() => {
-                let msg = match msg {
-                    Some(Ok(m)) => m,
-                    _ => break,
-                };
-                let text = match msg {
-                    Message::Text(t) => t,
-                    Message::Binary(b) => String::from_utf8(b).unwrap_or_default(),
-                    Message::Close(_) => break,
-                    _ => continue,
-                };
-
-                let request: Value = match serde_json::from_str(&text) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                if request.get("op").and_then(|v| v.as_u64()) != Some(OPCODE_REQUEST as u64) {
-                    continue;
-                }
-
-                let d = match request.get("d") {
-                    Some(d) => d,
-                    None => continue,
-                };
-
-                let request_type = d
-                    .get("requestType")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let request_id = d
-                    .get("requestId")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let request_data = d.get("requestData").cloned().unwrap_or(Value::Null);
-
-                // Record the request
-                let _ = req_tx.send((request_type.clone(), request_data)).await;
-
-                // Build response
-                let prepared = state.lock().await.responses.get(&request_type).cloned();
-
-                // If the prepared response says no_reply, drop the request silently.
-                if prepared.as_ref().is_some_and(|p| p.no_reply) {
-                    continue;
-                }
-
-                let response = if let Some(p) = prepared {
-                    if let Some(delay) = p.delay {
-                        tokio::time::sleep(delay).await;
-                    }
-
-                    if let Some(gate) = &p.gate {
-                        // One permit per held request: the request stays here
-                        // until the test calls `ResponseGate::release`.
-                        match gate.acquire().await {
-                            Ok(permit) => permit.forget(),
-                            Err(_) => break,
-                        }
-                    }
-
-                    json!({
-                        "op": OPCODE_REQUEST_RESPONSE,
-                        "d": {
-                            "requestType": request_type,
-                            "requestId": request_id,
-                            "requestStatus": {
-                                "result": p.ok,
-                                "code": if p.ok { 100u32 } else { 400u32 },
-                                "comment": p.comment,
-                            },
-                            "responseData": p.data,
-                        }
-                    })
-                } else {
-                    // Default: success with empty data for known types
-                    let default_data = default_response(&request_type);
-                    json!({
-                        "op": OPCODE_REQUEST_RESPONSE,
-                        "d": {
-                            "requestType": request_type,
-                            "requestId": request_id,
-                            "requestStatus": {
-                                "result": true,
-                                "code": 100,
-                            },
-                            "responseData": default_data,
-                        }
-                    })
-                };
-
-                if sink
-                    .send(Message::Text(response.to_string()))
-                    .await
-                    .is_err()
-                {
+                if !handle_incoming(sink, msg, state, req_tx).await {
                     break;
                 }
             }
         }
     }
+}
+
+/// Forward a broadcast event to this connection; `false` ends the connection.
+async fn forward_event(
+    sink: &mut WsSink,
+    event: Result<Value, broadcast::error::RecvError>,
+) -> bool {
+    let event_data = match event {
+        Ok(event_data) => event_data,
+        Err(broadcast::error::RecvError::Lagged(_)) => return true,
+        Err(broadcast::error::RecvError::Closed) => return false,
+    };
+    let event_msg = json!({
+        "op": OPCODE_EVENT,
+        "d": event_data,
+    });
+    sink.send(Message::Text(event_msg.to_string()))
+        .await
+        .is_ok()
+}
+
+/// Handle one message from the client; `false` ends the connection.
+async fn handle_incoming(
+    sink: &mut WsSink,
+    msg: Option<Result<Message, WsError>>,
+    state: &Arc<Mutex<ServerState>>,
+    req_tx: &mpsc::Sender<(String, Value)>,
+) -> bool {
+    let msg = match msg {
+        Some(Ok(m)) => m,
+        _ => return false,
+    };
+    let text = match msg {
+        Message::Text(t) => t,
+        Message::Binary(b) => String::from_utf8(b).unwrap_or_default(),
+        Message::Close(_) => return false,
+        _ => return true,
+    };
+
+    let request: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+
+    if request.get("op").and_then(|v| v.as_u64()) != Some(OPCODE_REQUEST as u64) {
+        return true;
+    }
+
+    let Some(d) = request.get("d") else {
+        return true;
+    };
+
+    let request_type = d
+        .get("requestType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let request_id = d
+        .get("requestId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let request_data = d.get("requestData").cloned().unwrap_or(Value::Null);
+
+    // Record the request
+    let _ = req_tx.send((request_type.clone(), request_data)).await;
+
+    let prepared = state.lock().await.responses.get(&request_type).cloned();
+
+    // If the prepared response says no_reply, drop the request silently.
+    if prepared.as_ref().is_some_and(|p| p.no_reply) {
+        return true;
+    }
+
+    let Some(response) = build_response(prepared, &request_type, &request_id).await else {
+        return false;
+    };
+
+    sink.send(Message::Text(response.to_string())).await.is_ok()
+}
+
+/// Wait out the prepared delay/gate and render the response frame; `None`
+/// means the response gate was dropped, which ends the connection.
+async fn build_response(
+    prepared: Option<PreparedResponse>,
+    request_type: &str,
+    request_id: &str,
+) -> Option<Value> {
+    let Some(p) = prepared else {
+        // Default: success with empty data for known types
+        let default_data = default_response(request_type);
+        return Some(json!({
+            "op": OPCODE_REQUEST_RESPONSE,
+            "d": {
+                "requestType": request_type,
+                "requestId": request_id,
+                "requestStatus": {
+                    "result": true,
+                    "code": 100,
+                },
+                "responseData": default_data,
+            }
+        }));
+    };
+
+    if let Some(delay) = p.delay {
+        tokio::time::sleep(delay).await;
+    }
+
+    if let Some(gate) = &p.gate {
+        // One permit per held request: the request stays here until the test
+        // calls `ResponseGate::release`.
+        match gate.acquire().await {
+            Ok(permit) => permit.forget(),
+            Err(_) => return None,
+        }
+    }
+
+    Some(json!({
+        "op": OPCODE_REQUEST_RESPONSE,
+        "d": {
+            "requestType": request_type,
+            "requestId": request_id,
+            "requestStatus": {
+                "result": p.ok,
+                "code": if p.ok { 100u32 } else { 400u32 },
+                "comment": p.comment,
+            },
+            "responseData": p.data,
+        }
+    }))
 }
 
 fn default_response(request_type: &str) -> Value {

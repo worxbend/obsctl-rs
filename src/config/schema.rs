@@ -316,6 +316,7 @@ fn validate_scene_profiles(config: &Config) -> Result<Vec<ValidationWarning>> {
 mod tests {
     use super::*;
     use crate::config::model::{AudioInputConfig, SceneConfig, SceneProfileConfig};
+    use crate::support::fs::set_permissions_for_test;
     use crate::support::validation::test_env::with_env_var;
     use crate::support::validation::{MAX_PASSWORD_LENGTH, MAX_TARGET_TOKEN_LENGTH};
     use tempfile::TempDir;
@@ -754,12 +755,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rejects_socket_path_with_world_writable_parent() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = TempDir::new().unwrap();
         let parent = dir.path().join("unsafe-parent");
         std::fs::create_dir(&parent).unwrap();
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        set_permissions_for_test(&parent, 0o777);
 
         let mut c = valid_config();
         c.server.socket_path = Some(parent.join("obsctl.sock").to_string_lossy().into());

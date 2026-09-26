@@ -319,6 +319,15 @@ pub fn secure_permissions(path: &Path, mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// Test-only helper: tests deliberately apply permissive modes (e.g. 0o777)
+/// to dirs/files inside a tempdir to exercise the production code's rejection
+/// paths; the relaxed permissions never leave the tempdir.
+#[cfg(test)]
+pub(crate) fn set_permissions_for_test(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    stdfs::set_permissions(path, stdfs::Permissions::from_mode(mode)).unwrap(); // NOSONAR
+}
+
 /// The effective user id of this process.
 ///
 /// Two things depend on this being the *real* answer and not a guess:
@@ -517,12 +526,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn write_atomic_with_temp_file_refuses_unsafe_parent() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempdir().unwrap();
         let parent = dir.path().join("unsafe");
         std::fs::create_dir(&parent).unwrap();
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        set_permissions_for_test(&parent, 0o777);
         let path = parent.join("config.yml");
 
         let err = write_atomic_with_temp_file(&path, "obsctl-test", 0o600, true, |tmp| {

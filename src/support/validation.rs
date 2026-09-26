@@ -147,7 +147,7 @@ pub fn trim_and_validate_token_with_max_len(
     value: &str,
     max_length: usize,
 ) -> Result<String, ValidationError> {
-    if value.chars().any(|c| c.is_control()) {
+    if value.chars().any(char::is_control) {
         return Err(ValidationError::ControlCharacters);
     }
     let trimmed = value.trim();
@@ -240,7 +240,7 @@ pub fn trim_and_validate_path_token(value: &str) -> Result<String, ValidationErr
 }
 
 pub fn validate_no_control_characters(value: &str) -> Result<(), ValidationError> {
-    if value.chars().any(|c| c.is_control()) {
+    if value.chars().any(char::is_control) {
         return Err(ValidationError::ControlCharacters);
     }
     Ok(())
@@ -248,7 +248,7 @@ pub fn validate_no_control_characters(value: &str) -> Result<(), ValidationError
 
 pub fn validate_no_control_or_whitespace(value: &str) -> Result<(), ValidationError> {
     validate_no_control_characters(value)?;
-    if value.chars().any(|c| c.is_whitespace()) {
+    if value.chars().any(char::is_whitespace) {
         return Err(ValidationError::ContainsWhitespace);
     }
     Ok(())

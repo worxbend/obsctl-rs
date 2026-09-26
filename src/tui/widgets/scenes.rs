@@ -8,6 +8,7 @@ use ratatui::{
 
 use rust_i18n::t;
 
+use crate::obs::state::SceneState;
 use crate::tui::{
     anim,
     model::{FocusPanel, TuiModel},
@@ -21,59 +22,13 @@ const FLASH_DURATION_TICKS: u64 = 8;
 /// click to a row. See [`crate::tui::mouse`].
 #[must_use]
 pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
-    let theme = model.theme;
     let focused = model.focus == FocusPanel::Scenes;
 
     let items: Vec<ListItem> = model
         .scenes()
         .iter()
         .enumerate()
-        .map(|(index, s)| {
-            let flash_t = flash_intensity(model, &s.name);
-            let active_color = if flash_t > 0.0 {
-                anim::blend(theme.success, theme.accent, flash_t)
-            } else {
-                theme.success
-            };
-            let mut spans = Vec::from(name_list::row_prefix(model, index, s.active, active_color));
-            spans.push(Span::styled(
-                s.name.as_str(),
-                Style::default().fg(if flash_t > 0.0 {
-                    active_color
-                } else {
-                    theme.fg
-                }),
-            ));
-            if let Some(a) = &s.alias {
-                spans.push(Span::styled(
-                    format!(" ({a})"),
-                    Style::default().fg(theme.muted),
-                ));
-            }
-            if let Some(sc) = &s.shortcut {
-                spans.push(Span::styled(
-                    format!(" [{sc}]"),
-                    Style::default().fg(theme.warning),
-                ));
-            }
-            if let Some(group) = &s.group {
-                spans.push(Span::styled(
-                    format!(
-                        "  {}{group}{}",
-                        chrome::glyph(model, "⟨", "["),
-                        chrome::glyph(model, "⟩", "]")
-                    ),
-                    Style::default().fg(theme.accent_alt),
-                ));
-            }
-
-            let style = if s.active {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(spans)).style(style)
-        })
+        .map(|(index, s)| scene_item(model, index, s))
         .collect();
 
     let title = t!("tui.panels.scenes.title");
@@ -82,21 +37,81 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
         "tui.panels.scenes.hint",
         "tui.panels.scenes.hint_ascii",
     );
-    let badge = filter_badge(model);
-    let block = chrome::panel_badged(
-        model.symbol("🎬", "S"),
-        &title,
-        badge.as_deref(),
-        &hint,
-        model.scenes().len(),
-        focused,
-        model,
-    );
+    let block = panel_block(model, focused, &title, &hint);
 
     if items.is_empty() && hidden_count(model) > 0 {
         return render_everything_hidden(f, area, model, block);
     }
     name_list::render_rows(f, area, model, FocusPanel::Scenes, block, items)
+}
+
+/// One scene row: the name coloured by how live it is (or by the switch
+/// flash), with alias, shortcut and group decorations trailing it.
+fn scene_item<'a>(model: &'a TuiModel, index: usize, scene: &'a SceneState) -> ListItem<'a> {
+    let theme = model.theme;
+    let flash_t = flash_intensity(model, &scene.name);
+    let active_color = if flash_t > 0.0 {
+        anim::blend(theme.success, theme.accent, flash_t)
+    } else {
+        theme.success
+    };
+    let mut spans = Vec::from(name_list::row_prefix(
+        model,
+        index,
+        scene.active,
+        active_color,
+    ));
+    spans.push(Span::styled(
+        scene.name.as_str(),
+        Style::default().fg(if flash_t > 0.0 {
+            active_color
+        } else {
+            theme.fg
+        }),
+    ));
+    if let Some(a) = &scene.alias {
+        spans.push(Span::styled(
+            format!(" ({a})"),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    if let Some(sc) = &scene.shortcut {
+        spans.push(Span::styled(
+            format!(" [{sc}]"),
+            Style::default().fg(theme.warning),
+        ));
+    }
+    if let Some(group) = &scene.group {
+        spans.push(Span::styled(
+            format!(
+                "  {}{group}{}",
+                chrome::glyph(model, "⟨", "["),
+                chrome::glyph(model, "⟩", "]")
+            ),
+            Style::default().fg(theme.accent_alt),
+        ));
+    }
+
+    let style = if scene.active {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    ListItem::new(Line::from(spans)).style(style)
+}
+
+/// The panel frame: title, key hint, filter badge and row count.
+fn panel_block<'a>(model: &'a TuiModel, focused: bool, title: &'a str, hint: &'a str) -> Block<'a> {
+    let badge = filter_badge(model);
+    chrome::panel_badged(
+        model.symbol("🎬", "S"),
+        title,
+        badge.as_deref(),
+        hint,
+        model.scenes().len(),
+        focused,
+        model,
+    )
 }
 
 /// How many scenes the daemon knows about that this panel is not listing.

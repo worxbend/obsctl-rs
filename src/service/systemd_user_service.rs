@@ -97,7 +97,7 @@ fn resolve_systemctl_program(program: &str) -> Result<PathBuf> {
         if fs::has_path_traversal(candidate) {
             return Err(invalid_systemctl_path(program));
         }
-        if candidate.file_name().and_then(|name| name.to_str()) != Some(SYSTEMCTL_PROGRAM_NAME) {
+        if candidate.file_name().and_then(std::ffi::OsStr::to_str) != Some(SYSTEMCTL_PROGRAM_NAME) {
             return Err(invalid_systemctl_path(program));
         }
         validate_systemctl_binary(candidate)
@@ -272,12 +272,7 @@ mod tests {
         file.write_all(b"#!/bin/sh\necho systemctl shim\n").unwrap();
 
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = file.metadata().unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms).unwrap();
-        }
+        fs::set_permissions_for_test(&path, 0o755);
 
         assert!(resolve_systemctl_program(path.to_str().unwrap()).is_ok());
     }
@@ -331,7 +326,6 @@ mod tests {
     #[test]
     fn resolve_systemctl_program_rejects_non_executable_absolute_path() {
         use std::fs::OpenOptions;
-        use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("systemctl");
@@ -341,9 +335,7 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        let mut perms = path.metadata().unwrap().permissions();
-        perms.set_mode(0o644);
-        std::fs::set_permissions(&path, perms).unwrap();
+        fs::set_permissions_for_test(&path, 0o644);
 
         assert!(matches!(
             resolve_systemctl_program(path.to_str().unwrap()),
@@ -355,7 +347,6 @@ mod tests {
     #[test]
     fn resolve_systemctl_program_rejects_insecure_systemctl_permissions() {
         use std::fs::OpenOptions;
-        use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("systemctl");
@@ -365,9 +356,7 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        let mut perms = path.metadata().unwrap().permissions();
-        perms.set_mode(0o775);
-        std::fs::set_permissions(&path, perms).unwrap();
+        fs::set_permissions_for_test(&path, 0o775);
 
         assert!(matches!(
             resolve_systemctl_program(path.to_str().unwrap()),
@@ -378,7 +367,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_rejects_relative_xdg_runtime_dir() {
-        use std::os::unix::fs::PermissionsExt;
         let runner = SystemctlRunner;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("systemctl");
@@ -393,7 +381,7 @@ mod tests {
                 .write_all(b"#!/bin/sh\necho \"$XDG_RUNTIME_DIR\"\n")
                 .unwrap();
         }
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions_for_test(&path, 0o755);
 
         with_env_var("XDG_RUNTIME_DIR", Some("relative/runtime"), || {
             let out = runner
@@ -406,7 +394,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_rejects_traversal_xdg_runtime_dir() {
-        use std::os::unix::fs::PermissionsExt;
         let runner = SystemctlRunner;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("systemctl");
@@ -421,7 +408,7 @@ mod tests {
                 .write_all(b"#!/bin/sh\necho \"$XDG_RUNTIME_DIR\"\n")
                 .unwrap();
         }
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions_for_test(&path, 0o755);
 
         with_env_var("XDG_RUNTIME_DIR", Some("/tmp/../run/user"), || {
             let out = runner
@@ -434,7 +421,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_rejects_symlinked_xdg_runtime_dir() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::symlink;
         use tempfile::tempdir;
 
         let runner = SystemctlRunner;
@@ -456,7 +443,7 @@ mod tests {
                 .write_all(b"#!/bin/sh\necho \"$XDG_RUNTIME_DIR\"\n")
                 .unwrap();
         }
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions_for_test(&path, 0o755);
 
         with_env_var(
             "XDG_RUNTIME_DIR",
@@ -473,7 +460,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_rejects_inherited_path_environment() {
-        use std::os::unix::fs::PermissionsExt;
         use tempfile::tempdir;
 
         let runner = SystemctlRunner;
@@ -488,7 +474,7 @@ mod tests {
                 .unwrap();
             script.write_all(b"#!/bin/sh\necho \"$PATH\"\n").unwrap();
         }
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions_for_test(&path, 0o755);
 
         with_path_env("/tmp/should-not-be-used:/not-a-real-dir", || {
             let out = runner
@@ -501,7 +487,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_preserves_safe_xdg_runtime_dir() {
-        use std::os::unix::fs::PermissionsExt;
         use tempfile::tempdir;
 
         let runner = SystemctlRunner;
@@ -520,7 +505,7 @@ mod tests {
                 .write_all(b"#!/bin/sh\necho \"$XDG_RUNTIME_DIR\"\n")
                 .unwrap();
         }
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions_for_test(&path, 0o755);
         let runtime_dir_display = runtime_dir.to_string_lossy().into_owned();
 
         with_env_var(

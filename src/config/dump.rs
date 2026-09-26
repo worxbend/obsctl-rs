@@ -1,5 +1,6 @@
 // Dump-config merge logic: preserves user config while syncing OBS state.
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
 
@@ -45,7 +46,7 @@ trait MergeableEntry: Clone {
     /// and which label alias normalization reports against.
     const KIND: ResourceKind;
     /// What OBS calls this kind, for the collision message.
-    const OBS_NOUN: &'static str;
+    const OBS_NOUN: &str;
 
     fn name(&self) -> &str;
     fn alias(&self) -> Option<&str>;
@@ -57,67 +58,46 @@ trait MergeableEntry: Clone {
     fn newly_discovered(name: &str) -> Self;
 }
 
-impl MergeableEntry for SceneConfig {
-    const KIND: ResourceKind = ResourceKind::Scene;
-    const OBS_NOUN: &'static str = "OBS scene name";
+/// Scene and audio-input entries merge identically — the only differences are
+/// the concrete type, its [`ResourceKind`], and the noun used in the collision
+/// message — so the impl is written once here.
+macro_rules! mergeable_entry {
+    ($ty:ty, $kind:expr, $obs_noun:literal) => {
+        impl MergeableEntry for $ty {
+            const KIND: ResourceKind = $kind;
+            const OBS_NOUN: &str = $obs_noun;
 
-    fn name(&self) -> &str {
-        &self.name
-    }
+            fn name(&self) -> &str {
+                &self.name
+            }
 
-    fn alias(&self) -> Option<&str> {
-        self.alias.as_deref()
-    }
+            fn alias(&self) -> Option<&str> {
+                self.alias.as_deref()
+            }
 
-    fn shortcut(&self) -> Option<&str> {
-        self.shortcut.as_deref()
-    }
+            fn shortcut(&self) -> Option<&str> {
+                self.shortcut.as_deref()
+            }
 
-    fn with_stale(&self, stale: bool) -> Self {
-        Self {
-            stale,
-            ..self.clone()
+            fn with_stale(&self, stale: bool) -> Self {
+                Self {
+                    stale,
+                    ..self.clone()
+                }
+            }
+
+            fn newly_discovered(name: &str) -> Self {
+                Self {
+                    name: name.to_string(),
+                    ..Self::default()
+                }
+            }
         }
-    }
-
-    fn newly_discovered(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            ..Self::default()
-        }
-    }
+    };
 }
 
-impl MergeableEntry for AudioInputConfig {
-    const KIND: ResourceKind = ResourceKind::AudioInput;
-    const OBS_NOUN: &'static str = "OBS input name";
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn alias(&self) -> Option<&str> {
-        self.alias.as_deref()
-    }
-
-    fn shortcut(&self) -> Option<&str> {
-        self.shortcut.as_deref()
-    }
-
-    fn with_stale(&self, stale: bool) -> Self {
-        Self {
-            stale,
-            ..self.clone()
-        }
-    }
-
-    fn newly_discovered(name: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            ..Self::default()
-        }
-    }
-}
+mergeable_entry!(SceneConfig, ResourceKind::Scene, "OBS scene name");
+mergeable_entry!(AudioInputConfig, ResourceKind::AudioInput, "OBS input name");
 
 /// Reconcile what the user configured with what OBS currently has.
 ///
@@ -214,7 +194,7 @@ pub fn write_backup(config_path: &Path) -> Result<std::path::PathBuf> {
 
     let stem = config_path
         .file_stem()
-        .and_then(|s| s.to_str())
+        .and_then(OsStr::to_str)
         .unwrap_or("config");
     let backup_name = format!("{stem}.{ts}.bak.yml");
     let backup_path = config_path

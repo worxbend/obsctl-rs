@@ -338,32 +338,55 @@ fn main_mouse(
     }
 
     if contains(hits.logs, pos) {
-        return match event.kind {
-            MouseEventKind::ScrollUp => Some(TuiAction::LogScrollUp(WHEEL_ROWS)),
-            MouseEventKind::ScrollDown => Some(TuiAction::LogScrollDown(WHEEL_ROWS)),
-            _ => None,
-        };
+        return logs_mouse(event);
     }
 
     if contains(hits.palette, pos) {
-        return match event.kind {
-            MouseEventKind::Down(MouseButton::Left) if !model.command_palette.active => {
-                Some(TuiAction::OpenPalette {
-                    prefix: None,
-                    seed: "",
-                })
-            }
-            MouseEventKind::ScrollDown if model.command_palette.active => {
-                Some(TuiAction::CompleteNext)
-            }
-            MouseEventKind::ScrollUp if model.command_palette.active => {
-                Some(TuiAction::CompletePrev)
-            }
-            _ => None,
-        };
+        return palette_mouse(model, event);
     }
 
     let (panel, area) = hits.panel_at(pos)?;
+    panel_mouse(model, hits, panel, area, event, pos)
+}
+
+/// The logs pane only scrolls; clicks there mean nothing.
+fn logs_mouse(event: MouseEvent) -> Option<TuiAction> {
+    match event.kind {
+        MouseEventKind::ScrollUp => Some(TuiAction::LogScrollUp(WHEEL_ROWS)),
+        MouseEventKind::ScrollDown => Some(TuiAction::LogScrollDown(WHEEL_ROWS)),
+        _ => None,
+    }
+}
+
+/// The command bar: a click opens the palette (unless it is already open,
+/// which a click must not wipe), and once it is open the wheel cycles its
+/// completions.
+fn palette_mouse(model: &TuiModel, event: MouseEvent) -> Option<TuiAction> {
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) if !model.command_palette.active => {
+            Some(TuiAction::OpenPalette {
+                prefix: None,
+                seed: "",
+            })
+        }
+        MouseEventKind::ScrollDown if model.command_palette.active => Some(TuiAction::CompleteNext),
+        MouseEventKind::ScrollUp if model.command_palette.active => Some(TuiAction::CompletePrev),
+        _ => None,
+    }
+}
+
+/// A wheel tick or click inside one of the four dashboard panels. The wheel
+/// moves that panel's cursor; a click selects the row it landed on, and a
+/// click on the already-selected row of the already-focused panel activates
+/// it instead.
+fn panel_mouse(
+    model: &TuiModel,
+    hits: &Hitboxes,
+    panel: FocusPanel,
+    area: Rect,
+    event: MouseEvent,
+    pos: Position,
+) -> Option<TuiAction> {
     let cursor = model.panel_cursor(panel);
     match event.kind {
         MouseEventKind::ScrollUp => Some(TuiAction::SelectIndex(

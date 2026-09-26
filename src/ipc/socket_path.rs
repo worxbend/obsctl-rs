@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn default_socket_path_falls_back_when_runtime_dir_is_unsafe() {
         let runtime = TempDir::new().unwrap();
-        std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        support::fs::set_permissions_for_test(runtime.path(), 0o777);
 
         let uid = current_uid();
         let fallback = PathBuf::from(format!("/tmp/obsctl-{uid}/obsctl.sock"));
@@ -447,7 +447,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let parent = dir.path().join("parent");
         std::fs::create_dir(&parent).unwrap();
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        support::fs::set_permissions_for_test(&parent, 0o777);
         assert!(super::validate_socket_path(&parent.join("obsctl.sock")).is_err());
     }
 
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn rejects_world_writable_runtime_dir() {
         let dir = TempDir::new().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        support::fs::set_permissions_for_test(dir.path(), 0o777);
         assert!(!super::is_valid_runtime_dir(dir.path()));
     }
 
@@ -769,7 +769,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path().join("unsafe-parent");
         std::fs::create_dir(&parent).unwrap();
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        support::fs::set_permissions_for_test(&parent, 0o777);
         let path = parent.join("obsctl.sock");
         std::fs::write(&path, b"payload").unwrap();
 
@@ -821,7 +821,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let parent = dir.path().join("unsafe-parent");
         std::fs::create_dir(&parent).unwrap();
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        support::fs::set_permissions_for_test(&parent, 0o777);
         let path = parent.join("obsctl.sock");
         std::fs::write(&path, b"payload").unwrap();
 

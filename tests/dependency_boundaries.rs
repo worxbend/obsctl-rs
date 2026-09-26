@@ -123,33 +123,37 @@ fn strip_comments(source: &str) -> String {
 
     while let Some(ch) = chars.next() {
         match (ch, chars.peek().copied()) {
-            ('/', Some('/')) => {
-                chars.next();
-                for comment_ch in chars.by_ref() {
-                    if comment_ch == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            ('/', Some('*')) => {
-                chars.next();
-                let mut previous = '\0';
-                for comment_ch in chars.by_ref() {
-                    if comment_ch == '\n' {
-                        out.push('\n');
-                    }
-                    if previous == '*' && comment_ch == '/' {
-                        break;
-                    }
-                    previous = comment_ch;
-                }
-            }
+            ('/', Some('/')) => skip_line_comment(&mut chars, &mut out),
+            ('/', Some('*')) => skip_block_comment(&mut chars, &mut out),
             _ => out.push(ch),
         }
     }
 
     out
+}
+
+fn skip_line_comment(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, out: &mut String) {
+    chars.next();
+    for comment_ch in chars.by_ref() {
+        if comment_ch == '\n' {
+            out.push('\n');
+            break;
+        }
+    }
+}
+
+fn skip_block_comment(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, out: &mut String) {
+    chars.next();
+    let mut previous = '\0';
+    for comment_ch in chars.by_ref() {
+        if comment_ch == '\n' {
+            out.push('\n');
+        }
+        if previous == '*' && comment_ch == '/' {
+            break;
+        }
+        previous = comment_ch;
+    }
 }
 
 fn strip_cfg_test_modules(source: &str) -> String {

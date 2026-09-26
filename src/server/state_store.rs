@@ -452,68 +452,22 @@ fn set_if_changed<T: PartialEq>(slot: &mut T, next: T) -> bool {
 fn mutate_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
     match event {
         ObsEvent::CurrentProgramSceneChanged { scene_name } => {
-            if !set_if_changed(&mut snapshot.current_scene, Some(scene_name.clone())) {
-                return false;
-            }
-            // Only once the scene really did change: the per-scene `active`
-            // flags are already correct otherwise.
-            for s in snapshot.scenes.iter_mut() {
-                s.active = s.name == scene_name;
-            }
-            true
+            program_scene_changed(snapshot, scene_name)
         }
         // The supervisor answers these with a full refresh, which broadcasts
         // the new snapshot itself. Reporting "changed" here would publish a
         // byte-identical snapshot before the refresh has fetched anything.
         ObsEvent::SceneListChanged => false,
-        ObsEvent::InputCreated { input_name } => {
-            if snapshot.audio_inputs.iter().any(|a| a.name == input_name) {
-                return false;
-            }
-            snapshot.audio_inputs.push(AudioState {
-                name: input_name,
-                ..AudioState::default()
-            });
-            true
-        }
-        ObsEvent::InputRemoved { input_name } => {
-            let before = snapshot.audio_inputs.len();
-            snapshot.audio_inputs.retain(|a| a.name != input_name);
-            snapshot.audio_inputs.len() != before
-        }
+        ObsEvent::InputCreated { input_name } => input_created(snapshot, input_name),
+        ObsEvent::InputRemoved { input_name } => input_removed(snapshot, input_name),
         ObsEvent::InputMuteStateChanged { input_name, muted } => {
-            if let Some(a) = snapshot
-                .audio_inputs
-                .iter_mut()
-                .find(|a| a.name == input_name)
-            {
-                if a.muted == Some(muted) {
-                    return false;
-                }
-                a.muted = Some(muted);
-                true
-            } else {
-                false
-            }
+            input_mute_changed(snapshot, &input_name, muted)
         }
         ObsEvent::InputVolumeChanged {
             input_name,
             volume_mul,
             volume_db,
-        } => {
-            if let Some(a) = snapshot
-                .audio_inputs
-                .iter_mut()
-                .find(|a| a.name == input_name)
-            {
-                // OBS reported both, and its dB is rounded rather than
-                // exactly `mul_to_db` of its multiplier; keep what it sent.
-                a.set_level_with_db(volume_mul, volume_db);
-                true
-            } else {
-                false
-            }
-        }
+        } => input_volume_changed(snapshot, &input_name, volume_mul, volume_db),
         ObsEvent::StreamStateChanged { active } => set_if_changed(&mut snapshot.streaming, active),
         ObsEvent::RecordStateChanged { active } => set_if_changed(&mut snapshot.recording, active),
         ObsEvent::CurrentProfileChanged { profile_name } => {
@@ -531,6 +485,71 @@ fn mutate_snapshot(snapshot: &mut ObsSnapshot, event: ObsEvent) -> bool {
         ObsEvent::InputVolumeMeters { .. } => false,
         ObsEvent::Other { .. } => false,
     }
+}
+
+/// A scene switch: record the new current scene, and only then re-derive the
+/// per-scene `active` flags — they are already correct when the scene did not
+/// actually change.
+fn program_scene_changed(snapshot: &mut ObsSnapshot, scene_name: String) -> bool {
+    if !set_if_changed(&mut snapshot.current_scene, Some(scene_name.clone())) {
+        return false;
+    }
+    for s in snapshot.scenes.iter_mut() {
+        s.active = s.name == scene_name;
+    }
+    true
+}
+
+/// A new audio input is appended unless the snapshot already lists it.
+fn input_created(snapshot: &mut ObsSnapshot, input_name: String) -> bool {
+    if snapshot.audio_inputs.iter().any(|a| a.name == input_name) {
+        return false;
+    }
+    snapshot.audio_inputs.push(AudioState {
+        name: input_name,
+        ..AudioState::default()
+    });
+    true
+}
+
+/// An input going away drops it from the list; absence is not a change.
+fn input_removed(snapshot: &mut ObsSnapshot, input_name: String) -> bool {
+    let before = snapshot.audio_inputs.len();
+    snapshot.audio_inputs.retain(|a| a.name != input_name);
+    snapshot.audio_inputs.len() != before
+}
+
+/// A mute event for an input the snapshot knows, unless it re-states the mute
+/// it already holds.
+fn input_mute_changed(snapshot: &mut ObsSnapshot, input_name: &str, muted: bool) -> bool {
+    let Some(input) = snapshot
+        .audio_inputs
+        .iter_mut()
+        .find(|a| a.name == input_name)
+    else {
+        return false;
+    };
+    set_if_changed(&mut input.muted, Some(muted))
+}
+
+/// A volume event for an input the snapshot knows. OBS reported both forms,
+/// and its dB is rounded rather than exactly `mul_to_db` of its multiplier;
+/// keep what it sent.
+fn input_volume_changed(
+    snapshot: &mut ObsSnapshot,
+    input_name: &str,
+    volume_mul: f64,
+    volume_db: f64,
+) -> bool {
+    let Some(input) = snapshot
+        .audio_inputs
+        .iter_mut()
+        .find(|a| a.name == input_name)
+    else {
+        return false;
+    };
+    input.set_level_with_db(volume_mul, volume_db);
+    true
 }
 
 /// The obs-websocket versions reported during the handshake.

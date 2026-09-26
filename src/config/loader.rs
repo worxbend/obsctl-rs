@@ -92,9 +92,6 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
     #[test]
     fn load_validates_schema() {
         let dir = TempDir::new().unwrap();
@@ -250,7 +247,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let unsafe_parent = dir.path().join("unsafe-parent");
         std::fs::create_dir(&unsafe_parent).unwrap();
-        std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        fs::set_permissions_for_test(&unsafe_parent, 0o777);
         let config_path = unsafe_parent.join("config.yml");
         std::fs::write(
             &config_path,

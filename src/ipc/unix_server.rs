@@ -611,7 +611,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let parent = dir.path().join("private");
         std::fs::create_dir(&parent).unwrap();
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        fs::set_permissions_for_test(&parent, 0o777);
         let socket_path = parent.join("obsctl.sock");
 
         let hub = Arc::new(BroadcastHub::new());
