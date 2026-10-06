@@ -78,9 +78,18 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
                 };
                 spans.push(Span::styled(
                     format!(" {:>3} ", e.key),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
+                    // The key is the actionable part of the cell, so it sits
+                    // on a chip of track color rather than as bare text.
+                    if model.advanced_ui {
+                        Style::default()
+                            .fg(theme.accent)
+                            .bg(theme.track())
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD)
+                    },
                 ));
                 spans.push(Span::styled(
                     model.symbol("→ ", "> "),
@@ -140,7 +149,9 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border_focus))
-        .style(Style::default().bg(theme.bg))
+        // The popup floats above the dashboard, so it draws on the raised
+        // overlay fill rather than the backdrop the panels sit on.
+        .style(Style::default().bg(theme.surface_hi()))
         .title(Line::from(heading));
     let block = chrome::ascii_aware(block, model);
 

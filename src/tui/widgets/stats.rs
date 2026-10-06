@@ -187,17 +187,34 @@ fn frame_time_line(
     health: Health,
 ) -> Line<'static> {
     let theme = model.theme;
-    let bar = budget_bar(model, usage);
     let trailing = match usage {
         Some(usage) => format!("  {:.0}% budget", usage * 100.0),
         None => "  -- budget".to_string(),
     };
-    Line::from(vec![
+    // The budget bar heats up along its length: cool at the left edge, danger
+    // at the right, so a filling bar reads as approaching the deadline even
+    // before the percentage is read.
+    let mut spans = vec![
         label(model, "FRAME"),
         value(format!("{render_ms:>5.2}ms"), health.color(theme)),
-        Span::styled(format!("  {bar}"), Style::default().fg(health.color(theme))),
-        Span::styled(trailing, Style::default().fg(theme.muted)),
-    ])
+        Span::raw("  "),
+    ];
+    if model.advanced_ui {
+        spans.extend(chrome::meter(
+            model,
+            usage,
+            GRAPH_WIDTH,
+            theme.success,
+            theme.danger,
+        ));
+    } else {
+        spans.push(Span::styled(
+            chrome::ratio_bar(model, usage, GRAPH_WIDTH),
+            Style::default().fg(health.color(theme)),
+        ));
+    }
+    spans.push(Span::styled(trailing, Style::default().fg(theme.muted)));
+    Line::from(spans)
 }
 
 fn drop_line(
@@ -292,12 +309,6 @@ fn value(text: String, color: Color) -> Span<'static> {
         text,
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )
-}
-
-/// A filled/empty bar showing how much of the per-frame time budget the
-/// average render is using.
-fn budget_bar(model: &TuiModel, usage: Option<f64>) -> String {
-    chrome::ratio_bar(model, usage, GRAPH_WIDTH)
 }
 
 /// OBS reports the FPS it is currently achieving, never the one it is
@@ -412,25 +423,38 @@ mod tests {
     }
 
     #[test]
-    fn budget_bar_fills_proportionally_and_stays_fixed_width() {
+    fn frame_budget_bar_fills_proportionally_and_stays_fixed_width() {
         let model = TuiModel::default();
-        assert_eq!(budget_bar(&model, Some(0.0)).chars().count(), GRAPH_WIDTH);
-        assert_eq!(budget_bar(&model, Some(0.5)).chars().count(), GRAPH_WIDTH);
-        assert_eq!(budget_bar(&model, None).chars().count(), GRAPH_WIDTH);
-        assert_eq!(budget_bar(&model, Some(0.5)).matches('█').count(), 5);
-        // Overrun clamps instead of overflowing the pane.
-        assert_eq!(
-            budget_bar(&model, Some(3.0)).matches('█').count(),
-            GRAPH_WIDTH
-        );
+        let width = |usage: Option<f64>| {
+            chrome::meter(
+                &model,
+                usage,
+                GRAPH_WIDTH,
+                model.theme.success,
+                model.theme.danger,
+            )
+            .iter()
+            .map(|span| span.content.chars().count())
+            .sum::<usize>()
+        };
+        assert_eq!(width(Some(0.0)), GRAPH_WIDTH);
+        assert_eq!(width(Some(0.5)), GRAPH_WIDTH);
+        assert_eq!(width(None), GRAPH_WIDTH);
     }
 
     #[test]
-    fn budget_bar_uses_ascii_glyphs_in_simple_mode() {
+    fn frame_budget_bar_uses_ascii_glyphs_in_simple_mode() {
         let mut model = TuiModel::default();
         model.advanced_ui = false;
-        let bar = budget_bar(&model, Some(0.5));
-        assert_eq!(bar, "#####-----");
+        let spans = chrome::meter(
+            &model,
+            Some(0.5),
+            GRAPH_WIDTH,
+            model.theme.success,
+            model.theme.danger,
+        );
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "#####-----");
     }
 
     #[test]

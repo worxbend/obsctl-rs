@@ -17,6 +17,25 @@ const SELECTION_TINT_FOCUSED: f32 = 0.32;
 /// the focused panel draws the eye.
 const SELECTION_TINT_UNFOCUSED: f32 = 0.12;
 
+/// How much of the foreground is mixed into the background to produce the
+/// panel surface — enough that a panel reads as a card sitting on the
+/// backdrop, little enough that text contrast inside it is unchanged.
+const SURFACE_MIX: f32 = 0.045;
+
+/// The stronger lift for overlays (dialogs, popovers), which must read as
+/// floating *above* the panels they cover.
+const SURFACE_HI_MIX: f32 = 0.10;
+
+/// How much of the foreground is mixed into the background for the empty end
+/// of a meter — visible as a track the fill is measured against, never
+/// mistakable for fill itself.
+const TRACK_MIX: f32 = 0.16;
+
+/// Badge text flips between a near-black and a near-white neutral at this
+/// luminance (0-255 scale), so a pill stays readable whatever hue a theme
+/// picks for it.
+const ON_COLOR_LUMA_THRESHOLD: f32 = 145.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub id: &'static str,
@@ -293,6 +312,67 @@ impl Theme {
 
     pub fn index(self) -> usize {
         ALL.iter().position(|t| t.id == self.id).unwrap_or(0)
+    }
+
+    /// Panel interior fill: the background lifted a few percent toward the
+    /// foreground, so panels read as cards on the backdrop. `Color::Reset`
+    /// stays `Reset` — the mono theme deliberately never paints a fill.
+    pub fn surface(self) -> Color {
+        self.lift(SURFACE_MIX)
+    }
+
+    /// Raised overlay fill, for dialogs and popovers floating above panels.
+    pub fn surface_hi(self) -> Color {
+        self.lift(SURFACE_HI_MIX)
+    }
+
+    /// The empty end of a meter: visible as a track, never as fill.
+    /// Falls back to the border color when there is nothing to blend
+    /// (named terminal colors), since `Reset` would render as the terminal's
+    /// default foreground instead of a track.
+    pub fn track(self) -> Color {
+        match self.lift(TRACK_MIX) {
+            Color::Reset => self.border,
+            color => color,
+        }
+    }
+
+    /// `color` dimmed `amount` of the way toward the background — the fade
+    /// used for idle or secondary readouts of a hue that is also shown lit.
+    pub fn fade(self, color: Color, amount: f32) -> Color {
+        anim::blend(color, self.bg, amount)
+    }
+
+    /// A point along the theme's signature gradient, accent → secondary
+    /// accent. `t` of 0.0 is the pure accent, 1.0 the pure alt.
+    pub fn gradient(self, t: f32) -> Color {
+        anim::blend(self.accent, self.accent_alt, t)
+    }
+
+    /// Readable text on top of a `badge`-colored pill, picked by luminance:
+    /// near-black on bright hues, near-white on dark ones. Non-RGB badges
+    /// (named terminal colors) fall back to the theme's highlight text.
+    pub fn on_color(self, badge: Color) -> Color {
+        match badge {
+            Color::Rgb(r, g, b) => {
+                let luma = 0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b);
+                if luma > ON_COLOR_LUMA_THRESHOLD {
+                    Color::Rgb(0x14, 0x12, 0x18)
+                } else {
+                    Color::Rgb(0xF6, 0xF3, 0xEE)
+                }
+            }
+            _ => self.highlight_fg,
+        }
+    }
+
+    /// The background lifted `amount` toward the foreground; `Reset` and
+    /// other channel-less colors stay untouched.
+    fn lift(self, amount: f32) -> Color {
+        match (self.bg, self.fg) {
+            (Color::Rgb(..), Color::Rgb(..)) => anim::blend(self.bg, self.fg, amount),
+            _ => self.bg,
+        }
     }
 
     /// Row style for the selected entry of a dashboard list.
@@ -600,5 +680,62 @@ mod tests {
         let selection = theme.selection_style(true).bg.unwrap();
         // 32% of the way from black to white.
         assert_eq!(selection, Color::Rgb(82, 82, 82));
+    }
+
+    #[test]
+    fn rgb_themes_lift_their_surfaces_off_the_background() {
+        for theme in ALL.iter().filter(|t| !matches!(t.bg, Color::Reset)) {
+            assert_ne!(
+                theme.surface(),
+                theme.bg,
+                "{} surface must read against the backdrop",
+                theme.id
+            );
+            assert_ne!(
+                theme.surface_hi(),
+                theme.surface(),
+                "{} overlay fill must sit above the panel fill",
+                theme.id
+            );
+        }
+    }
+
+    #[test]
+    fn overlays_float_above_panels() {
+        for theme in ALL.iter().filter(|t| !matches!(t.bg, Color::Reset)) {
+            let panel = distance(theme.surface(), theme.bg);
+            let overlay = distance(theme.surface_hi(), theme.bg);
+            assert!(
+                overlay > panel,
+                "{} overlay fill is not higher than its panel fill",
+                theme.id
+            );
+        }
+    }
+
+    #[test]
+    fn mono_theme_paints_no_fills() {
+        assert_eq!(MONO.surface(), Color::Reset);
+        assert_eq!(MONO.surface_hi(), Color::Reset);
+        // ...but its meter track must still be visible, so it borrows the
+        // border color rather than the (invisible) lifted background.
+        assert_eq!(MONO.track(), MONO.border);
+    }
+
+    #[test]
+    fn on_color_picks_a_readable_neutral_for_both_extremes() {
+        let theme = Theme::default_theme();
+        let dark_text = theme.on_color(Color::Rgb(0xFF, 0xFF, 0xFF));
+        let light_text = theme.on_color(Color::Rgb(0x00, 0x00, 0x10));
+        // Dark text on the bright badge, light text on the dark one.
+        assert!(channels(dark_text).0 < 80);
+        assert!(channels(light_text).0 > 200);
+    }
+
+    #[test]
+    fn gradient_runs_from_accent_to_accent_alt() {
+        let theme = Theme::default_theme();
+        assert_eq!(theme.gradient(0.0), theme.accent);
+        assert_eq!(theme.gradient(1.0), theme.accent_alt);
     }
 }

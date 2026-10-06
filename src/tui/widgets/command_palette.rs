@@ -119,14 +119,25 @@ fn completion_line(model: &TuiModel) -> Line<'static> {
         if i > 0 {
             spans.push(Span::raw(" "));
         }
-        let style = if Some(i) == model.command_palette.completion_idx {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
+        // The completion under the cursor is a pill; the rest stay as dim
+        // bracketed tokens it stands out from. The pill keeps the brackets
+        // inside it, so the token vocabulary is the same in both states.
+        if Some(i) == model.command_palette.completion_idx && model.advanced_ui {
+            spans.push(chrome::badge(
+                model,
+                &format!("[{completion}]"),
+                theme.accent,
+            ));
         } else {
-            Style::default().fg(theme.muted)
-        };
-        spans.push(Span::styled(format!("[{completion}]"), style));
+            let style = if Some(i) == model.command_palette.completion_idx {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+            spans.push(Span::styled(format!("[{completion}]"), style));
+        }
     }
 
     Line::from(spans)

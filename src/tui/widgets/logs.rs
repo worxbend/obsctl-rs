@@ -74,13 +74,28 @@ fn log_line(entry: &TuiLogEntry, model: &TuiModel, resources: &ResourceIndex) ->
         LogLevel::Error => model.symbol("◆", "x"),
     };
     let style = style_for_level(entry.level, theme);
-    let mut spans = vec![
-        Span::styled(format!(" {marker} "), style),
-        Span::styled(time, Style::default().fg(theme.muted)),
-        Span::styled(
+    // Warn and Error are states that demand attention, so they wear the
+    // inverted pill; the quieter levels stay as colored text.
+    let label_span = match entry.level {
+        LogLevel::Warn => chrome::badge(
+            model,
+            &format!("{:<5}", level_label(entry.level)),
+            theme.warning,
+        ),
+        LogLevel::Error => chrome::badge(
+            model,
+            &format!("{:<5}", level_label(entry.level)),
+            theme.danger,
+        ),
+        _ => Span::styled(
             format!(" {:<5} ", level_label(entry.level)),
             style.add_modifier(ratatui::style::Modifier::BOLD),
         ),
+    };
+    let mut spans = vec![
+        Span::styled(format!(" {marker} "), style),
+        Span::styled(time, Style::default().fg(theme.muted)),
+        label_span,
     ];
     if let Some(target) = entry.target.as_deref().filter(|target| !target.is_empty()) {
         spans.push(Span::styled(

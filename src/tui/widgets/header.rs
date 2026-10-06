@@ -28,26 +28,50 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     };
 
     let brand_icon = model.symbol("⚡", "#");
-    let first = Line::from(vec![
-        Span::styled(
-            format!("{brand_icon} obsctl"),
+    let mut brand = vec![Span::styled(
+        format!("{brand_icon} "),
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    // The wordmark rides the theme gradient; the plain fallback is one bold
+    // accent span, which is the same color story told without truecolor.
+    if model.advanced_ui {
+        brand.extend(
+            anim::gradient_line(
+                "obsctl",
+                theme.accent,
+                theme.accent_alt,
+                model.anim.frame,
+                true,
+            )
+            .spans,
+        );
+    } else {
+        brand.push(Span::styled(
+            "obsctl",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            t!("tui.header.subtitle").into_owned(),
-            Style::default().fg(theme.muted),
-        ),
-        Span::styled(
-            chrome::glyph(model, "  •  ", "  |  "),
-            Style::default().fg(theme.border),
-        ),
-        Span::styled(
-            format!("frame {:06}", model.anim.frame),
-            Style::default().fg(theme.info),
-        ),
-    ]);
+        ));
+    }
+    let first = Line::from({
+        brand.extend([
+            Span::styled(
+                format!(" {}", t!("tui.header.subtitle")),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled(
+                chrome::glyph(model, "  •  ", "  |  "),
+                Style::default().fg(theme.border),
+            ),
+            Span::styled(
+                format!("frame {:06}", model.anim.frame),
+                Style::default().fg(theme.info),
+            ),
+        ]);
+        brand
+    });
 
     let daemon_text = if model.connected_to_daemon {
         t!("tui.header.daemon_connected").into_owned()
@@ -57,7 +81,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let daemon = status_chip(
         &daemon_text,
         model.connected_to_daemon,
-        model.rich_ui(),
+        model,
         theme.success,
         theme.danger,
     );
@@ -74,7 +98,7 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
     let obs = status_chip(
         &obs_text,
         model.obs_connected(),
-        model.rich_ui(),
+        model,
         theme.success,
         theme.warning,
     );
@@ -111,13 +135,16 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) {
 fn status_chip(
     text: &str,
     active: bool,
-    fancy: bool,
+    model: &TuiModel,
     active_color: ratatui::style::Color,
     inactive_color: ratatui::style::Color,
 ) -> Span<'static> {
     let color = if active { active_color } else { inactive_color };
-    Span::styled(
-        format!("{} {text}", chrome::status_dot(active, fancy)),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    // A state chip reads as a pill, not a sentence: solid color, readable
+    // neutral text, the status dot inside it.
+    chrome::badge(
+        model,
+        &format!("{} {text}", chrome::status_dot(active, model.rich_ui())),
+        color,
     )
 }

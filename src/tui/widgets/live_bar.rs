@@ -97,17 +97,17 @@ fn badges(model: &TuiModel, pulse: f32) -> Vec<Span<'static>> {
         let frame = spinner::frame(*state, model.rich_ui(), model.anim.frame);
         let detail = chrome::broadcast_detail(*state, model, "");
         let text = if detail.is_empty() {
-            format!(" {frame} {} ", state.label())
+            format!("{frame} {}", state.label())
         } else {
-            format!(" {frame} {} {detail} ", state.label())
+            format!("{frame} {} {detail}", state.label())
         };
-        let style = match chrome::broadcast_pulse_color(*state, theme, pulse, 0.45) {
-            None => Style::default().fg(theme.muted),
-            Some(color) => Style::default()
-                .fg(color)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        // An active broadcast is a solid pill that breathes; idle is plain
+        // muted text, because nothing happening should not shout.
+        let span = match chrome::broadcast_pulse_color(*state, theme, pulse, 0.45) {
+            None => Span::styled(format!(" {text} "), Style::default().fg(theme.muted)),
+            Some(color) => chrome::badge(model, &text, color),
         };
-        spans.push(Span::styled(text, style));
+        spans.push(span);
     }
     spans
 }
@@ -129,7 +129,7 @@ fn throughput_spans(model: &TuiModel, theme: Theme) -> Vec<Span<'static>> {
         anim::sparkline_ascii
     };
     let bitrate = bitrate_text(model);
-    vec![
+    let mut spans = vec![
         chrome::separator(model),
         Span::styled(
             format!("FPS {:.1}", stats.active_fps),
@@ -139,15 +139,44 @@ fn throughput_spans(model: &TuiModel, theme: Theme) -> Vec<Span<'static>> {
         ),
         chrome::separator(model),
         Span::styled(
-            format!(
-                "NET {bitrate} {}",
-                graph(model.bitrate_history.samples(), 8)
-            ),
+            format!("NET {bitrate} "),
             Style::default()
                 .fg(theme.accent_alt)
                 .add_modifier(Modifier::BOLD),
         ),
-    ]
+    ];
+    // The bitrate history runs along the theme gradient, cell by cell — the
+    // same hue story as the headings, at sparkline scale.
+    spans.extend(gradient_spans(
+        model,
+        &graph(model.bitrate_history.samples(), 8),
+        theme.accent,
+        theme.accent_alt,
+    ));
+    spans
+}
+
+/// `text` as one span per character, tinted along `from` → `to`. Single-span
+/// plain `to` when the advanced UI is off and there are no channels to blend.
+fn gradient_spans(model: &TuiModel, text: &str, from: Color, to: Color) -> Vec<Span<'static>> {
+    if !model.advanced_ui {
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(to).add_modifier(Modifier::BOLD),
+        )];
+    }
+    let width = text.chars().count().max(1) as f32;
+    text.chars()
+        .enumerate()
+        .map(|(index, ch)| {
+            Span::styled(
+                ch.to_string(),
+                Style::default()
+                    .fg(anim::blend(from, to, index as f32 / width))
+                    .add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect()
 }
 
 /// The CPU and memory meter row.
@@ -215,7 +244,7 @@ fn meter(
                 .peak(peak)
                 .fill_color(color)
                 .peak_color(theme.danger)
-                .empty_color(theme.border)
+                .empty_color(theme.track())
                 .into_line(METER_WIDTH)
                 .spans,
         );

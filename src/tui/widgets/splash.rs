@@ -284,7 +284,7 @@ fn render_large(f: &mut Frame, theme: Theme, frame: u64, total_frames: u64, show
         .borders(Borders::LEFT)
         .border_type(BorderType::Thick)
         .border_style(Style::default().fg(rail_color))
-        .style(Style::default().bg(anim::blend(theme.bg, theme.border, 0.34)))
+        .style(Style::default().bg(theme.surface_hi()))
         .title(Line::styled(
             t!("tui.splash.studio_link_title").into_owned(),
             Style::default()
@@ -475,7 +475,7 @@ fn progress_line(progress: f32, theme: Theme, frame: u64, rich: bool) -> Line<'s
             };
             spans.push(Span::styled(cursor, Style::default().fg(theme.info)));
         } else {
-            spans.push(Span::styled("░", Style::default().fg(theme.border)));
+            spans.push(Span::styled("░", Style::default().fg(theme.track())));
         }
     }
     spans.push(Span::styled(

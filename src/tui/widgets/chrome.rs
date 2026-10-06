@@ -44,6 +44,10 @@ pub fn bordered<'a>(
             .borders(Borders::ALL)
             .border_type(border_type)
             .border_style(Style::default().fg(border_color))
+            // Chrome rows are cards too: the same lifted surface the
+            // selectable panels get, so the whole screen sits on one
+            // backdrop.
+            .style(Style::default().bg(model.theme.surface()))
             .title(title),
         model,
     )
@@ -251,6 +255,95 @@ pub fn ratio_bar(model: &TuiModel, ratio: Option<f64>, width: usize) -> String {
         .collect()
 }
 
+/// The eighth-block glyphs, lowest fill first, for sub-cell meter precision.
+const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// An inverted pill: ` text ` in a readable neutral on a solid `color`, bold.
+/// The calling convention for "this is a state, not a sentence" — broadcast
+/// badges, log levels, selected completions.
+///
+/// With the advanced UI off there is no guarantee the terminal can paint the
+/// fill readably, so the badge degrades to bracketed colored text.
+pub fn badge(model: &TuiModel, text: &str, color: Color) -> Span<'static> {
+    if model.advanced_ui {
+        Span::styled(
+            format!(" {text} "),
+            Style::default()
+                .fg(model.theme.on_color(color))
+                .bg(color)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            format!("[{text}]"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )
+    }
+}
+
+/// A horizontal meter with sub-cell precision: the fill runs on eighth-block
+/// glyphs, tinted cell-by-cell along the `from` → `to` gradient, against the
+/// theme's track color. `None` (nothing measured) draws a bare track so the
+/// row keeps its width. Falls back to [`ratio_bar`] in a single span when the
+/// advanced UI is off.
+pub fn meter(
+    model: &TuiModel,
+    ratio: Option<f64>,
+    width: usize,
+    from: Color,
+    to: Color,
+) -> Vec<Span<'static>> {
+    let theme = model.theme;
+    if !model.advanced_ui {
+        return vec![Span::styled(
+            ratio_bar(model, ratio, width),
+            Style::default().fg(to),
+        )];
+    }
+    if width == 0 {
+        return Vec::new();
+    }
+    let Some(ratio) = ratio else {
+        return vec![Span::styled(
+            EIGHTHS[0].to_string().repeat(width),
+            Style::default().fg(theme.track()),
+        )];
+    };
+    let ratio = ratio.clamp(0.0, 1.0);
+    let mut spans = Vec::with_capacity(width);
+    for index in 0..width {
+        // Where this cell sits in the bar, 0..1 — the fill level at its left
+        // edge and at its right.
+        let start = index as f64 / width as f64;
+        let end = (index + 1) as f64 / width as f64;
+        let position = if width > 1 {
+            index as f32 / (width - 1) as f32
+        } else {
+            0.0
+        };
+        if ratio >= end {
+            spans.push(Span::styled(
+                EIGHTHS[8].to_string(),
+                Style::default().fg(anim::blend(from, to, position)),
+            ));
+        } else if ratio <= start {
+            spans.push(Span::styled(
+                EIGHTHS[0].to_string(),
+                Style::default().fg(theme.track()),
+            ));
+        } else {
+            // The boundary cell: an eighth-block for the fractional fill,
+            // colored where the fill ends.
+            let fraction = ((ratio - start) / (end - start) * 8.0).round() as usize;
+            spans.push(Span::styled(
+                EIGHTHS[fraction.clamp(1, 8)].to_string(),
+                Style::default().fg(anim::blend(from, to, position)),
+            ));
+        }
+    }
+    spans
+}
+
 /// Shared panel chrome: rounded inactive borders, a heavier focused frame,
 /// animated gradient headings, a count badge, and a dim keyboard hint.
 pub fn panel<'a>(
@@ -292,20 +385,29 @@ pub fn panel_badged<'a>(
     // emoji in two cells, making a single following space appear collapsed.
     let title_text = format!(" {icon}  {label} ");
     let mut title_spans = heading(model, title_text, theme.accent, theme.accent_alt).spans;
+    // The count rides the focus state: a focused panel's badge lights up in
+    // the accent, an unfocused one's sits on the meter track — so the chrome
+    // itself says where the keyboard is, even before the border registers.
+    let count_bg = if focused && model.advanced_ui {
+        theme.gradient(0.25)
+    } else {
+        theme.track()
+    };
+    let count_fg = if focused && model.advanced_ui {
+        theme.on_color(count_bg)
+    } else {
+        theme.muted
+    };
     title_spans.push(Span::styled(
         format!(" {count:02} "),
         Style::default()
-            .fg(theme.highlight_fg)
-            .bg(theme.highlight_bg)
+            .fg(count_fg)
+            .bg(count_bg)
             .add_modifier(Modifier::BOLD),
     ));
     if let Some(badge) = badge {
-        title_spans.push(Span::styled(
-            format!("  {badge}"),
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ));
+        title_spans.push(Span::raw(" "));
+        title_spans.push(self_badge(model, badge));
     }
     if !hint.is_empty() {
         title_spans.push(Span::styled(
@@ -319,8 +421,17 @@ pub fn panel_badged<'a>(
         .borders(Borders::ALL)
         .border_type(border_type)
         .border_style(Style::default().fg(border_color))
+        // The panel is a card: fill it with the lifted surface so it sits on
+        // the backdrop rather than being cut out of it.
+        .style(Style::default().bg(theme.surface()))
         .title(Line::from(title_spans));
     ascii_aware(block, model)
+}
+
+/// The warning pill a panel's title carries when its list is filtered —
+/// inverted in the advanced UI, bracketed where it is not.
+fn self_badge(model: &TuiModel, text: &str) -> Span<'static> {
+    self::badge(model, text, model.theme.warning)
 }
 
 /// Draw `block` into `area` and hand back the interior left to fill, or
@@ -492,5 +603,72 @@ mod tests {
     #[test]
     fn format_duration_formats_hours_when_long() {
         assert_eq!(format_duration(Some(3_661_000)), "01:01:01");
+    }
+
+    fn advanced_model() -> TuiModel {
+        TuiModel::with_appearance(TuiModel::default().theme, true, true)
+    }
+
+    #[test]
+    fn badge_is_an_inverted_pill_in_the_advanced_ui() {
+        let model = advanced_model();
+        let pill = badge(&model, "LIVE", model.theme.danger);
+        assert_eq!(pill.content, " LIVE ");
+        assert_eq!(pill.style.bg, Some(model.theme.danger));
+        assert!(pill.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn badge_degrades_to_brackets_without_the_advanced_ui() {
+        let model = TuiModel::with_appearance(TuiModel::default().theme, false, false);
+        let pill = badge(&model, "LIVE", model.theme.danger);
+        assert_eq!(pill.content, "[LIVE]");
+        assert_eq!(pill.style.bg, None);
+        assert_eq!(pill.style.fg, Some(model.theme.danger));
+    }
+
+    #[test]
+    fn meter_is_fixed_width_and_uses_the_track_for_empty_cells() {
+        let model = advanced_model();
+        let spans = meter(
+            &model,
+            Some(0.5),
+            10,
+            model.theme.success,
+            model.theme.danger,
+        );
+        assert_eq!(spans.len(), 10);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.chars().count(), 10);
+        assert!(text.starts_with('█'));
+        // The tail sits on the track color, not on the gradient.
+        assert_eq!(spans[9].style.fg, Some(model.theme.track()));
+    }
+
+    #[test]
+    fn meter_marks_the_fractional_boundary_cell() {
+        let model = advanced_model();
+        // 0.55 of 10 cells: five full cells, then a half cell.
+        let spans = meter(&model, Some(0.55), 10, model.theme.info, model.theme.info);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.chars().take(5).filter(|c| *c == '█').count(), 5);
+        assert_eq!(text.chars().nth(5), Some('▄'));
+    }
+
+    #[test]
+    fn meter_draws_a_bare_track_when_nothing_is_measured() {
+        let model = advanced_model();
+        let spans = meter(&model, None, 6, model.theme.info, model.theme.info);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "      ");
+        assert_eq!(spans[0].style.fg, Some(model.theme.track()));
+    }
+
+    #[test]
+    fn meter_falls_back_to_the_ascii_bar() {
+        let model = TuiModel::with_appearance(TuiModel::default().theme, false, false);
+        let spans = meter(&model, Some(0.5), 10, model.theme.info, model.theme.info);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "#####-----");
     }
 }

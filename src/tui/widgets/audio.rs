@@ -112,8 +112,10 @@ fn zone_color(db: f32, theme: Theme) -> Color {
 /// terminal colors (and `Color::Reset` for its background), which have no
 /// channels to mix, so those fall back to the plain border color.
 fn unlit_color(zone: Color, theme: Theme) -> Color {
+    // Blend toward the strip's surface fill, not the backdrop, so the unlit
+    // cells sit flush with the card they are drawn on.
     match (zone, theme.bg) {
-        (Color::Rgb(..), Color::Rgb(..)) => anim::blend(zone, theme.bg, 0.72),
+        (Color::Rgb(..), Color::Rgb(..)) => anim::blend(zone, theme.surface(), 0.72),
         _ => theme.border,
     }
 }
@@ -289,6 +291,8 @@ fn render_strip(
         .borders(Borders::ALL)
         .border_type(border_type)
         .border_style(Style::default().fg(border_color))
+        // Each strip is its own card on the pane's surface.
+        .style(Style::default().bg(theme.surface()))
         .title_top(Line::from(Span::styled(format!(" {name} "), name_style)).centered())
         .title_bottom(footer_line(input, model).centered());
     let block = chrome::ascii_aware(block, model);

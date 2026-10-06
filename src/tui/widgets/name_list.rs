@@ -103,11 +103,21 @@ pub fn row_prefix(
     } else {
         model.symbol("◇", " ")
     };
-    [
+    // The row number is a key, not prose, so it reads as a small chip sitting
+    // on the meter track rather than as more text.
+    let index_badge = if model.advanced_ui {
+        Span::styled(
+            format!(" {:02} ", index + 1),
+            Style::default().fg(theme.muted).bg(theme.track()),
+        )
+    } else {
         Span::styled(
             format!(" {:02} ", index + 1),
             Style::default().fg(theme.muted),
-        ),
+        )
+    };
+    [
+        index_badge,
         Span::styled(
             format!("{marker} "),
             Style::default().fg(if active { active_color } else { theme.muted }),

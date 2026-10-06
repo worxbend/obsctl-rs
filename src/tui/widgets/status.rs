@@ -110,9 +110,6 @@ fn block_form(states: &[BroadcastState], model: &TuiModel, pulse: f32) -> Vec<Li
     let mut rows: [Vec<Span<'static>>; spinner::BLOCK_HEIGHT] =
         std::array::from_fn(|_| Vec::with_capacity(states.len() * 2));
     for (index, state) in states.iter().enumerate() {
-        let style = Style::default()
-            .fg(color(*state, model.theme, pulse))
-            .add_modifier(Modifier::BOLD);
         for (row, cells) in rows
             .iter_mut()
             .zip(spinner::block_word(state.label(), fill))
@@ -120,7 +117,7 @@ fn block_form(states: &[BroadcastState], model: &TuiModel, pulse: f32) -> Vec<Li
             if index > 0 {
                 row.push(Span::raw(" ".repeat(WORD_GAP)));
             }
-            row.push(Span::styled(cells, style));
+            row.extend(word_spans(&cells, *state, model, pulse));
         }
     }
 
@@ -135,6 +132,50 @@ fn block_form(states: &[BroadcastState], model: &TuiModel, pulse: f32) -> Vec<Li
         StateLineForm::UnderBlockWord,
     ));
     lines
+}
+
+/// One row of one block-font word, as spans.
+///
+/// With the advanced UI on, the word is painted left to right along a
+/// two-hue ramp anchored on the state's own pulsing color — the letters read
+/// as one gradient object rather than a flat stamp. Without truecolor the
+/// word stays a single bold span in the state color, the same hue told
+/// without channels to blend.
+fn word_spans(
+    cells: &str,
+    state: BroadcastState,
+    model: &TuiModel,
+    pulse: f32,
+) -> Vec<Span<'static>> {
+    let theme = model.theme;
+    let base = color(state, theme, pulse);
+    if !model.advanced_ui {
+        return vec![Span::styled(
+            cells.to_string(),
+            Style::default().fg(base).add_modifier(Modifier::BOLD),
+        )];
+    }
+    // The ramp drifts with the pulse, so the word shimmers instead of sitting
+    // still: the two endpoints trade places as the broadcast breathes.
+    let toward = match state {
+        BroadcastState::Live => theme.warning,
+        BroadcastState::Rec => theme.danger,
+        BroadcastState::Idle => theme.info,
+    };
+    let width = cells.chars().count().max(1) as f32;
+    cells
+        .chars()
+        .enumerate()
+        .map(|(index, ch)| {
+            let t = (index as f32 / width + pulse * 0.35).clamp(0.0, 1.0);
+            Span::styled(
+                ch.to_string(),
+                Style::default()
+                    .fg(anim::blend(base, toward, t * 0.6))
+                    .add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect()
 }
 
 /// Where a [`state_line`] is going, which decides how it is punctuated.

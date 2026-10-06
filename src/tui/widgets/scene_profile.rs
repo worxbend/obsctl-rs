@@ -56,7 +56,8 @@ pub fn render(f: &mut Frame, area: Rect, model: &TuiModel) -> (Rect, usize) {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.border_focus))
-            .style(Style::default().bg(theme.bg))
+            // A modal floats above the panels it covers: raised overlay fill.
+            .style(Style::default().bg(theme.surface_hi()))
             .title(chrome::heading(
                 model,
                 title(model, editor.stage, editor.editing.as_deref()),

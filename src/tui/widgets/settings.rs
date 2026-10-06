@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
 };
@@ -79,10 +79,9 @@ fn render_theme_list(f: &mut Frame, area: Rect, model: &TuiModel) -> usize {
         .into_owned(),
     );
 
-    let highlight_style = Style::default()
-        .bg(theme.highlight_bg)
-        .fg(theme.highlight_fg)
-        .add_modifier(Modifier::BOLD);
+    // The same blended tint the dashboard lists use, so selection reads
+    // identically in every list of the app.
+    let highlight_style = theme.selection_style(true);
 
     let mut state = ListState::default();
     state.select(Some(model.settings_cursor));
