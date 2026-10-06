@@ -611,6 +611,11 @@ Type `:` to open the palette, then use any of:
 the same command. `ui.command_palette_prefix` picks which one `<leader>` mappings and
 mouse clicks insert.
 
+Targets with spaces are quoted with either quote style — `:scene "Cam 1"` and
+`:scene 'Cam 1'` are the same command — and `Tab` completion quotes such names for
+you. `:scene 2` (or `:scene 02`) switches to a scene by its row number in the
+dashboard's scene list.
+
 ---
 
 ## 🔤 Alias Resolution
@@ -621,6 +626,7 @@ Target names resolve in this order:
 3. Exact OBS name
 4. Case-insensitive alias
 5. Case-insensitive OBS name
+6. A bare number (`:scene 2`) — the 1-based row in the scene list (scenes only)
 
 Ambiguous matches fail without sending any OBS request.
 

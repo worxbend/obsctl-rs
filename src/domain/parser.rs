@@ -458,8 +458,12 @@ fn parse_volume_percent(value: &str) -> Result<u8> {
     Ok(parsed as u8)
 }
 
-/// Split a command line into arguments, honouring double quotes and
-/// backslash escapes inside them.
+/// Split a command line into arguments, honouring quotes and backslash
+/// escapes inside them.
+///
+/// Both quote styles work — `"Cam 1"` and `'Cam 1'` name the same scene — and
+/// one style is literal inside the other, so a scene called `Cam "A"` can be
+/// written `'Cam "A"'`. An escape (`\"`) works inside either.
 ///
 /// Each token records whether any quote character took part in producing it,
 /// which is the one thing about the original spelling a later rule needs; see
@@ -469,24 +473,29 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
     let mut current = String::new();
     let mut current_quoted = false;
     let mut chars = input.chars().peekable();
-    let mut in_quotes = false;
+    // Which quote character is open, if any: the other style stays literal
+    // while it is.
+    let mut open_quote: Option<char> = None;
 
     while let Some(c) = chars.next() {
         match c {
-            '"' if in_quotes => {
-                in_quotes = false;
-                current_quoted = true;
-            }
-            '"' => {
-                in_quotes = true;
-                current_quoted = true;
-            }
-            '\\' if in_quotes => {
+            '"' | '\'' => match open_quote {
+                Some(q) if q == c => {
+                    open_quote = None;
+                    current_quoted = true;
+                }
+                Some(_) => current.push(c),
+                None => {
+                    open_quote = Some(c);
+                    current_quoted = true;
+                }
+            },
+            '\\' if open_quote.is_some() => {
                 if let Some(next) = chars.next() {
                     current.push(next);
                 }
             }
-            ' ' | '\t' if !in_quotes => {
+            ' ' | '\t' if open_quote.is_none() => {
                 if !current.is_empty() {
                     tokens.push(Token {
                         text: std::mem::take(&mut current),
@@ -498,7 +507,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
         }
     }
 
-    if in_quotes {
+    if open_quote.is_some() {
         return Err(ObsctlError::CommandParseError(
             "unterminated quote".to_string(),
         ));
@@ -816,6 +825,44 @@ mod tests {
     #[test]
     fn parse_unterminated_quote() {
         assert!(parse(r#"scene "Main"#).is_err());
+    }
+
+    /// Both quote styles name the same scene; the one not open stays literal,
+    /// so a name containing a double quote can be written with single quotes.
+    #[test]
+    fn parse_single_quoted_target() {
+        assert_eq!(
+            parse(":scene 'Cam 1'").unwrap(),
+            Command::SetScene {
+                target: "Cam 1".to_string()
+            }
+        );
+        assert_eq!(
+            parse("scene 'Cam \"A\"'").unwrap(),
+            Command::SetScene {
+                target: "Cam \"A\"".to_string()
+            }
+        );
+        // And an escaped quote survives inside single quotes too.
+        assert_eq!(
+            parse("scene 'Cam \\'1\\''").unwrap(),
+            Command::SetScene {
+                target: "Cam '1'".to_string()
+            }
+        );
+    }
+
+    /// Unterminated quotes fail in either style.
+    #[test]
+    fn parse_unterminated_single_quote() {
+        assert!(parse("scene 'Main").is_err());
+    }
+
+    /// The quoted-percentage rule does not depend on which quote style the
+    /// user picked.
+    #[test]
+    fn parse_volume_rejects_a_single_quoted_percentage() {
+        assert!(parse("vol mic '70'").is_err());
     }
 
     #[test]

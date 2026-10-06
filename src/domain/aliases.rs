@@ -143,6 +143,21 @@ fn resolve_with<'a>(
         }
     }
 
+    // A bare number names a row: the dashboard numbers its scene list from 1,
+    // and `:scene 2` (or `:scene 02`) is how a user answers that numbering.
+    // It runs last, so a scene literally named `2` still wins by name, and it
+    // is scenes-only — the audio matrix numbers nothing, so an index there
+    // would point at a strip the user cannot see counted.
+    if kind == ResourceKind::Scene
+        && !trimmed_target.is_empty()
+        && trimmed_target.chars().all(|c| c.is_ascii_digit())
+        && let Ok(index) = trimmed_target.parse::<usize>()
+        && index >= 1
+        && let Some(entry) = entries.get(index - 1)
+    {
+        return Ok(entry);
+    }
+
     Err(kind.not_found(target.to_string()))
 }
 
@@ -222,6 +237,54 @@ mod tests {
         assert!(matches!(
             resolve("Other", &entries),
             Err(ObsctlError::SceneNotFound(_))
+        ));
+    }
+
+    /// The dashboard numbers its scene list from 1, and `:scene 2` answers
+    /// that numbering directly.
+    #[test]
+    fn a_bare_number_names_the_row() {
+        let entries = vec![
+            entry("Main", None, None),
+            entry("Cam 1", None, None),
+            entry("BRB", None, None),
+        ];
+        assert_eq!(resolve("1", &entries).unwrap(), &entries[0]);
+        assert_eq!(resolve("2", &entries).unwrap(), &entries[1]);
+        // Leading zeros are the same row, spelled the way the list pads them.
+        assert_eq!(resolve("03", &entries).unwrap(), &entries[2]);
+    }
+
+    #[test]
+    fn an_out_of_range_row_number_is_not_found() {
+        let entries = vec![entry("Main", None, None)];
+        assert!(matches!(
+            resolve("2", &entries),
+            Err(ObsctlError::SceneNotFound(_))
+        ));
+        assert!(matches!(
+            resolve("0", &entries),
+            Err(ObsctlError::SceneNotFound(_))
+        ));
+    }
+
+    /// A scene literally named `2` is still reachable: exact name matching
+    /// runs before the row-number fallback.
+    #[test]
+    fn a_numeric_scene_name_wins_over_the_row_number() {
+        // "2" is row 1, so an index-first resolver would return `Other`.
+        let entries = vec![entry("2", None, None), entry("Other", None, None)];
+        assert_eq!(resolve("2", &entries).unwrap(), &entries[0]);
+    }
+
+    /// The audio matrix numbers nothing, so an index there must not silently
+    /// point at an uncounted strip.
+    #[test]
+    fn row_numbers_are_scenes_only() {
+        let entries = vec![entry("Mic", None, None)];
+        assert!(matches!(
+            resolve_audio("1", &entries),
+            Err(ObsctlError::AudioInputNotFound(_))
         ));
     }
 

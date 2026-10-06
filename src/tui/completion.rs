@@ -64,7 +64,10 @@ fn complete_argument(
     let cmd = format!("{prefix}{typed_cmd}");
     let cmd_key = typed_cmd.to_ascii_lowercase();
     let arg_prefix = raw_arg_prefix.trim_start();
-    let arg_lower = arg_prefix.to_ascii_lowercase();
+    // A typed opening quote is punctuation, not part of the name being
+    // filtered: `:scene "C` is still completing `C`.
+    let filter = arg_prefix.strip_prefix(['"', '\'']).unwrap_or(arg_prefix);
+    let arg_lower = filter.to_ascii_lowercase();
 
     // Each arm answers only "what could the user be naming here?"; the
     // filtering, sorting, and re-attaching of the command word are the same
@@ -92,11 +95,28 @@ fn complete_argument(
         .into_iter()
         .filter(|n| n.to_ascii_lowercase().starts_with(arg_lower.as_str()))
         .collect();
-    sort_candidates(&mut candidates, arg_prefix);
+    sort_candidates(&mut candidates, filter);
     candidates
         .into_iter()
-        .map(|c| format!("{cmd} {c}"))
+        .map(|c| format!("{cmd} {}", quote_argument(&c)))
         .collect()
+}
+
+/// A candidate is written back into the command line verbatim (Tab and the
+/// arrow keys replace the input with it), so a name containing a space or a
+/// quote has to arrive quoted: `:scene Cam 1` parses as two arguments and
+/// fails, while `:scene "Cam 1"` names the scene. Inner quotes and
+/// backslashes are escaped the way the parser's tokenizer reads them.
+fn quote_argument(name: &str) -> String {
+    if name
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'))
+    {
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    } else {
+        name.to_string()
+    }
 }
 
 /// Both spellings the user may type for one target: the name OBS uses, and
@@ -296,7 +316,9 @@ mod tests {
         let result = compute("/MUTE mic", &model);
         assert_eq!(
             result,
-            vec!["/MUTE mic".to_string(), "/MUTE Mic Aux".to_string()]
+            // The spaced name arrives quoted: cycled into the input line
+            // verbatim, `Mic Aux` bare would parse as two arguments.
+            vec!["/MUTE mic".to_string(), "/MUTE \"Mic Aux\"".to_string()]
         );
     }
 
@@ -306,7 +328,7 @@ mod tests {
         let result = compute("/volume mic", &model);
         assert_eq!(
             result,
-            vec!["/volume mic".to_string(), "/volume Mic Aux".to_string()]
+            vec!["/volume mic".to_string(), "/volume \"Mic Aux\"".to_string()]
         );
     }
 
@@ -323,7 +345,7 @@ mod tests {
         let result = compute("/mute mic", &model);
         assert_eq!(
             result,
-            vec!["/mute mIc".to_string(), "/mute Mic Aux".to_string()]
+            vec!["/mute mIc".to_string(), "/mute \"Mic Aux\"".to_string()]
         );
     }
 
@@ -348,5 +370,66 @@ mod tests {
         let model = make_model(vec![], vec![]);
         let result = compute("/stream something", &model);
         assert!(result.is_empty());
+    }
+
+    /// A name with a space completes quoted, because the candidate replaces
+    /// the input line verbatim when cycled to — bare, it would parse as two
+    /// arguments and the command would fail.
+    #[test]
+    fn spaced_names_complete_quoted() {
+        let model = make_model(vec![scene("Cam 1", None), scene("Main", None)], vec![]);
+        assert_eq!(
+            compute(":scene C", &model),
+            vec![":scene \"Cam 1\"".to_string()]
+        );
+    }
+
+    /// A typed opening quote is punctuation: it neither filters anything out
+    /// nor survives into the candidate.
+    #[test]
+    fn a_typed_quote_still_filters_by_the_name() {
+        let model = make_model(vec![scene("Cam 1", None), scene("Main", None)], vec![]);
+        assert_eq!(
+            compute(":scene \"C", &model),
+            vec![":scene \"Cam 1\"".to_string()]
+        );
+        assert_eq!(
+            compute(":scene 'C", &model),
+            vec![":scene \"Cam 1\"".to_string()]
+        );
+    }
+
+    /// Every candidate the palette offers must be a command line the parser
+    /// accepts — a completion that fails to parse is how `:scene Cam 1` used
+    /// to reach the daemon as an arity error.
+    #[test]
+    fn every_offered_completion_parses() {
+        let model = make_model(
+            vec![scene("Cam 1", None), scene("Cam \"A\"", None)],
+            vec![audio("Mic Aux", None)],
+        );
+        for input in [":scene ", ":mute "] {
+            for candidate in compute(input, &model) {
+                assert!(
+                    parser::parse(&candidate).is_ok(),
+                    "offered completion `{candidate}` does not parse"
+                );
+            }
+        }
+    }
+
+    /// Names that need quoting are escaped the way the tokenizer reads them
+    /// back: a quote and a backslash round-trip through the parser.
+    #[test]
+    fn quoted_candidates_escape_inner_quotes_and_backslashes() {
+        let model = make_model(vec![scene("Cam \"A\"", None)], vec![]);
+        let candidates = compute(":scene ", &model);
+        assert_eq!(candidates, vec![":scene \"Cam \\\"A\\\"\"".to_string()]);
+        assert_eq!(
+            parser::parse(&candidates[0]).unwrap(),
+            crate::domain::command::Command::SetScene {
+                target: "Cam \"A\"".to_string()
+            }
+        );
     }
 }
