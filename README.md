@@ -156,7 +156,9 @@ Override: `OBSCTL_CONFIG=/path/to/config.yml` or `--config PATH`
 version: 1
 server:
   socket_path:           # optional; defaults to $XDG_RUNTIME_DIR/obsctl/obsctl.sock
+  pid_file:              # preserved for Crystal obsctl; unused by the Rust daemon
   allow_remote_shutdown: false
+  start_embedded_if_missing: true # preserved for Crystal obsctl; unused by Rust
 connection:
   host: "127.0.0.1"
   port: 4455
@@ -172,7 +174,7 @@ reconnect:
   jitter_ms: 250
 ui:
   refresh_interval_ms: 250
-  command_palette_prefix: ":"   # ":" (vim-style) or "/" — both keys always work
+  command_palette_prefix: "/"   # "/" or ":" (vim-style) — both keys always work
   mouse: true                   # false restores the terminal's own text selection
   advanced_ui: true
   show_icons: true
@@ -200,6 +202,21 @@ keymap:
 ```
 
 > 🔒 **Security:** never set `connection.password` in plain text. Use `password_env` to point to an environment variable name.
+
+Configs can be shared with the Crystal `obsctl` implementation. Rust preserves
+`server.pid_file`, `server.start_embedded_if_missing`, and `audio.inputs[].kind`
+when saving, although these fields do not affect Rust runtime behavior. Both
+implementations preserve scene profiles, custom palettes, keymap overrides, and
+`ui.mouse`; theme IDs outside the common set and keymap overrides may behave
+differently between dashboards. An omitted `version` defaults to `1`. Omitting
+`connection.password_env` uses `OBS_WEBSOCKET_PASSWORD`; an explicit empty or
+null value disables environment lookup. Top-level `reconnect` wins over legacy
+`connection.reconnect`, even when the top-level section is empty.
+When both password fields are set, a non-empty environment value takes priority;
+an absent or empty environment value uses the plaintext fallback.
+Rust retains its stricter validation of endpoints, resource names, and numeric
+limits. To check config round trips with the sibling Crystal checkout installed,
+run `cargo test --locked --test config_compatibility -- --include-ignored`.
 
 ### Hiding scenes and scene profiles
 

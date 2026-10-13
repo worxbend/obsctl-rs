@@ -4,7 +4,7 @@ use crate::domain::names::normalized_name;
 use crate::domain::scene_profiles::{ActiveSceneProfile, SceneVisibility};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "ConfigDocument")]
 pub struct Config {
     pub version: u32,
     #[serde(default)]
@@ -31,6 +31,55 @@ pub struct Config {
     pub audio: AudioConfig,
     #[serde(default)]
     pub keymap: KeymapConfig,
+}
+
+// Keep presence information while parsing: the canonical reconnect section
+// wins even when it explicitly contains the defaults (or an empty mapping).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigDocument {
+    #[serde(default = "default_version")]
+    version: u32,
+    #[serde(default)]
+    server: ServerConfig,
+    #[serde(default)]
+    connection: ConnectionConfig,
+    #[serde(default)]
+    reconnect: Option<ReconnectConfig>,
+    #[serde(default)]
+    ui: UiConfig,
+    #[serde(default)]
+    scenes: Vec<SceneConfig>,
+    #[serde(default)]
+    scene_profiles: Vec<SceneProfileConfig>,
+    #[serde(default)]
+    active_scene_profile: Option<String>,
+    #[serde(default)]
+    audio: AudioConfig,
+    #[serde(default)]
+    keymap: KeymapConfig,
+}
+
+impl From<ConfigDocument> for Config {
+    fn from(mut document: ConfigDocument) -> Self {
+        let legacy_reconnect = document.connection.reconnect.take();
+        Self {
+            version: document.version,
+            server: document.server,
+            connection: document.connection,
+            reconnect: document.reconnect.or(legacy_reconnect).unwrap_or_default(),
+            ui: document.ui,
+            scenes: document.scenes,
+            scene_profiles: document.scene_profiles,
+            active_scene_profile: document.active_scene_profile,
+            audio: document.audio,
+            keymap: document.keymap,
+        }
+    }
+}
+
+fn default_version() -> u32 {
+    1
 }
 
 impl Default for Config {
@@ -85,12 +134,27 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
     pub socket_path: Option<String>,
+    /// Preserved for Crystal obsctl compatibility; unused by the Rust daemon.
+    pub pid_file: Option<String>,
     #[serde(default)]
     pub allow_remote_shutdown: bool,
+    /// Preserved for Crystal obsctl compatibility; Rust startup is CLI-driven.
+    pub start_embedded_if_missing: bool,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: None,
+            pid_file: None,
+            allow_remote_shutdown: false,
+            start_embedded_if_missing: true,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -98,6 +162,7 @@ pub struct ServerConfig {
 pub struct ConnectionConfig {
     pub host: String,
     pub port: u16,
+    #[serde(deserialize_with = "deserialize_password_env")]
     pub password_env: String,
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
@@ -105,6 +170,13 @@ pub struct ConnectionConfig {
     /// Legacy field: `connection.reconnect` — migrated to top-level `reconnect` on load.
     #[serde(default, skip_serializing)]
     pub reconnect: Option<ReconnectConfig>,
+}
+
+fn deserialize_password_env<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    // Missing uses ConnectionConfig::default; explicit null disables env auth.
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl std::fmt::Debug for ConnectionConfig {
@@ -195,7 +267,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             refresh_interval_ms: 250,
-            command_palette_prefix: ":".to_string(),
+            command_palette_prefix: crate::domain::parser::DEFAULT_PALETTE_PREFIX.to_string(),
             mouse: true,
             advanced_ui: true,
             show_icons: true,
@@ -255,13 +327,31 @@ pub struct AudioConfig {
     pub inputs: Vec<AudioInputConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioInputConfig {
     pub name: String,
     pub alias: Option<String>,
     pub shortcut: Option<String>,
+    #[serde(default = "default_audio_kind")]
+    pub kind: String,
     #[serde(default)]
     pub stale: bool,
+}
+
+fn default_audio_kind() -> String {
+    "input".to_string()
+}
+
+impl Default for AudioInputConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            alias: None,
+            shortcut: None,
+            kind: default_audio_kind(),
+            stale: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

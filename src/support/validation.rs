@@ -82,7 +82,6 @@ pub(crate) mod test_env {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PasswordConfigError {
-    ConflictingPasswordSources,
     PlaintextPasswordHasControlCharacters,
     PlaintextPasswordTooLong,
     PasswordEnvError(ValidationError),
@@ -114,9 +113,6 @@ impl fmt::Display for ValidationError {
 impl PasswordConfigError {
     pub fn config_field_message(&self) -> &'static str {
         match self {
-            Self::ConflictingPasswordSources => {
-                "connection.password and connection.password_env are mutually exclusive"
-            }
             Self::PlaintextPasswordHasControlCharacters => {
                 "connection.password must not contain control characters"
             }
@@ -258,10 +254,6 @@ pub fn resolve_connection_password(
     password: Option<&str>,
     password_env: &str,
 ) -> Result<Option<String>, PasswordConfigError> {
-    if password.is_some() && !password_env.is_empty() {
-        return Err(PasswordConfigError::ConflictingPasswordSources);
-    }
-
     if let Some(password) = password {
         if password.chars().count() > MAX_PASSWORD_LENGTH {
             return Err(PasswordConfigError::PlaintextPasswordTooLong);
@@ -269,14 +261,17 @@ pub fn resolve_connection_password(
 
         validate_no_control_characters(password)
             .map_err(|_| PasswordConfigError::PlaintextPasswordHasControlCharacters)?;
-        return Ok(Some(password.to_string()));
     }
 
-    if password_env.is_empty() {
-        return Ok(None);
+    if !password_env.is_empty()
+        && let Some(value) =
+            read_password_env_value(password_env).map_err(PasswordConfigError::PasswordEnvError)?
+        && !value.is_empty()
+    {
+        return Ok(Some(value));
     }
 
-    read_password_env_value(password_env).map_err(PasswordConfigError::PasswordEnvError)
+    Ok(password.map(str::to_string))
 }
 
 #[cfg(test)]
@@ -486,11 +481,27 @@ mod tests {
     }
 
     #[test]
-    fn password_config_error_message_for_conflicting_sources() {
-        assert_eq!(
-            PasswordConfigError::ConflictingPasswordSources.config_field_message(),
-            "connection.password and connection.password_env are mutually exclusive"
-        );
+    fn password_env_takes_priority_with_plaintext_as_fallback() {
+        for (env_value, expected) in [
+            (Some("env-secret"), Some("env-secret")),
+            (Some(""), Some("fallback")),
+            (None, Some("fallback")),
+        ] {
+            test_env::with_env_var("OBSCTL_TEST_PASSWORD_PRIORITY", env_value, || {
+                assert_eq!(
+                    resolve_connection_password(Some("fallback"), "OBSCTL_TEST_PASSWORD_PRIORITY")
+                        .unwrap()
+                        .as_deref(),
+                    expected
+                );
+            });
+        }
+        test_env::with_env_var("OBSCTL_TEST_PASSWORD_PRIORITY", Some(""), || {
+            assert_eq!(
+                resolve_connection_password(None, "OBSCTL_TEST_PASSWORD_PRIORITY").unwrap(),
+                None
+            );
+        });
     }
 
     #[test]

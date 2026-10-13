@@ -144,13 +144,16 @@ mod tests {
     }
 
     #[test]
-    fn from_config_rejects_plaintext_password_and_password_env() {
+    fn from_config_uses_plaintext_fallback_when_password_env_is_missing() {
         let cfg = ConnectionConfig {
             password: Some("direct".to_string()),
             password_env: "OBS_WEBSOCKET_PASSWORD".to_string(),
             ..ConnectionConfig::default()
         };
-        assert!(ObsConnectionParams::from_config(&cfg).is_err());
+        with_env_var("OBS_WEBSOCKET_PASSWORD", None, || {
+            let params = ObsConnectionParams::from_config(&cfg).unwrap();
+            assert_eq!(params.password.as_deref(), Some("direct"));
+        });
     }
 
     #[test]

@@ -32,18 +32,10 @@ pub fn load_with_warnings(path: &Path) -> Result<(Config, Vec<schema::Validation
             ObsctlError::Io(e)
         }
     })?;
-    let mut config: Config =
+    let config: Config =
         serde_yaml::from_str(&content).map_err(|e| ObsctlError::ConfigInvalid(e.to_string()))?;
-    migrate_legacy_reconnect(&mut config);
     let warnings = schema::validate(&config)?;
     Ok((config, warnings))
-}
-
-/// Migrate the legacy `connection.reconnect` field to the canonical top-level `reconnect`.
-fn migrate_legacy_reconnect(config: &mut Config) {
-    if let Some(legacy) = config.connection.reconnect.take() {
-        config.reconnect = legacy;
-    }
 }
 
 pub fn load_or_default(path: &Path) -> Result<Config> {
@@ -149,16 +141,10 @@ mod tests {
         );
     }
 
-    /// `server.pid_file` and `server.start_embedded_if_missing` used to be
-    /// declared in the config model even though nothing ever read them, and
-    /// they were documented in the README, so config files in the wild carry
-    /// them. They have been removed from the model; this pins that removing
-    /// them does not break those files. It works because only the top-level
-    /// `Config` struct is marked `#[serde(deny_unknown_fields)]` — the nested
-    /// `ServerConfig` is not, so serde's default behaviour of ignoring keys it
-    /// does not recognise applies inside the `server:` section.
+    /// Crystal's daemon options must survive a Rust load/save cycle even
+    /// though they do not affect the Rust daemon's lifecycle.
     #[test]
-    fn load_ignores_removed_server_keys() {
+    fn load_preserves_crystal_server_keys() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.yml");
         std::fs::write(
@@ -166,13 +152,15 @@ mod tests {
             "version: 1\n\
              server:\n\
              \x20 pid_file: /run/obsctl.pid\n\
-             \x20 start_embedded_if_missing: true\n\
+             \x20 start_embedded_if_missing: false\n\
              \x20 allow_remote_shutdown: true\n",
         )
         .unwrap();
 
         let config = load(&path).unwrap();
         assert!(config.server.allow_remote_shutdown);
+        assert_eq!(config.server.pid_file.as_deref(), Some("/run/obsctl.pid"));
+        assert!(!config.server.start_embedded_if_missing);
     }
 
     #[test]

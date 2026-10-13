@@ -11,8 +11,8 @@ use super::{
 pub const PALETTE_PREFIXES: [char; 2] = ['/', ':'];
 
 /// Prefix the TUI command line opens with unless `ui.command_palette_prefix`
-/// says otherwise. `:` mirrors vim's command prompt.
-pub const DEFAULT_PALETTE_PREFIX: char = ':';
+/// says otherwise. Shared with the Crystal implementation's config default.
+pub const DEFAULT_PALETTE_PREFIX: char = '/';
 
 /// Whether a configured `ui.command_palette_prefix` value is one of the
 /// supported prefixes, taken as a whole string.

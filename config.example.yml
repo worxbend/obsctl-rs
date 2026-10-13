@@ -10,13 +10,13 @@ server:
   # Unix socket path. Defaults to $XDG_RUNTIME_DIR/obsctl/obsctl.sock
   # socket_path: /run/user/1000/obsctl/obsctl.sock
 
-  # PID file written by the daemon (optional, not required for normal use).
+  # Crystal obsctl option, preserved on save; unused by the Rust daemon.
   # pid_file: /run/user/1000/obsctl/obsctl.pid
 
   # Allow 'obsctl shutdown-server' to stop the daemon remotely.
   allow_remote_shutdown: false
 
-  # Auto-start the daemon when a CLI/TUI command can't reach it.
+  # Crystal obsctl option, preserved on save; Rust startup is CLI-driven.
   start_embedded_if_missing: true
 
 # ── OBS WebSocket connection ───────────────────────────────────────────────────
@@ -64,6 +64,9 @@ ui:
 
   # Character that opens the command palette in the TUI.
   command_palette_prefix: "/"
+
+  # Set false to restore the terminal's own text selection.
+  mouse: true
 
   # Rich Unicode borders, meters, gradients, and animated splash art.
   # Set false for ASCII-only or limited TTYs. Enabled by default.

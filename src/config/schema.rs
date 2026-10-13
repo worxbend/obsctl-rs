@@ -676,11 +676,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_both_plaintext_password_and_password_env() {
+    fn accepts_plaintext_fallback_with_password_env() {
         let mut c = valid_config();
         c.connection.password = Some("secret".to_string());
         c.connection.password_env = "OBS_WEBSOCKET_PASSWORD".to_string();
-        assert!(validate(&c).is_err());
+        with_env_var("OBS_WEBSOCKET_PASSWORD", None, || {
+            let warnings = validate(&c).unwrap();
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.0.contains("plaintext"))
+            );
+            assert!(warnings.iter().all(|warning| !warning.0.contains("secret")));
+        });
     }
 
     #[test]

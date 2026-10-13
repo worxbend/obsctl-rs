@@ -252,12 +252,14 @@ mod tests {
                         alias: Some("mic".to_string()),
                         shortcut: Some("M".to_string()),
                         stale: false,
+                        ..Default::default()
                     },
                     AudioInputConfig {
                         name: "OldInput".to_string(),
                         alias: None,
                         shortcut: None,
                         stale: false,
+                        ..Default::default()
                     },
                 ],
             },
